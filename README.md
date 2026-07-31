@@ -77,6 +77,12 @@ For the lowest practical latency, enable the source application's low-latency VS
 
 True source-vblank capture would require a different, X11-specific presentation/timing path (for example X Present/DRI integration) and would still need to handle the independent MiSTer clock. Such a mode should remain an explicit latency/tearing tradeoff rather than replacing the current immediate XCB capture path by default.
 
+#### Running without raster correction
+
+Setting `syncRefresh` to `false` sends sync line zero and disables ACK-based raster deadline correction. It does not disable local modeline-rate pacing, capture backpressure, audio-before-video ordering, or status ACK collection. The local wait is relative and re-anchors after each completed cycle, so scheduler overshoot lengthens that cycle; the independent PC and MiSTer oscillator error is also left uncorrected. Phase drift and a moving or intermittent tear line are therefore expected over a long run.
+
+Use this mode to diagnose receiver/raster-feedback behavior or to opt out deliberately, not as the normal low-tearing configuration. An absolute cumulative PC-side deadline could prevent scheduler overshoot from accumulating, but it could not lock the PC clock to the MiSTer clock without raster feedback. Keep `syncRefresh` at its default `true` for normal streaming.
+
 ### Differences from the legacy Windows implementation
 
 This repository is a Linux replacement, not a cross-platform continuation of the removed WPF/DXGI application.
