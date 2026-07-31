@@ -29,6 +29,13 @@ size_t AudioRing::pop(int16_t* p, size_t n) {
   size_ -= real;
   return real;
 }
+size_t AudioRing::discard(size_t n) {
+  std::lock_guard<std::mutex> l(mutex_);
+  const size_t dropped = std::min(n, size_);
+  read_ = (read_ + dropped) % data_.size();
+  size_ -= dropped;
+  return dropped;
+}
 void AudioRing::reset() {
   std::lock_guard<std::mutex> l(mutex_);
   read_ = write_ = size_ = 0;

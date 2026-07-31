@@ -128,6 +128,13 @@ int main() {
   int16_t b[] = {1, 2, 3, 4, 5};
   CHECK(ring.push(b, 5) == 1);
   CHECK(ring.pop(o, 4) == 4 && o[0] == 2 && o[3] == 5);
+  int16_t c[] = {7, 8, 9, 10};
+  CHECK(ring.push(c, 4) == 0);
+  CHECK(ring.discard(2) == 2 && ring.size() == 2);
+  CHECK(ring.pop(o, 2) == 2 && o[0] == 9 && o[1] == 10);
+  CHECK(ring.discard(5) == 0 && ring.size() == 0);
+  CHECK(ring.push(c, 4) == 0 && ring.discard(9) == 4 && ring.size() == 0);
+  CHECK(ring.push(c, 2) == 0 && ring.pop(o, 2) == 2 && o[0] == 7);
   AudioPacer pacer(48000);
   uint64_t pacedValues = 0, totalNs = 0;
   for (int i = 0; i < 1000; ++i) {

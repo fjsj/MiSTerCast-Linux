@@ -315,9 +315,20 @@ class PulseCapture final : public IAudioCapture {
     int pulseError = 0;
     for (uint32_t candidate : {48000u, 44100u, 22050u}) {
       pa_sample_spec spec{PA_SAMPLE_S16LE, candidate, 2};
+      // Without an explicit fragment size the server picks its own, which on a
+      // sink monitor measured as 1.5 s: pa_simple_read blocked for 1.5 s and
+      // then returned 1.5 s of audio in back-to-back reads. That burst
+      // granularity, not the consumer servo, is what put audio a second or
+      // more behind video. Ask for one video frame's worth instead.
+      pa_buffer_attr attr;
+      attr.maxlength = uint32_t(-1);
+      attr.tlength = uint32_t(-1);
+      attr.prebuf = uint32_t(-1);
+      attr.minreq = uint32_t(-1);
+      attr.fragsize = pa_usec_to_bytes(10000, &spec);
       stream_ =
           pa_simple_new(nullptr, "MiSTerCast", PA_STREAM_RECORD, source.c_str(),
-                        "System output", &spec, nullptr, nullptr, &pulseError);
+                        "System output", &spec, nullptr, &attr, &pulseError);
       if (stream_) {
         rate_ = candidate;
         break;

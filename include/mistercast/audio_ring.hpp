@@ -9,6 +9,7 @@ class AudioRing {
   explicit AudioRing(size_t capacitySamples);
   size_t push(const int16_t*, size_t);  // returns samples dropped
   size_t pop(int16_t*, size_t);  // zero-fills underrun, returns real samples
+  size_t discard(size_t);        // drops oldest, returns samples dropped
   void reset();
   size_t size() const;
 

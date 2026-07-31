@@ -204,17 +204,15 @@ void StreamSession::renderLoop() {
   uint8_t field = 0;
   std::vector<uint8_t> rgb;
   std::vector<int16_t> audioSamples, audioSourceSamples;
-  bool firstAudio = true;
-  AudioPacer audioPacer(audio_->sampleRate());
-  if (config_.source.audio) {
-    audioSamples.reserve(32000);
-    const auto prebufferSamples = audio_->sampleRate() / 10;
-    const auto timeout =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
-    while (!stop_ && audioRing_.size() < prebufferSamples &&
-           std::chrono::steady_clock::now() < timeout)
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  }
+  const auto audioRate = audio_->sampleRate();
+  // Latency the consumer aims to keep buffered, the fine servo's dead band, and
+  // the backlog above which the servo gives up on nudging and resynchronises.
+  const size_t audioTargetValues = (size_t(audioRate) * 2 / 25) & ~size_t(1);
+  const size_t audioHysteresisValues = size_t(audioRate / 50) & ~size_t(1);
+  const size_t audioCeilingValues = audioTargetValues * 3;
+  bool audioStarted = false;
+  AudioPacer audioPacer(audioRate);
+  if (config_.source.audio) audioSamples.reserve(32000);
   auto audioClock = std::chrono::steady_clock::now();
   Frame f;
   bool haveFrame = false;
@@ -251,42 +249,60 @@ void StreamSession::renderLoop() {
       break;
     }
     if (config_.source.audio) {
-      auto now = std::chrono::steady_clock::now();
-      size_t count;
-      if (firstAudio) {
-        const auto lineNs =
-            uint64_t(std::llround(double(config_.modeline.hTotal) * 1000.0 /
-                                  config_.modeline.pixelClockMHz));
-        const auto cycleNs = lineNs * config_.modeline.vTotal /
-                             (config_.modeline.interlaced ? 2 : 1);
-        count = audioPacer.valuesDue(cycleNs, 32000);
-        firstAudio = false;
-        audioSamples.resize(count);
-        auto real = audioRing_.pop(audioSamples.data(), count);
-        audioUnderrun_ += count - real;
+      const auto now = std::chrono::steady_clock::now();
+      if (!transport_.misterAudioEnabled()) {
+        // The core has audio off, so sending would only waste bytes in the same
+        // UDP stream that carries video. Keep the ring drained and the clock
+        // current so that enabling audio later starts bounded rather than
+        // seconds behind.
+        audioRing_.discard(audioRing_.size());
+        audioPacer.reset(audioRate);
+        audioStarted = false;
+        audioClock = now;
       } else {
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           now - audioClock)
-                           .count();
-        count = audioPacer.valuesDue(uint64_t(std::max<int64_t>(elapsed, 0)),
-                                     32000);
-        const auto buffered = audioRing_.size();
-        const auto rate = audio_->sampleRate();
-        const auto targetValues = (size_t(rate) * 2 / 25) & ~size_t(1);
-        const auto hysteresisValues = size_t(rate / 50) & ~size_t(1);
-        const auto sourceCount = audioPacer.sourceValuesFor(
-            count, buffered, targetValues, hysteresisValues);
-        audioSourceSamples.resize(sourceCount);
-        auto real = audioRing_.pop(audioSourceSamples.data(), sourceCount);
-        audioUnderrun_ += sourceCount - real;
-        AudioPacer::conformStereo(audioSourceSamples.data(), sourceCount,
-                                  audioSamples, count);
-      }
-      audioClock = now;
-      if (count &&
-          !transport_.sendAudio(audioSamples.data(), audioSamples.size(), e)) {
-        fail({"audio", e, "Check the network and restart streaming."});
-        break;
+        // A sink monitor can deliver nothing for the first 1-3 seconds after
+        // connecting. Until real PCM has built up, send no audio at all: silence
+        // would be inserted for seconds and, worse, the pacer would count it as
+        // consumed and owe those samples, so the catch-up burst became permanent
+        // backlog. Waiting here instead would stall video for just as long.
+        // Prebuffering to exactly the steady-state target means the servo has
+        // its dead band available immediately and nothing has to be trimmed.
+        if (!audioStarted && audioRing_.size() >= audioTargetValues) {
+          audioStarted = true;
+          audioPacer.reset(audioRate);
+          audioClock = now;
+        }
+        if (!audioStarted) {
+          audioClock = now;
+        } else {
+          const auto elapsed = std::chrono::duration_cast<
+                                   std::chrono::nanoseconds>(now - audioClock)
+                                   .count();
+          const auto count = audioPacer.valuesDue(
+              uint64_t(std::max<int64_t>(elapsed, 0)), 32000);
+          auto buffered = audioRing_.size();
+          // The +-2 values per frame servo below is only strong enough for
+          // clock drift; against a real backlog it would need minutes. Once the
+          // buffer is far past target, drop the excess in one step so audio
+          // latency stays bounded instead of growing until the ring overruns.
+          if (buffered > audioCeilingValues) {
+            audioDropped_ += audioRing_.discard(buffered - audioTargetValues);
+            buffered = audioRing_.size();
+          }
+          const auto sourceCount = audioPacer.sourceValuesFor(
+              count, buffered, audioTargetValues, audioHysteresisValues);
+          audioSourceSamples.resize(sourceCount);
+          auto real = audioRing_.pop(audioSourceSamples.data(), sourceCount);
+          audioUnderrun_ += sourceCount - real;
+          AudioPacer::conformStereo(audioSourceSamples.data(), sourceCount,
+                                    audioSamples, count);
+          audioClock = now;
+          if (count && !transport_.sendAudio(audioSamples.data(),
+                                             audioSamples.size(), e)) {
+            fail({"audio", e, "Check the network and restart streaming."});
+            break;
+          }
+        }
       }
     }
     if (!transport_.sendFrame(number, field, rgb, e)) {
