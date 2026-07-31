@@ -69,6 +69,14 @@ The CLI reports the requested sync line, current raster line, sender/FPGA frame 
 
 Synchronization does not introduce a permanent full-frame buffer. Automatic mode deliberately keeps the 1.5 ms safety margin used by the upstream client. Manual frame delay changes sub-frame phase. ACK acquisition is bounded to 2 ms and is accounted inside the existing refresh-period wait.
 
+#### X11 source-display synchronization
+
+MiSTer raster feedback controls when MiSTerCast requests its next capture, but XCB image capture is not synchronized to the source monitor's vblank. The PC display and MiSTer therefore remain separate physical clocks. Their phase can drift until an XCB read overlaps a source presentation, producing an occasional source-side torn frame even when ACK timing and Ethernet delivery are healthy.
+
+For the lowest practical latency, enable the source application's low-latency VSync mode and keep its render queue at one frame if those controls are available. A compositor or application mode that uses double buffering can add anywhere from nearly zero to one source refresh of input latency depending on phase; triple buffering, prerendered-frame queues, and frame-generation features can add more. Cap the application close to the source monitor's actual refresh and avoid unbounded or multi-frame queues. If tearing is preferable to added source-side latency, leave application VSync off; MiSTerCast itself does not force it.
+
+True source-vblank capture would require a different, X11-specific presentation/timing path (for example X Present/DRI integration) and would still need to handle the independent MiSTer clock. Such a mode should remain an explicit latency/tearing tradeoff rather than replacing the current immediate XCB capture path by default.
+
 ### Differences from the legacy Windows implementation
 
 This repository is a Linux replacement, not a cross-platform continuation of the removed WPF/DXGI application.
