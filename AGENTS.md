@@ -2,6 +2,8 @@
 
 These instructions apply to the entire repository. MiSTerCast is Linux-only and targets Ubuntu 22.04 x86-64 under X11/Xorg. Do not reintroduce the removed Windows, WPF, DXGI, COM, or unfinished Wayland/portal paths.
 
+Some Windows behaviour is absent on purpose because it was unreachable, inert, or wrong — congestion control, the first-blit skip, the pre-`CMD_CLOSE` flush wait, delta/duplicate-frame compression, and the joystick/PS2 back-channel among them. "Windows behaviour not carried over" in `README.md` records each one with its reasoning and `59d42b2` line references. Check it before restoring something that looks like a porting regression.
+
 ## Build and verification
 
 - Use CMake/Ninja and C++17. Keep platform-neutral code in `src/core`, Linux integrations in `src/linux`, and frontend code in `src/cli` or `src/gui`.

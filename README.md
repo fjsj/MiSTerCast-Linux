@@ -110,6 +110,44 @@ This repository is a Linux replacement, not a cross-platform continuation of the
 
 The Linux sender preserves the shared wire invariants: LZ4 when available, 1472-byte UDP payloads for an MTU of 1500, audio before its associated video frame, protocol-compatible modeline/frame commands, and `CMD_CLOSE` on orderly shutdown.
 
+#### Windows behaviour not carried over
+
+Beyond the platform stacks replaced above, the following existed in the Windows
+tree and is intentionally absent here. Line references are against commit
+`59d42b2`, the last Windows-era commit, so each claim can be re-checked.
+
+**Never active in the Windows build.** These were capabilities of the bundled
+Groovy_MiSTer client library that MiSTerCast's own call sites could not reach,
+so nothing observable was lost:
+
+| Feature | Why it never ran |
+| --- | --- |
+| Delta and duplicate-frame compression, adaptive LZ4-HC (`groovymister.cpp:556-665`) | Selected by `CmdBlit`'s `matchDeltaBytes` and by compression modes 2-6. MiSTerCast called `CmdBlit(..., 15000, 0)` (`renderer_nogpu.h:318`) with `m_compression = 0x01`, so only the plain `LZ4_compress_default` branch was reachable — exactly what the Linux port does. The frame-duplicate path sits in the no-LZ4 `else` branch and so was unreachable too. |
+| Joystick, PS2 keyboard and mouse back-channel (`groovymister.h:29-84`, `groovymister.cpp:837,894`) | `BindInputs`/`PollInputs` have no caller anywhere in the Windows application or frontend. |
+| Registered I/O (RIO) socket path (`groovymister.cpp:22`) | Guarded by `#ifdef _WIN32`; a Windows-only API with no Linux equivalent. The ordinary non-blocking socket path is what both platforms used off Windows. |
+| Network ping measurement (`groovymister.cpp:470-486`) | The ten-sample averaging loop is commented out, leaving `m_network_ping = 0`. The Linux port measures round-trip continuously from real ACKs instead. |
+
+**Deliberately not restored.** These ran, but were inert or wrong:
+
+| Feature | Why it was dropped |
+| --- | --- |
+| Congestion control (`groovymister.h:56-57`, `groovymister.cpp:647-665`) | `K_CONGESTION_TIME` is `110000`, but `DiffTime()` returns nanoseconds on Linux and raw QPC ticks on Windows, so the same constant meant 11 ms on one platform and 110 us on the other. The wait was also measured from the end of the *previous* send, and `WaitSync` already sleeps a full frame period between sends, so below roughly 90 Hz the loop exited immediately. Pacing plus the automatic sync-line lead is the real protection, and non-blocking sends handle a full socket buffer. |
+| First-blit skip (`renderer_nogpu.h:290`) | Its own comment gives the reason: "so we avoid glitches while MAME loads roms". That does not apply to desktop capture. The part worth keeping — resetting the timing baseline at the first real frame — is retained. |
+| Pre-`CMD_CLOSE` flush wait (`renderer_nogpu.h:132`) | Intended one frame period, but `m_period * time_sleep` yields QPC ticks fed to a nanosecond `high_resolution_clock::duration`, giving about 0.17 ms rather than 16.7 ms. It was effectively a no-op. |
+| Fixed 2 ms ACK window | Replaced by polling the socket across the whole pacing wait, which is most of a frame period, so a late ACK still corrects its own frame instead of being counted as missed. |
+
+**Windows defects fixed rather than ported.** The Linux behaviour deliberately
+differs because the original was wrong:
+
+| Defect | Effect |
+| --- | --- |
+| `case Rotation::CW90` fell through to `CCW90` in both rotation switches (`renderer_nogpu.h:210,240`) | 90 degrees clockwise was silently rendered as counter-clockwise. |
+| `m_vsync_scanline` was computed and then a literal `0` passed to `CmdBlit` (`renderer_nogpu.h:315-318`) | The `frameDelay` setting had no effect at all. |
+| Framebuffer loop ran to `pitch * m_height * 4` while indexing `% m_width` (`renderer_nogpu.h:233`) | Read past the end of the capture buffer. |
+| `(uint16_t)(pDataFloat[i] * 32767)` (`AudioCapture.h:129`) | Unclamped float-to-integer conversion wraps on samples outside plus/minus 1.0. The Linux port captures S16LE natively. |
+| Interlacing added a half-step source offset (`renderer_nogpu.h:206-259`) | Both fields sampled between the same source lines rather than alternating true source lines. |
+| Out-of-range crop offsets | Windows clamped these into range, which is the better behaviour and is what the Linux port now does. |
+
 ### Groovy_MiSTer core settings
 
 These are MiSTer-side options rather than MiSTerCast configuration:
