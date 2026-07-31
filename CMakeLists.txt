@@ -34,6 +34,10 @@ endif()
 if(LZ4_LIBRARY)
   target_link_libraries(mistercast-core PRIVATE ${LZ4_LIBRARY})
   target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_LZ4=1)
+else()
+  message(WARNING
+    "liblz4 was not found: frames will be sent uncompressed, using roughly 3-5x "
+    "the network bandwidth. Install liblz4-dev and reconfigure.")
 endif()
 
 add_executable(mistercast src/cli/main.cpp)

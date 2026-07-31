@@ -557,6 +557,10 @@ class MainWindow final : public QMainWindow {
     connect(&statsTimer_, &QTimer::timeout, this, [this] { updateStats(); });
     statsTimer_.start();
     append(QStringLiteral("MiSTerCast ready."));
+    if (!compressionAvailable())
+      append(QStringLiteral(
+          "Warning: built without liblz4; frames are sent uncompressed at "
+          "roughly 3-5x the bandwidth."));
     showState(SessionState::Idle);
   }
 

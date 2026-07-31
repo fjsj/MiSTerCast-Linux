@@ -15,6 +15,9 @@ struct GroovyTransportStats {
   int64_t rasterCorrectionUs{};
   bool vramSynced{}, vgaFrameskip{}, vgaVblank{};
 };
+// False when the build has no liblz4, in which case frames go out uncompressed
+// at roughly 3-5x the bandwidth. Windows always compressed.
+bool compressionAvailable() noexcept;
 class GroovyTransport {
  public:
   GroovyTransport();

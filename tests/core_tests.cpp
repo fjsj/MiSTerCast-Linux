@@ -540,6 +540,30 @@ int main() {
   }
   loaded = loadConfig(path, &warning);
   CHECK(loaded.target.empty() && !warning.empty());
+  // Top-level keys must not be shadowed by same-named keys inside
+  // customModelines, whatever order the keys appear in.
+  {
+    std::ofstream reordered(path);
+    reordered << R"({
+  "version": 1,
+  "customModelines": [
+    {"name":"decoy","pixelClockMHz":9.9,"hActive":111,"hBegin":112,
+     "hEnd":113,"hTotal":140,"vActive":222,"vBegin":223,"vEnd":224,
+     "vTotal":240,"interlaced":true}
+  ],
+  "target": "real.local",
+  "pixelClockMHz": 25.175,
+  "hActive": 640, "hBegin": 656, "hEnd": 752, "hTotal": 800,
+  "vActive": 480, "vBegin": 490, "vEnd": 492, "vTotal": 525,
+  "interlaced": false
+})";
+  }
+  loaded = loadConfig(path, &warning);
+  CHECK(loaded.target == "real.local" && warning.empty());
+  CHECK(loaded.modeline.hActive == 640 && loaded.modeline.vTotal == 525);
+  CHECK(!loaded.modeline.interlaced);
+  CHECK(loaded.customModelines.size() == 1 &&
+        loaded.customModelines[0].hActive == 111);
   std::filesystem::remove_all(dir);
   auto audioConfigPath = std::filesystem::temp_directory_path() /
                          "mistercast-audio-config-test.json";

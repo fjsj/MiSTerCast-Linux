@@ -156,6 +156,9 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+  if (!compressionAvailable())
+    std::cerr << "Warning: built without liblz4; frames are sent uncompressed "
+                 "at roughly 3-5x the bandwidth.\n";
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
   StreamSession session;

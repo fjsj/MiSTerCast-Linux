@@ -31,6 +31,32 @@ static std::string escape(const std::string& value) {
   return result;
 }
 
+// Returns the document with the contents of every nested object and array
+// removed, so that a top-level lookup cannot match a key of the same name inside
+// customModelines. The key-matching below is positional, so without this the
+// result depends on the order the writer happened to emit keys in.
+static std::string topLevelScope(const std::string& json) {
+  std::string result;
+  int depth = 0;
+  bool inString = false, escaped = false;
+  for (char character : json) {
+    const bool wasEscaped = escaped;
+    escaped = false;
+    if (!wasEscaped && inString && character == '\\') escaped = true;
+    if (!wasEscaped && character == '"') inString = !inString;
+    if (!inString && !wasEscaped && (character == '{' || character == '[')) {
+      if (++depth <= 1) result += character;
+      continue;
+    }
+    if (!inString && !wasEscaped && (character == '}' || character == ']')) {
+      if (depth-- <= 1) result += character;
+      continue;
+    }
+    if (depth <= 1) result += character;
+  }
+  return result;
+}
+
 static bool stringValue(const std::string& json, const char* key,
                         std::string& value) {
   const std::regex expression(std::string("\\\"") + key +
@@ -88,11 +114,17 @@ static bool modelineObject(const std::string& json, Modeline& modeline) {
 
 AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
   AppConfig config;
+  // Cleared up front so a successful load cannot leave a caller looking at the
+  // warning from a previous one.
+  if (warning) warning->clear();
   std::ifstream file(path);
   if (!file) return config;
   std::stringstream buffer;
   buffer << file.rdbuf();
-  const auto json = buffer.str();
+  const auto document = buffer.str();
+  // Top-level keys are read from the scoped view; the array itself is parsed
+  // from the full document below.
+  const auto json = topLevelScope(document);
   double version = 0;
   if (!numberValue(json, "version", version) || version != 1) {
     if (warning)
@@ -136,13 +168,14 @@ AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
     parseCropMode(value, config.source.crop);
   if (stringValue(json, "rotation", value))
     parseRotation(value, config.source.rotation);
-  const auto array = json.find("\"customModelines\"");
+  const auto array = document.find("\"customModelines\"");
   if (array != std::string::npos) {
-    const auto begin = json.find('[', array), end = json.find(']', begin);
+    const auto begin = document.find('[', array),
+               end = document.find(']', begin);
     if (begin != std::string::npos && end != std::string::npos) {
       const std::regex object("\\{([^{}]*)\\}");
       for (std::sregex_iterator
-               it(json.begin() + begin, json.begin() + end, object),
+               it(document.begin() + begin, document.begin() + end, object),
            last;
            it != last; ++it) {
         Modeline custom;

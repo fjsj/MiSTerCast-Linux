@@ -29,6 +29,14 @@ T readLe(const uint8_t* p) {
 }
 }  // namespace
 
+bool compressionAvailable() noexcept {
+#ifdef MISTERCAST_HAVE_LZ4
+  return true;
+#else
+  return false;
+#endif
+}
+
 GroovyTransport::GroovyTransport() = default;
 GroovyTransport::~GroovyTransport() { close(); }
 
