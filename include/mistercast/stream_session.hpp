@@ -13,7 +13,11 @@ struct SessionStats {
  uint64_t capturedFrames{}, sentFrames{}, droppedFrames{}, audioDroppedSamples{}, audioUnderrunSamples{};
  size_t audioBufferedSamples{};
  double captureFps{}, streamFps{}, audioPeak{};
- bool misterAudioEnabled{};
+ uint32_t acknowledgedFrame{}, fpgaFrame{};
+ uint16_t syncLine{}, fpgaVCount{};
+ uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{};
+ int64_t rasterCorrectionUs{};
+ bool misterAudioEnabled{}, vramSynced{}, vgaFrameskip{}, vgaVblank{};
 };
 class StreamSession {
 public:
