@@ -63,7 +63,7 @@ class MainWindow final : public QMainWindow {
   QLabel *previewImage_{}, *status_{};
   QPlainTextEdit* log_{};
   std::vector<QWidget*> streamLockedControls_;
-  QTimer statsTimer_;
+  QTimer statsTimer_, modelineApplyTimer_;
   uint64_t previousDropped_{}, previousAudioDropped_{}, previousUnderrun_{},
       previousSendErrors_{};
 
@@ -87,10 +87,35 @@ class MainWindow final : public QMainWindow {
     const bool enabled =
         state == SessionState::Idle || state == SessionState::Error;
     for (auto* control : streamLockedControls_) control->setEnabled(enabled);
-    if (enabled) {
-      audioSink_->setEnabled(audio_->isChecked());
-      progressiveInterlaceBuffer_->setEnabled(interlaced_->isChecked());
+    if (enabled) audioSink_->setEnabled(audio_->isChecked());
+    // Interlace buffering tracks the interlaced flag whether or not a stream is
+    // running, because timings are now switched live.
+    progressiveInterlaceBuffer_->setEnabled(interlaced_->isChecked());
+  }
+
+  // Editing timings fires a change per field, so the live switch is debounced
+  // until the user stops typing rather than sending a CMD_SWITCHRES per digit.
+  void scheduleModelineApply() {
+    if (session_.state() == SessionState::Streaming)
+      modelineApplyTimer_.start();
+  }
+
+  void applyModelineLive() {
+    if (session_.state() != SessionState::Streaming) return;
+    const auto modeline = modelineFromControls();
+    if (modeline.validate()) return;
+    const bool progressive = progressiveInterlaceBuffer_->isChecked();
+    std::string error;
+    if (!session_.updateModeline(modeline, progressive, &error)) {
+      append("Modeline: " + error);
+      return;
     }
+    config_.modeline = modeline;
+    config_.source.progressiveInterlaceBuffer = progressive;
+    append(QString("Modeline switched live to %1x%2%3.")
+               .arg(modeline.hActive)
+               .arg(modeline.vActive)
+               .arg(modeline.interlaced ? "i" : "p"));
   }
 
   void showState(SessionState state) {
@@ -475,33 +500,12 @@ class MainWindow final : public QMainWindow {
     preview_->setChecked(config_.source.preview);
     controlsFromConfig();
 
-    streamLockedControls_ = {loadButton_,
-                             target_,
-                             preset_,
-                             applyModelineButton_,
-                             pixelClock_,
-                             hActive_,
-                             hBegin_,
-                             hEnd_,
-                             hTotal_,
-                             vActive_,
-                             vBegin_,
-                             vEnd_,
-                             vTotal_,
-                             interlaced_,
-                             monitor_,
-                             audioSink_,
-                             crop_,
-                             alignment_,
-                             rotation_,
-                             width_,
-                             height_,
-                             xOffset_,
-                             yOffset_,
-                             frameDelay_,
-                             progressiveInterlaceBuffer_,
-                             audio_,
-                             preview_};
+    // Timings stay editable while streaming: they are switched live, as the
+    // Windows GUI did, which locked only the capture source and audio.
+    streamLockedControls_ = {loadButton_, target_,    monitor_,  audioSink_,
+                             crop_,       alignment_, rotation_, width_,
+                             height_,     xOffset_,   yOffset_,  frameDelay_,
+                             audio_,      preview_};
 
     session_.setPreviewCallback([this](const Frame& frame) {
       QImage source(frame.bgra.data(), int(frame.width), int(frame.height),
@@ -547,12 +551,25 @@ class MainWindow final : public QMainWindow {
     audioSink_->setEnabled(audio_->isChecked());
     for (auto* spin :
          {hActive_, hBegin_, hEnd_, hTotal_, vActive_, vBegin_, vEnd_, vTotal_})
-      connect(spin, &QSpinBox::valueChanged, this,
-              [this] { refreshStartEnabled(); });
-    connect(pixelClock_, &QDoubleSpinBox::valueChanged, this,
-            [this] { refreshStartEnabled(); });
-    connect(interlaced_, &QCheckBox::toggled, progressiveInterlaceBuffer_,
-            &QCheckBox::setEnabled);
+      connect(spin, &QSpinBox::valueChanged, this, [this] {
+        refreshStartEnabled();
+        scheduleModelineApply();
+      });
+    connect(pixelClock_, &QDoubleSpinBox::valueChanged, this, [this] {
+      refreshStartEnabled();
+      scheduleModelineApply();
+    });
+    connect(interlaced_, &QCheckBox::toggled, this, [this](bool interlaced) {
+      progressiveInterlaceBuffer_->setEnabled(interlaced);
+      refreshStartEnabled();
+      scheduleModelineApply();
+    });
+    connect(progressiveInterlaceBuffer_, &QCheckBox::toggled, this,
+            [this] { scheduleModelineApply(); });
+    modelineApplyTimer_.setSingleShot(true);
+    modelineApplyTimer_.setInterval(750);
+    connect(&modelineApplyTimer_, &QTimer::timeout, this,
+            [this] { applyModelineLive(); });
     statsTimer_.setInterval(1000);
     connect(&statsTimer_, &QTimer::timeout, this, [this] { updateStats(); });
     statsTimer_.start();
@@ -570,6 +587,7 @@ class MainWindow final : public QMainWindow {
   void closeEvent(QCloseEvent* event) override {
     session_.stop();
     statsTimer_.stop();
+    modelineApplyTimer_.stop();
     QMainWindow::closeEvent(event);
   }
 };

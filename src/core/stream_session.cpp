@@ -150,12 +150,36 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     return false;
   }
   transport_.setSyncOptions(c.source.syncRefresh, c.source.frameDelay);
+  {
+    std::lock_guard<std::mutex> l(configMutex_);
+    activeModeline_ = c.modeline;
+    activeProgressiveBuffer_ = c.source.progressiveInterlaceBuffer;
+    modelineChangePending_ = false;
+  }
+  modelineGeneration_ = 0;
   startedAt_ = std::chrono::steady_clock::now();
   if (c.source.audio)
     audioThread_ = std::thread(&StreamSession::audioLoop, this);
   captureThread_ = std::thread(&StreamSession::captureLoop, this);
   renderThread_ = std::thread(&StreamSession::renderLoop, this);
   setState(SessionState::Streaming);
+  return true;
+}
+bool StreamSession::updateModeline(const Modeline& m,
+                                   bool progressiveInterlaceBuffer,
+                                   std::string* err) {
+  if (auto e = m.validate()) {
+    if (err) *err = *e;
+    return false;
+  }
+  if (state_ != SessionState::Streaming) {
+    if (err) *err = "stream is not active";
+    return false;
+  }
+  std::lock_guard<std::mutex> l(configMutex_);
+  pendingModeline_ = m;
+  pendingProgressiveBuffer_ = progressiveInterlaceBuffer;
+  modelineChangePending_ = true;
   return true;
 }
 void StreamSession::stop() noexcept {
@@ -189,6 +213,8 @@ void StreamSession::captureLoop() {
   raiseThreadPriority();
   auto nextPreview = std::chrono::steady_clock::now();
   Frame working;
+  Modeline cropModeline = config_.modeline;
+  uint32_t cropGeneration = modelineGeneration_.load();
   while (!stop_) {
     {
       std::unique_lock<std::mutex> l(mutex_);
@@ -196,17 +222,24 @@ void StreamSession::captureLoop() {
       if (stop_) break;
       captureRequested_ = false;
     }
-    // The monitor can be resized or replugged mid-stream, which changes what the
-    // crop should be. Recompute it rather than streaming a stale rectangle.
-    if (const auto monitor = video_->selected();
-        monitor.width != cropMonitor_.width ||
-        monitor.height != cropMonitor_.height) {
+    // The monitor can be resized or replugged mid-stream and the modeline can
+    // be switched live, either of which changes what the crop should be.
+    // Recompute it rather than streaming a stale rectangle.
+    const auto monitor = video_->selected();
+    const auto generation = modelineGeneration_.load();
+    if (monitor.width != cropMonitor_.width ||
+        monitor.height != cropMonitor_.height || generation != cropGeneration) {
+      {
+        std::lock_guard<std::mutex> l(configMutex_);
+        cropModeline = activeModeline_;
+      }
       CropRect crop;
       std::string cropError;
       if (calculateCrop(monitor.width, monitor.height, config_.source,
-                        config_.modeline, crop, cropError)) {
+                        cropModeline, crop, cropError)) {
         video_->setRegion(crop);
         cropMonitor_ = monitor;
+        cropGeneration = generation;
       }
     }
     if (!video_->next(working, std::chrono::milliseconds(100))) {
@@ -252,6 +285,10 @@ void StreamSession::renderLoop() {
   auto audioClock = std::chrono::steady_clock::now();
   Frame f;
   bool haveFrame = false;
+  // This thread owns the timings in use, so it keeps its own copy and only
+  // takes the lock when applying a change.
+  auto source = config_.source;
+  auto modeline = config_.modeline;
   while (!stop_) {
     {
       std::unique_lock<std::mutex> l(mutex_);
@@ -259,9 +296,8 @@ void StreamSession::renderLoop() {
       // newest finished capture is taken if one is ready, and otherwise the
       // previous frame is sent again; waiting here would put the capture back
       // on the critical path in front of every blit.
-      if (!haveFrame &&
-          !cv_.wait_for(l, std::chrono::seconds(5),
-                        [&] { return stop_ || frameReady_; })) {
+      if (!haveFrame && !cv_.wait_for(l, std::chrono::seconds(5),
+                                      [&] { return stop_ || frameReady_; })) {
         l.unlock();
         fail({"video", "no frame was captured within 5 seconds",
               "Check the monitor selection and X11 session."});
@@ -274,13 +310,47 @@ void StreamSession::renderLoop() {
         haveFrame = true;
       }
     }
+    // Apply a live modeline change before building the frame, so the payload
+    // already matches the active area the MiSTer now expects. Windows switched
+    // after building the framebuffer, which sent one frame at the old size.
+    if (modelineChangePending_.load()) {
+      Modeline pending;
+      bool progressive = false, apply = false;
+      {
+        std::lock_guard<std::mutex> l(configMutex_);
+        if (modelineChangePending_) {
+          pending = pendingModeline_;
+          progressive = pendingProgressiveBuffer_;
+          modelineChangePending_ = false;
+          apply = true;
+        }
+      }
+      if (apply) {
+        std::string switchError;
+        if (!transport_.switchMode(pending, progressive, switchError)) {
+          fail({"stream", switchError,
+                "Check the modeline and network connectivity."});
+          break;
+        }
+        {
+          std::lock_guard<std::mutex> l(configMutex_);
+          activeModeline_ = pending;
+          activeProgressiveBuffer_ = progressive;
+        }
+        modeline = pending;
+        source.progressiveInterlaceBuffer = progressive;
+        // Windows kept its frame counter running across a switch and only reset
+        // the field; alignFrame realigns from the FPGA echo either way.
+        field = 0;
+        ++modelineGeneration_;
+      }
+    }
     ++number;
     transport_.alignFrame(number, field);
     std::string e;
     // The captured frame is already the crop region, so sample all of it.
     const CropRect wholeFrame{0, 0, f.width, f.height};
-    if (!transformRgb24(f, wholeFrame, config_.source, config_.modeline, field,
-                        rgb, e)) {
+    if (!transformRgb24(f, wholeFrame, source, modeline, field, rgb, e)) {
       fail({"stream", e, "Check capture geometry and network connectivity."});
       break;
     }
@@ -297,12 +367,13 @@ void StreamSession::renderLoop() {
         audioClock = now;
       } else {
         // A sink monitor can deliver nothing for the first 1-3 seconds after
-        // connecting. Until real PCM has built up, send no audio at all: silence
-        // would be inserted for seconds and, worse, the pacer would count it as
-        // consumed and owe those samples, so the catch-up burst became permanent
-        // backlog. Waiting here instead would stall video for just as long.
-        // Prebuffering to exactly the steady-state target means the servo has
-        // its dead band available immediately and nothing has to be trimmed.
+        // connecting. Until real PCM has built up, send no audio at all:
+        // silence would be inserted for seconds and, worse, the pacer would
+        // count it as consumed and owe those samples, so the catch-up burst
+        // became permanent backlog. Waiting here instead would stall video for
+        // just as long. Prebuffering to exactly the steady-state target means
+        // the servo has its dead band available immediately and nothing has to
+        // be trimmed.
         if (!audioStarted && audioRing_.size() >= audioTargetValues) {
           audioStarted = true;
           audioPacer.reset(audioRate);
@@ -311,9 +382,10 @@ void StreamSession::renderLoop() {
         if (!audioStarted) {
           audioClock = now;
         } else {
-          const auto elapsed = std::chrono::duration_cast<
-                                   std::chrono::nanoseconds>(now - audioClock)
-                                   .count();
+          const auto elapsed =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(now -
+                                                                   audioClock)
+                  .count();
           const auto count = audioPacer.valuesDue(
               uint64_t(std::max<int64_t>(elapsed, 0)), 32000);
           auto buffered = audioRing_.size();

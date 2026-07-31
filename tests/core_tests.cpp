@@ -261,7 +261,8 @@ class FakeAudio final : public IAudioCapture {
   void stop() noexcept override {}
   uint32_t sampleRate() const noexcept override { return 48000; }
 };
-// Minimal Groovy endpoint: acks CMD_INIT and every blit, counting audio packets.
+// Minimal Groovy endpoint: acks CMD_INIT and every blit, counting audio
+// packets.
 class FakeMister {
  public:
   std::atomic<bool> running{true};
@@ -277,8 +278,8 @@ class FakeMister {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(32100);
-    if (fd < 0 || bind(fd, reinterpret_cast<sockaddr*>(&address),
-                       sizeof(address)) != 0) {
+    if (fd < 0 ||
+        bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
       if (fd >= 0) close(fd);
       fd = -1;
       return;
@@ -327,6 +328,19 @@ class FakeMister {
   }
   std::thread worker;
 };
+// Sanitizer builds run the pacing loop far slower than release, so session
+// tests wait on a condition with a generous deadline rather than a fixed frame
+// count.
+template <class Predicate>
+bool waitFor(Predicate ready, int milliseconds = 15000) {
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(milliseconds);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (ready()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
 AppConfig sessionConfig() {
   AppConfig c;
   c.target = "127.0.0.1";
@@ -338,34 +352,69 @@ AppConfig sessionConfig() {
 }
 }  // namespace
 
-// A monitor resized mid-stream must have its crop recomputed, not keep streaming
-// a rectangle sized for the old geometry.
+// A monitor resized mid-stream must have its crop recomputed, not keep
+// streaming a rectangle sized for the old geometry.
 static void checkCropFollowsMonitorResize() {
   FakeMister mister(0x44);
   if (mister.port == 0) return;
   auto video = std::make_unique<FakeVideo>();
   auto* raw = video.get();
-  StreamSession session(std::move(video), std::make_unique<FakeAudio>());
+  auto session = std::make_unique<StreamSession>(std::move(video),
+                                                 std::make_unique<FakeAudio>());
   auto config = sessionConfig();
   std::string error;
   // 4:3 of a 1080-tall monitor is 1440x1080.
-  if (!session.start(config, {}, &error)) {
+  if (!session->start(config, {}, &error)) {
     std::cerr << "session start failed: " << error << "\n";
     ++failed;
     return;
   }
-  for (int i = 0; i < 100 && raw->captured < 3; ++i)
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  CHECK(waitFor([&] { return raw->captured >= 3; }));
   raw->height = 720;  // 4:3 of 720 is 960x720
   const auto before = raw->captured.load();
-  for (int i = 0; i < 100 && raw->captured < before + 3; ++i)
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  session.stop();
+  CHECK(waitFor([&] { return raw->captured >= before + 3; }));
+  session->stop();
   std::lock_guard<std::mutex> l(raw->mutex);
   CHECK(raw->regions.size() >= 2);
   CHECK(raw->regions.front().width == 1440 &&
         raw->regions.front().height == 1080);
   CHECK(raw->regions.back().width == 960 && raw->regions.back().height == 720);
+}
+
+// Timings must be switchable on a live stream, and the crop must follow the new
+// active area since 1x-5x crops are relative to it.
+static void checkLiveModelineSwitch() {
+  FakeMister mister(0x44);
+  if (mister.port == 0) return;
+  auto video = std::make_unique<FakeVideo>();
+  auto* raw = video.get();
+  auto session = std::make_unique<StreamSession>(std::move(video),
+                                                 std::make_unique<FakeAudio>());
+  auto config = sessionConfig();
+  config.source.crop = CropMode::X1;
+  config.modeline = Modeline::safeDefault();  // 320x240 active
+  std::string error;
+  if (!session->start(config, {}, &error)) {
+    std::cerr << "session start failed: " << error << "\n";
+    ++failed;
+    return;
+  }
+  CHECK(waitFor([&] { return raw->captured >= 3; }));
+  Modeline vga{"vga", 25.175, 640, 656, 752, 800, 480, 490, 492, 525, false};
+  CHECK(session->updateModeline(vga, false, &error));
+  CHECK(waitFor([&] {
+    std::lock_guard<std::mutex> l(raw->mutex);
+    return raw->regions.back().width == 640;
+  }));
+  const bool alive = session->state() == SessionState::Streaming;
+  const auto blits = mister.blits.load();
+  session->stop();
+  CHECK(alive);
+  CHECK(blits > 0);
+  std::lock_guard<std::mutex> l(raw->mutex);
+  CHECK(raw->regions.front().width == 320 &&
+        raw->regions.front().height == 240);
+  CHECK(raw->regions.back().width == 640 && raw->regions.back().height == 480);
 }
 
 // The core reporting audio off must stop audio being sent at all.
@@ -377,18 +426,21 @@ static void checkAudioSkippedWhenCoreHasAudioOff() {
     auto audio = std::make_unique<FakeAudio>();
     auto* rawVideo = video.get();
     audio->produce = true;
-    StreamSession session(std::move(video), std::move(audio));
+    auto session =
+        std::make_unique<StreamSession>(std::move(video), std::move(audio));
     auto config = sessionConfig();
     config.source.audio = true;
     std::string error;
-    if (!session.start(config, {}, &error)) {
+    if (!session->start(config, {}, &error)) {
       std::cerr << "session start failed: " << error << "\n";
       ++failed;
       return;
     }
-    for (int i = 0; i < 200 && rawVideo->captured < 30; ++i)
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    session.stop();
+    // Enough frames that audio would certainly have been sent if it were going
+    // to be; with the core reporting audio off, none must appear.
+    CHECK(waitFor([&] { return rawVideo->captured >= 30; }));
+    if (coreAudio) CHECK(waitFor([&] { return mister.audioPackets > 0; }));
+    session->stop();
     if (coreAudio)
       CHECK(mister.audioPackets > 0);
     else
@@ -517,6 +569,7 @@ int main() {
   checkSendErrorsAreNotFatal();
   checkWarmUpGateUsesFrameNumber();
   checkCropFollowsMonitorResize();
+  checkLiveModelineSwitch();
   checkAudioSkippedWhenCoreHasAudioOff();
   auto dir = std::filesystem::temp_directory_path() / "mistercast-core-test";
   std::filesystem::create_directories(dir);
