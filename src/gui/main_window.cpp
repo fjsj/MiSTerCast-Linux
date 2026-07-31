@@ -55,6 +55,7 @@ class MainWindow final : public QMainWindow {
   QCheckBox *interlaced_{}, *progressiveInterlaceBuffer_{}, *audio_{}, *preview_{};
   QLabel *previewImage_{}, *status_{};
   QPlainTextEdit *log_{};
+  std::vector<QWidget*> streamLockedControls_;
   QTimer statsTimer_;
   uint64_t previousDropped_{}, previousAudioDropped_{}, previousUnderrun_{};
 
@@ -71,6 +72,15 @@ class MainWindow final : public QMainWindow {
     const bool busy = state == SessionState::Starting || state == SessionState::Stopping;
     const bool valid = !target_->text().trimmed().isEmpty() && modelineFromControls().validate() == std::nullopt;
     streamButton_->setEnabled(!busy && (state == SessionState::Streaming || valid));
+  }
+
+  void refreshConfigurationEnabled(SessionState state) {
+    const bool enabled = state == SessionState::Idle || state == SessionState::Error;
+    for (auto* control : streamLockedControls_) control->setEnabled(enabled);
+    if (enabled) {
+      audioSink_->setEnabled(audio_->isChecked());
+      progressiveInterlaceBuffer_->setEnabled(interlaced_->isChecked());
+    }
   }
 
   void showState(SessionState state) {
@@ -90,6 +100,7 @@ class MainWindow final : public QMainWindow {
         break;
     }
     status_->setText(stateName(state));
+    refreshConfigurationEnabled(state);
     refreshStartEnabled();
   }
 
@@ -341,6 +352,14 @@ public:
     presets_ = bundledModelines(); presets_.insert(presets_.end(), config_.customModelines.begin(), config_.customModelines.end());
     for (const auto& preset : presets_) preset_->addItem(QString::fromStdString(preset.name));
     audio_->setChecked(config_.source.audio); preview_->setChecked(config_.source.preview); controlsFromConfig();
+
+    streamLockedControls_ = {
+      loadButton_, target_, preset_, applyModelineButton_, pixelClock_,
+      hActive_, hBegin_, hEnd_, hTotal_, vActive_, vBegin_, vEnd_, vTotal_,
+      interlaced_, monitor_, audioSink_, crop_, alignment_, rotation_, width_,
+      height_, xOffset_, yOffset_, frameDelay_, progressiveInterlaceBuffer_,
+      audio_, preview_
+    };
 
     session_.setPreviewCallback([this](const Frame& frame) {
       QImage source(frame.bgra.data(), int(frame.width), int(frame.height), int(frame.stride), QImage::Format_RGB32);
