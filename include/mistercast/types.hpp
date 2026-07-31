@@ -23,7 +23,7 @@ struct Modeline {
 
 struct SourceOptions {
   std::string monitor;
-  bool syncRefresh{true}, audio{true}, preview{true};
+  bool syncRefresh{true}, progressiveInterlaceBuffer{false}, audio{true}, preview{true};
   uint16_t frameDelay{0}, width{320}, height{240};
   int16_t xOffset{0}, yOffset{0};
   Alignment alignment{Alignment::Center};

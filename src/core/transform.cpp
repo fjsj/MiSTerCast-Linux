@@ -12,13 +12,14 @@ bool calculateCrop(uint32_t sw,uint32_t sh,const SourceOptions&o,CropRect&r,std:
 }
 bool transformRgb24(const Frame&f,const SourceOptions&o,const Modeline&m,uint8_t field,std::vector<uint8_t>&out,std::string&e){
   if(auto x=m.validate()){e=*x;return false;}if(f.stride<f.width*4||f.bgra.size()<size_t(f.stride)*f.height){e="invalid BGRA frame buffer";return false;}CropRect c;if(!calculateCrop(f.width,f.height,o,c,e))return false;
-  uint32_t oh=m.interlaced?m.vActive/2:m.vActive;if(!oh){e="interlaced active height must be at least two";return false;}out.resize(size_t(m.hActive)*oh*3);
+  const bool fieldBuffer=m.interlaced&&!o.progressiveInterlaceBuffer;
+  uint32_t oh=fieldBuffer?m.vActive/2:m.vActive;if(!oh){e="interlaced active height must be at least two";return false;}out.resize(size_t(m.hActive)*oh*3);
   for(uint32_t dy=0;dy<oh;++dy){
     for(uint32_t dx=0;dx<m.hActive;++dx){
-      // Groovy_MiSTer maps protocol field 0 to its internal/display field 1
-      // (and protocol field 1 to display field 0). Sample the matching source
-      // line parity so adjacent fields reconstruct the original full frame.
-      uint32_t fullY=m.interlaced?dy*2+!(field&1):dy;
+      // Field-buffer mode maps protocol field 0 to display field 1 (and vice
+      // versa), so sample the matching source parity. Progressive-buffer mode
+      // sends every line and does not select a field index here.
+      uint32_t fullY=fieldBuffer?dy*2+!(field&1):dy;
       double u=(dx+.5)/m.hActive,v=(fullY+.5)/m.vActive,ru=u,rv=v;
       switch(o.rotation){case Rotation::None:break;case Rotation::CW90:ru=v;rv=1-u;break;case Rotation::CCW90:ru=1-v;rv=u;break;case Rotation::Flip180:ru=1-u;rv=1-v;break;}
       uint32_t sx=c.x+std::min(c.width-1,uint32_t(ru*c.width));

@@ -15,6 +15,7 @@ extern "C" int LZ4_compress_default(const char*,char*,int,int);
 namespace mistercast {
 namespace {
 constexpr uint8_t CMD_CLOSE=1,CMD_INIT=2,CMD_SWITCHRES=3,CMD_AUDIO=4,CMD_BLIT_FIELD_VSYNC=7;
+constexpr uint8_t INTERLACE_FIELD_BUFFER=1,INTERLACE_PROGRESSIVE_BUFFER=2;
 constexpr uint64_t kAutoMarginNs=1500000;
 
 template<class T> T readLe(const uint8_t* p) {
@@ -106,10 +107,11 @@ bool GroovyTransport::open(const std::string&host,uint32_t rate,std::string&e,ui
  return true;
 }
 
-bool GroovyTransport::switchMode(const Modeline&m,std::string&e){
+bool GroovyTransport::switchMode(const Modeline&m,bool progressiveInterlaceBuffer,std::string&e){
  if(auto x=m.validate()){e=*x;return false;}
- uint8_t b[26]{};b[0]=CMD_SWITCHRES;std::memcpy(b+1,&m.pixelClockMHz,8);std::memcpy(b+9,&m.hActive,2);std::memcpy(b+11,&m.hBegin,2);std::memcpy(b+13,&m.hEnd,2);std::memcpy(b+15,&m.hTotal,2);std::memcpy(b+17,&m.vActive,2);std::memcpy(b+19,&m.vBegin,2);std::memcpy(b+21,&m.vEnd,2);std::memcpy(b+23,&m.vTotal,2);b[25]=m.interlaced;
- frameBytes_=uint32_t(m.hActive)*m.vActive*3/(m.interlaced?2:1);
+ progressiveInterlaceBuffer_=m.interlaced&&progressiveInterlaceBuffer;
+ uint8_t b[26]{};b[0]=CMD_SWITCHRES;std::memcpy(b+1,&m.pixelClockMHz,8);std::memcpy(b+9,&m.hActive,2);std::memcpy(b+11,&m.hBegin,2);std::memcpy(b+13,&m.hEnd,2);std::memcpy(b+15,&m.hTotal,2);std::memcpy(b+17,&m.vActive,2);std::memcpy(b+19,&m.vBegin,2);std::memcpy(b+21,&m.vEnd,2);std::memcpy(b+23,&m.vTotal,2);b[25]=m.interlaced?(progressiveInterlaceBuffer_?INTERLACE_PROGRESSIVE_BUFFER:INTERLACE_FIELD_BUFFER):0;
+ frameBytes_=uint32_t(m.hActive)*m.vActive*3/((m.interlaced&&!progressiveInterlaceBuffer_)?2:1);
  vTotal_=m.vTotal;interlaceShift_=m.interlaced?1:0;
  lineTimeNs_=uint64_t(std::llround(double(m.hTotal)*1000.0/m.pixelClockMHz));
  frameTimeNs_=(lineTimeNs_*m.vTotal)>>interlaceShift_;
@@ -151,7 +153,7 @@ bool GroovyTransport::sendFrame(uint32_t frame,uint8_t field,const std::vector<u
  compressed_.resize(rgb.size());int z=LZ4_compress_default(reinterpret_cast<const char*>(rgb.data()),reinterpret_cast<char*>(compressed_.data()),int(rgb.size()),int(compressed_.size()));
  if(z>0){csize=uint32_t(z);bytes=size_t(z);payload=compressed_.data();}
 #endif
- uint8_t h[12]{};h[0]=CMD_BLIT_FIELD_VSYNC;std::memcpy(h+1,&frame,4);h[5]=field;std::memcpy(h+6,&vsync,2);if(csize)std::memcpy(h+8,&csize,4);size_t hs=csize?12:8;
+ uint8_t h[12]{};h[0]=CMD_BLIT_FIELD_VSYNC;std::memcpy(h+1,&frame,4);h[5]=progressiveInterlaceBuffer_?0:field;std::memcpy(h+6,&vsync,2);if(csize)std::memcpy(h+8,&csize,4);size_t hs=csize?12:8;
  if(!sendPacket(h,hs,e)||!sendChunks(payload,bytes,e))return false;
  lastStreamNs_=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-sendStart).count();
  streamTimeUs_=lastStreamNs_/1000;
@@ -201,6 +203,6 @@ GroovyTransportStats GroovyTransport::stats()const noexcept{
 
 void GroovyTransport::close()noexcept{
  if(fd_>=0){uint8_t c=CMD_CLOSE;std::string ignored;sendPacket(&c,1,ignored);::close(fd_);fd_=-1;}
- misterAudioEnabled_=false;vramSynced_=false;vgaFrameskip_=false;vgaVblank_=false;frameBytes_=0;frameTimeNs_=lineTimeNs_=0;compressed_.clear();
+ misterAudioEnabled_=false;vramSynced_=false;vgaFrameskip_=false;vgaVblank_=false;progressiveInterlaceBuffer_=false;frameBytes_=0;frameTimeNs_=lineTimeNs_=0;compressed_.clear();
 }
 }

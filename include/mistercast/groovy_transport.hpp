@@ -17,7 +17,7 @@ class GroovyTransport {
 public:
  GroovyTransport(); ~GroovyTransport(); GroovyTransport(const GroovyTransport&)=delete;GroovyTransport&operator=(const GroovyTransport&)=delete;
  bool open(const std::string& host,uint32_t audioRate,std::string& error,uint16_t port=32100);
- bool switchMode(const Modeline&,std::string& error);
+ bool switchMode(const Modeline&,bool progressiveInterlaceBuffer,std::string& error);
  void setSyncOptions(bool syncRefresh,uint16_t frameDelay)noexcept;
  void alignFrame(uint32_t& frame,uint8_t& field)const noexcept;
  bool sendFrame(uint32_t frame,uint8_t field,const std::vector<uint8_t>&rgb,std::string&error);
@@ -29,7 +29,7 @@ public:
 private:
  struct FpgaStatus {uint32_t frameEcho{},frame{};uint16_t vCountEcho{},vCount{};uint8_t bits{};};
  int fd_{-1};uint32_t frameBytes_{};uint16_t mtu_{1472},vTotal_{},frameDelay_{};uint8_t interlaceShift_{};std::vector<uint8_t> compressed_;
- bool syncRefresh_{true};uint64_t frameTimeNs_{},lineTimeNs_{},networkRttNs_{},lastStreamNs_{};uint32_t currentFrame_{};FpgaStatus fpga_{};
+ bool syncRefresh_{true},progressiveInterlaceBuffer_{};uint64_t frameTimeNs_{},lineTimeNs_{},networkRttNs_{},lastStreamNs_{};uint32_t currentFrame_{};FpgaStatus fpga_{};
  std::chrono::steady_clock::time_point syncEpoch_{},lastAckAt_{};
  bool sendPacket(const void*,size_t,std::string&);bool sendChunks(const uint8_t*,size_t,std::string&);bool drainStatus(uint32_t expectedFrame)noexcept;uint16_t syncLine(uint64_t workNs)const noexcept;
  std::atomic<bool>misterAudioEnabled_{false},vramSynced_{false},vgaFrameskip_{false},vgaVblank_{false};

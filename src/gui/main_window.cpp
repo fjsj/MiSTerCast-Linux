@@ -52,7 +52,7 @@ class MainWindow final : public QMainWindow {
   QSpinBox *hActive_{}, *hBegin_{}, *hEnd_{}, *hTotal_{};
   QSpinBox *vActive_{}, *vBegin_{}, *vEnd_{}, *vTotal_{};
   QSpinBox *width_{}, *height_{}, *xOffset_{}, *yOffset_{}, *frameDelay_{};
-  QCheckBox *interlaced_{}, *audio_{}, *preview_{};
+  QCheckBox *interlaced_{}, *progressiveInterlaceBuffer_{}, *audio_{}, *preview_{};
   QLabel *previewImage_{}, *status_{};
   QPlainTextEdit *log_{};
   QTimer statsTimer_;
@@ -116,6 +116,7 @@ class MainWindow final : public QMainWindow {
     vActive_->setValue(modeline.vActive); vBegin_->setValue(modeline.vBegin);
     vEnd_->setValue(modeline.vEnd); vTotal_->setValue(modeline.vTotal);
     interlaced_->setChecked(modeline.interlaced);
+    progressiveInterlaceBuffer_->setEnabled(modeline.interlaced);
     refreshStartEnabled();
   }
 
@@ -129,6 +130,7 @@ class MainWindow final : public QMainWindow {
     config_.source.xOffset = int16_t(xOffset_->value());
     config_.source.yOffset = int16_t(yOffset_->value());
     config_.source.frameDelay = uint16_t(frameDelay_->value());
+    config_.source.progressiveInterlaceBuffer = progressiveInterlaceBuffer_->isChecked();
     config_.source.crop = CropMode(crop_->currentIndex());
     config_.source.alignment = Alignment(alignment_->currentIndex());
     config_.source.rotation = Rotation(rotation_->currentIndex());
@@ -145,6 +147,7 @@ class MainWindow final : public QMainWindow {
     width_->setValue(config_.source.width); height_->setValue(config_.source.height);
     xOffset_->setValue(config_.source.xOffset); yOffset_->setValue(config_.source.yOffset);
     frameDelay_->setValue(config_.source.frameDelay);
+    progressiveInterlaceBuffer_->setChecked(config_.source.progressiveInterlaceBuffer);
     audio_->setChecked(config_.source.audio); preview_->setChecked(config_.source.preview);
     auto presetIndex = preset_->findText(QString::fromStdString(config_.modeline.name));
     if (presetIndex >= 0) preset_->setCurrentIndex(presetIndex);
@@ -289,6 +292,8 @@ public:
     width_ = timingSpin(); height_ = timingSpin();
     xOffset_ = new QSpinBox; yOffset_ = new QSpinBox; xOffset_->setRange(-8192, 8192); yOffset_->setRange(-8192, 8192);
     frameDelay_ = new QSpinBox; frameDelay_->setRange(0, 10); frameDelay_->setSpecialValueText("Automatic");
+    progressiveInterlaceBuffer_ = new QCheckBox("Stable interlace (progressive framebuffer)");
+    progressiveInterlaceBuffer_->setToolTip("Send every interlaced update as one full-height framebuffer. This prevents field-buffer index changes, but doubles video work and payload and may add latency.");
     audio_ = new QCheckBox("Enable Audio"); preview_ = new QCheckBox("Enable Preview");
     sourceGrid->addWidget(new QLabel("Monitor"), 0, 0); sourceGrid->addWidget(monitor_, 0, 1, 1, 2);
     sourceGrid->addWidget(new QLabel("Crop"), 1, 0); sourceGrid->addWidget(crop_, 1, 1, 1, 2);
@@ -297,7 +302,8 @@ public:
     sourceGrid->addWidget(new QLabel("Size"), 4, 0); sourceGrid->addWidget(width_, 4, 1); sourceGrid->addWidget(height_, 4, 2);
     sourceGrid->addWidget(new QLabel("Offset"), 5, 0); sourceGrid->addWidget(xOffset_, 5, 1); sourceGrid->addWidget(yOffset_, 5, 2);
     sourceGrid->addWidget(new QLabel("Frame delay"), 6, 0); sourceGrid->addWidget(frameDelay_, 6, 1, 1, 2);
-    sourceGrid->addWidget(audio_, 7, 0, 1, 3); sourceGrid->addWidget(preview_, 8, 0, 1, 3); sourceGrid->setColumnStretch(1, 1); sourceGrid->setColumnStretch(2, 1);
+    sourceGrid->addWidget(progressiveInterlaceBuffer_, 7, 0, 1, 3);
+    sourceGrid->addWidget(audio_, 8, 0, 1, 3); sourceGrid->addWidget(preview_, 9, 0, 1, 3); sourceGrid->setColumnStretch(1, 1); sourceGrid->setColumnStretch(2, 1);
     sourceLayout->addWidget(sourceControls, 1);
     previewImage_ = new QLabel("Preview Disabled");
     previewImage_->setAlignment(Qt::AlignCenter); previewImage_->setMinimumSize(450, 260);
@@ -336,6 +342,7 @@ public:
     connect(preview_, &QCheckBox::toggled, this, [this](bool enabled) { if (!enabled) { previewImage_->setPixmap({}); previewImage_->setText("Preview Disabled"); } else previewImage_->setText("Waiting for preview…"); });
     for (auto* spin : {hActive_, hBegin_, hEnd_, hTotal_, vActive_, vBegin_, vEnd_, vTotal_}) connect(spin, &QSpinBox::valueChanged, this, [this] { refreshStartEnabled(); });
     connect(pixelClock_, &QDoubleSpinBox::valueChanged, this, [this] { refreshStartEnabled(); });
+    connect(interlaced_, &QCheckBox::toggled, progressiveInterlaceBuffer_, &QCheckBox::setEnabled);
     statsTimer_.setInterval(1000); connect(&statsTimer_, &QTimer::timeout, this, [this] { updateStats(); }); statsTimer_.start();
     append(QStringLiteral("MiSTerCast ready.")); showState(SessionState::Idle);
   }

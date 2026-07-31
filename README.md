@@ -51,6 +51,7 @@ The GUI exposes every routine streaming setting except `syncRefresh`. The CLI ac
 | `rotation` | `none` by default | `none`, `cw90`, `ccw90`, or `180`. CLI: `--rotation VALUE`. |
 | `frameDelay` | `0` (automatic) by default | Selects the MiSTer raster phase. Automatic mode measures work/network time and computes a safe scanline; `1`–`10` manually select tenths of a refresh interval. CLI: `--frame-delay N`. Higher manual values trade latency margin for a later presentation phase. |
 | `syncRefresh` | `true` by default | Enables MiSTer ACK/raster feedback and correction of the next frame deadline. This is currently configuration-file-only. `false` sends sync line zero and retains local refresh pacing. |
+| `progressiveInterlaceBuffer` | `false` by default | For interlaced modelines, sends Groovy_MiSTer's progressive-framebuffer mode (`interlace=2`) so both output fields always read one full-height framebuffer instead of alternating field-buffer indexes. GUI: `Stable interlace (progressive framebuffer)`. CLI: `--progressive-interlace-buffer` or `--interlaced-field-buffer` to disable it. |
 | `customModelines` | Empty by default | Saved named modelines loaded into the GUI preset list. A CLI modeline named `Custom` is appended when `--modeline ... --save` is used. GUI timing edits are saved as the active modeline values. |
 
 `Save Settings` writes the active GUI values. `Load Settings` reloads the file. CLI `--save` persists that invocation's overrides.
@@ -68,6 +69,12 @@ With `syncRefresh` enabled, MiSTerCast implements the Groovy_MiSTer client timin
 The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction and stream times, matched/missed ACKs, and VRAM state every five seconds. The GUI shows a compact subset in its status line. A small number of startup ACK misses or audio underrun samples can occur while buffers start; counters that continue increasing indicate a real timing or transport problem.
 
 Synchronization does not introduce a permanent full-frame buffer. Automatic mode deliberately keeps the 1.5 ms safety margin used by the upstream client. Manual frame delay changes sub-frame phase. ACK acquisition is bounded to 2 ms and is accounted inside the existing refresh-period wait.
+
+#### Stable interlaced framebuffer mode
+
+The optional `progressiveInterlaceBuffer` mode uses the receiver's documented `interlace=2` protocol. MiSTerCast transforms and transmits all `vActive` lines on every update, and Groovy_MiSTer stores them in one progressive framebuffer while retaining the interlaced output modeline. This guarantees that MiSTerCast and the core do not switch between two half-height field-buffer indexes during that stream; odd and even output fields are derived from the same line-address space.
+
+This mode roughly doubles the uncompressed video pixels transformed and transmitted per update. Compression can reduce the network increase, but transform/compression time and the automatically selected safe raster margin can grow, and framebuffer fallback can add latency. It does not synchronize X11 capture to the source monitor, repair a source frame that was already torn, or change flicker introduced by the display's deinterlacer. It has no effect on progressive modelines. Leave it off for minimum work/latency; enable it when stable interlaced line identity matters more.
 
 #### X11 source-display synchronization
 
@@ -96,6 +103,7 @@ This repository is a Linux replacement, not a cross-platform continuation of the
 | Platform support | Ubuntu 22.04 x86-64 under Xorg; no native Wayland path | Windows only |
 | `syncRefresh` | Defaults to `true`, is persisted, and controls ACK/raster deadline correction; currently editable only in JSON | Hard-coded `true` and not exposed by the WPF/native interop API; it mainly guarded first-frame timing initialization |
 | `frameDelay` | Defaults to automatic `0`; GUI, CLI, and JSON configurable | Initialized to automatic `0` and not exposed by the legacy frontend interop |
+| Interlaced framebuffer | Field buffers by default, with an opt-in full-height progressive framebuffer exposed in GUI, CLI, and JSON | Groovy_MiSTer's protocol supports both field-buffer `interlace=1` and progressive-framebuffer `interlace=2`; RetroArch exposes the corresponding `mister_interlaced_fb` choice |
 | Raster feedback | Full ACK decode, automatic sync-line calculation, FPGA frame/field alignment, and ACK-driven wait | Performed by the bundled Groovy_MiSTer `CmdBlit()`/`WaitSync()` client library |
 | Preview | Limited to roughly 10 FPS and scaled before entering Qt | Windows preview callback from captured frames |
 
@@ -139,6 +147,7 @@ cmake --install build --prefix AppDir/usr
 - Audio errors: ensure PulseAudio/pipewire-pulse is running and select the sink monitor source.
 - Monitor disappeared: stop, run `list-monitors`, select the current output, and restart.
 - Moving or intermittent tear line: keep `syncRefresh` enabled and `frameDelay` at automatic first. Check that ACK misses do not keep increasing and that sender/FPGA frame numbers remain adjacent.
+- Interlaced line parity/index appears to change: enable `Stable interlace (progressive framebuffer)`. If the artifact remains, it originates before the core framebuffer (for example an X11 source tear) or after it (display deinterlacing), rather than from alternating MiSTer field buffers.
 - `VRAM unsynced`: verify the modeline and route, then check capture/stream FPS and packet errors. `VRAM synced/fb` means the core used its non-volatile framebuffer fallback for that sample.
 - Direct Ethernet: use a dedicated non-overlapping subnet without gateway or DNS, and confirm `ip route get TARGET` names the Ethernet interface and its dedicated source address.
 
