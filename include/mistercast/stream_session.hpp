@@ -12,6 +12,7 @@ namespace mistercast {
 struct SessionStats {
  uint64_t capturedFrames{}, sentFrames{}, droppedFrames{}, audioDroppedSamples{}, audioUnderrunSamples{};
  size_t audioBufferedSamples{};
+ uint32_t audioSampleRate{};
  double captureFps{}, streamFps{}, audioPeak{};
  uint32_t acknowledgedFrame{}, fpgaFrame{};
  uint16_t syncLine{}, fpgaVCount{};

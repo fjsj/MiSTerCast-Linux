@@ -1,7 +1,7 @@
 #include "mistercast/interfaces.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <mutex>
 #ifdef MISTERCAST_HAVE_PULSE
 #include <pulse/error.h>
 #include <pulse/pulseaudio.h>
@@ -19,20 +19,25 @@ class PulseCapture final:public IAudioCapture{
 #ifdef MISTERCAST_HAVE_PULSE
  pa_simple*stream_{};
 #endif
- std::atomic<bool>running_{false};ErrorCallback error_;uint32_t rate_{48000};std::mutex mutex_;
+ std::atomic<bool>running_{false};ErrorCallback error_;uint32_t rate_{48000};
 public:~PulseCapture()override{stop();}bool start(ErrorCallback cb)override{error_=std::move(cb);
 #ifdef MISTERCAST_HAVE_PULSE
  auto source=defaultMonitor();if(source.empty()){if(error_)error_({"audio","default sink has no monitor source","Start PulseAudio/pipewire-pulse, or disable audio."});return false;}int err=0;for(uint32_t candidate:{48000u,44100u,22050u}){pa_sample_spec ss{PA_SAMPLE_S16LE,candidate,2};stream_=pa_simple_new(nullptr,"MiSTerCast",PA_STREAM_RECORD,source.c_str(),"System output",&ss,nullptr,nullptr,&err);if(stream_){rate_=candidate;break;}}if(!stream_){if(error_)error_({"audio",pa_strerror(err),"Set the recording source to the default sink monitor, or disable audio."});return false;}running_=true;return true;
 #else
  if(error_)error_({"audio","PulseAudio development support was unavailable at build time","Install libpulse-dev and rebuild, or disable audio."});return false;
 #endif
- }bool next(PcmBlock&b,std::chrono::milliseconds timeout)override{(void)timeout;
+ }bool next(PcmBlock&b,std::chrono::milliseconds timeout)override{
 #ifdef MISTERCAST_HAVE_PULSE
- std::lock_guard<std::mutex> lock(mutex_);if(!running_||!stream_)return false;b.sampleRate=rate_;b.samples.resize(1600);int err=0;if(pa_simple_read(stream_,b.samples.data(),b.samples.size()*sizeof(int16_t),&err)<0){if(error_)error_({"audio",pa_strerror(err),"Check pipewire-pulse/PulseAudio and restart streaming."});return false;}b.timestampNs=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();return true;
+ if(timeout<=std::chrono::milliseconds::zero()||!running_||!stream_)return false;
+ const auto readMs=std::min<int64_t>(timeout.count(),10);
+ const auto frames=std::max<uint64_t>(1,uint64_t(rate_)*uint64_t(readMs)/1000);
+ b.sampleRate=rate_;b.samples.resize(size_t(frames)*2);int err=0;
+ if(pa_simple_read(stream_,b.samples.data(),b.samples.size()*sizeof(int16_t),&err)<0){if(error_)error_({"audio",pa_strerror(err),"Check pipewire-pulse/PulseAudio and restart streaming."});return false;}
+ b.timestampNs=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();return true;
 #else
  return false;
 #endif
- }void stop()noexcept override{running_=false;std::lock_guard<std::mutex> lock(mutex_);
+ }void stop()noexcept override{running_=false;
 #ifdef MISTERCAST_HAVE_PULSE
  if(stream_){pa_simple_free(stream_);stream_=nullptr;}
 #endif

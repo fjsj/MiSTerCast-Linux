@@ -208,8 +208,8 @@ class MainWindow final : public QMainWindow {
   void updateStats() {
     if (session_.state() != SessionState::Streaming) return;
     const auto stats = session_.stats();
-    const double audioMs = config_.source.audio && session_.state() == SessionState::Streaming
-      ? stats.audioBufferedSamples * 500.0 / 48000.0 : 0.0;
+    const double audioMs = stats.audioSampleRate
+      ? stats.audioBufferedSamples * 500.0 / stats.audioSampleRate : 0.0;
     status_->setText(QString("Streaming  |  %1 fps  |  capture %2 fps  |  dropped %3  |  sync %4/%5 (%6 us)  |  VRAM %7  |  audio %8 ms / %9%  |  MiSTer audio %10")
       .arg(stats.streamFps, 0, 'f', 1).arg(stats.captureFps, 0, 'f', 1)
       .arg(stats.droppedFrames).arg(stats.syncLine).arg(stats.fpgaVCount).arg(stats.rasterCorrectionUs)
