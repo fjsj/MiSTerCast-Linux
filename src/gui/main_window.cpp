@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QGridLayout>
@@ -340,6 +341,13 @@ public:
   }
 
   ~MainWindow() override { session_.stop(); }
+
+protected:
+  void closeEvent(QCloseEvent* event) override {
+    session_.stop();
+    statsTimer_.stop();
+    QMainWindow::closeEvent(event);
+  }
 };
 
 int launchGui(int argc, char** argv) {
