@@ -1,4 +1,5 @@
 #include "mistercast/stream_session.hpp"
+#include "mistercast/audio_pacer.hpp"
 #include "mistercast/transform.hpp"
 #include <algorithm>
 #include <chrono>
@@ -14,14 +15,14 @@ void StreamSession::stop()noexcept{auto s=state_.load();if(s==SessionState::Idle
 void StreamSession::captureLoop(){auto nextPreview=std::chrono::steady_clock::now();while(!stop_){{std::unique_lock<std::mutex>l(mutex_);cv_.wait(l,[&]{return stop_||captureRequested_;});if(stop_)break;captureRequested_=false;}Frame f;if(!video_->next(f,std::chrono::milliseconds(100))){if(!stop_){std::this_thread::sleep_for(std::chrono::milliseconds(5));std::lock_guard<std::mutex>l(mutex_);captureRequested_=true;}continue;}++captured_;auto now=std::chrono::steady_clock::now();if(config_.source.preview&&previewCallback_&&now>=nextPreview){previewCallback_(f);nextPreview=now+std::chrono::milliseconds(100);}{std::lock_guard<std::mutex>l(mutex_);if(!frames_.empty()){frames_.clear();++dropped_;}frames_.push_back(std::move(f));}cv_.notify_all();}}
 void StreamSession::renderLoop(){
  uint32_t number=0;uint8_t field=0;
- std::vector<int16_t>audioSamples;bool firstAudio=true;
+ std::vector<int16_t>audioSamples;bool firstAudio=true;AudioPacer audioPacer(audio_->sampleRate());
  if(config_.source.audio){audioSamples.reserve(32000);const auto prebufferSamples=audio_->sampleRate()/10;const auto timeout=std::chrono::steady_clock::now()+std::chrono::milliseconds(100);while(!stop_&&audioRing_.size()<prebufferSamples&&std::chrono::steady_clock::now()<timeout)std::this_thread::sleep_for(std::chrono::milliseconds(2));}
  auto audioClock=std::chrono::steady_clock::now();
  while(!stop_){
   Frame f;{std::unique_lock<std::mutex>l(mutex_);cv_.wait(l,[&]{return stop_||!frames_.empty();});if(stop_)break;while(frames_.size()>1){frames_.pop_front();++dropped_;}f=std::move(frames_.front());frames_.pop_front();}
   ++number;transport_.alignFrame(number,field);
   std::vector<uint8_t>rgb;std::string e;if(!transformRgb24(f,config_.source,config_.modeline,field,rgb,e)){fail({"stream",e,"Check capture geometry and network connectivity."});break;}
-  if(config_.source.audio){auto now=std::chrono::steady_clock::now();size_t count;if(firstAudio){count=std::min<size_t>(audioRing_.size(),32000);firstAudio=false;}else{auto elapsed=std::chrono::duration<double>(now-audioClock).count();count=std::min<size_t>(size_t(elapsed*audio_->sampleRate()*2),32000);}audioClock=now;if(count){audioSamples.resize(count);auto real=audioRing_.pop(audioSamples.data(),count);audioUnderrun_+=count-real;if(!transport_.sendAudio(audioSamples.data(),audioSamples.size(),e)){fail({"audio",e,"Check the network and restart streaming."});break;}}}
+  if(config_.source.audio){auto now=std::chrono::steady_clock::now();size_t count;if(firstAudio){count=std::min<size_t>(audioRing_.size(),32000)&~size_t(1);firstAudio=false;}else{auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(now-audioClock).count();count=audioPacer.valuesDue(uint64_t(std::max<int64_t>(elapsed,0)),32000);}audioClock=now;if(count){audioSamples.resize(count);auto real=audioRing_.pop(audioSamples.data(),count);audioUnderrun_+=count-real;if(!transport_.sendAudio(audioSamples.data(),audioSamples.size(),e)){fail({"audio",e,"Check the network and restart streaming."});break;}}}
   if(!transport_.sendFrame(number,field,rgb,e)){fail({"stream",e,"Check network connectivity."});break;}++sent_;
   if(config_.modeline.interlaced)field^=1;
   transport_.waitSync();
