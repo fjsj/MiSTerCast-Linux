@@ -63,6 +63,7 @@ With `syncRefresh` enabled, MiSTerCast implements the Groovy_MiSTer client timin
 2. Automatic frame delay converts measured capture/transform/network time plus a 1.5 ms safety margin into a nonzero target scanline.
 3. The ACK raster error corrects the next frame deadline without adding a queued frame.
 4. Interlaced streams rebase their frame number and choose the field from FPGA status before transforming pixels.
+5. The capture worker takes one frame when requested by the corrected raster cycle; it does not free-run on a second independent refresh clock or flood full-resolution captures.
 
 The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction and stream times, matched/missed ACKs, and VRAM state every five seconds. The GUI shows a compact subset in its status line. A small number of startup ACK misses or audio underrun samples can occur while buffers start; counters that continue increasing indicate a real timing or transport problem.
 
