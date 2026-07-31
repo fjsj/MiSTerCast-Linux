@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=MiSTerCast
+Comment=Stream an X11 desktop to Groovy_MiSTer
+Exec=mistercast
+Icon=mistercast
+Categories=AudioVideo;Network;
+Terminal=false
