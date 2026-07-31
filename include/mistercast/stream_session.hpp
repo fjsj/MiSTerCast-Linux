@@ -12,7 +12,8 @@ namespace mistercast {
 struct SessionStats {
  uint64_t capturedFrames{}, sentFrames{}, droppedFrames{}, audioDroppedSamples{}, audioUnderrunSamples{};
  size_t audioBufferedSamples{};
- double captureFps{}, streamFps{};
+ double captureFps{}, streamFps{}, audioPeak{};
+ bool misterAudioEnabled{};
 };
 class StreamSession {
 public:
@@ -24,6 +25,6 @@ public:
  SessionStats stats()const;
 private:
  void setState(SessionState, std::optional<SessionError> = {});void fail(SessionError);void captureLoop();void renderLoop();void audioLoop();
- std::unique_ptr<IVideoCapture>video_;std::unique_ptr<IAudioCapture>audio_;GroovyTransport transport_;AudioRing audioRing_{192000};AppConfig config_;StateCallback callback_;std::function<void(const Frame&)>previewCallback_;std::atomic<SessionState>state_{SessionState::Idle};std::atomic<bool>stop_{false};std::atomic<uint64_t>dropped_{0},captured_{0},sent_{0},audioDropped_{0},audioUnderrun_{0};std::chrono::steady_clock::time_point startedAt_{};std::mutex mutex_;std::condition_variable cv_;std::deque<Frame>frames_;std::thread captureThread_,renderThread_,audioThread_;
+ std::unique_ptr<IVideoCapture>video_;std::unique_ptr<IAudioCapture>audio_;GroovyTransport transport_;AudioRing audioRing_{192000};AppConfig config_;StateCallback callback_;std::function<void(const Frame&)>previewCallback_;std::atomic<SessionState>state_{SessionState::Idle};std::atomic<bool>stop_{false};std::atomic<uint64_t>dropped_{0},captured_{0},sent_{0},audioDropped_{0},audioUnderrun_{0};std::atomic<uint32_t>audioPeak_{0};std::chrono::steady_clock::time_point startedAt_{};std::mutex mutex_;std::condition_variable cv_;std::deque<Frame>frames_;std::thread captureThread_,renderThread_,audioThread_;
 };
 }

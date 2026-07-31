@@ -209,9 +209,9 @@ class MainWindow final : public QMainWindow {
     const auto stats = session_.stats();
     const double audioMs = config_.source.audio && session_.state() == SessionState::Streaming
       ? stats.audioBufferedSamples * 500.0 / 48000.0 : 0.0;
-    status_->setText(QString("Streaming  |  %1 fps  |  capture %2 fps  |  dropped %3  |  audio %4 ms")
+    status_->setText(QString("Streaming  |  %1 fps  |  capture %2 fps  |  dropped %3  |  audio %4 ms / %5%  |  MiSTer audio %6")
       .arg(stats.streamFps, 0, 'f', 1).arg(stats.captureFps, 0, 'f', 1)
-      .arg(stats.droppedFrames).arg(audioMs, 0, 'f', 0));
+      .arg(stats.droppedFrames).arg(audioMs, 0, 'f', 0).arg(stats.audioPeak*100, 0, 'f', 0).arg(stats.misterAudioEnabled ? "on" : "off"));
     if (stats.droppedFrames > previousDropped_ + 30) {
       append(QString("Performance: %1 video frames dropped.").arg(stats.droppedFrames));
       previousDropped_ = stats.droppedFrames;
