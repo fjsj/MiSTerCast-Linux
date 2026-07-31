@@ -1,34 +1,292 @@
 #include "mistercast/stream_session.hpp"
-#include "mistercast/audio_pacer.hpp"
-#include "mistercast/transform.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdlib>
+
+#include "mistercast/audio_pacer.hpp"
+#include "mistercast/transform.hpp"
 namespace mistercast {
-StreamSession::StreamSession(std::unique_ptr<IVideoCapture>v,std::unique_ptr<IAudioCapture>a):video_(std::move(v)),audio_(std::move(a)){}StreamSession::~StreamSession(){stop();}
-SessionStats StreamSession::stats()const{SessionStats result;result.capturedFrames=captured_;result.sentFrames=sent_;result.droppedFrames=dropped_;result.audioDroppedSamples=audioDropped_;result.audioUnderrunSamples=audioUnderrun_;result.audioBufferedSamples=audioRing_.size();result.audioSampleRate=config_.source.audio?audio_->sampleRate():0;result.audioPeak=audioPeak_/32768.0;result.misterAudioEnabled=transport_.misterAudioEnabled();auto network=transport_.stats();result.acknowledgedFrame=network.acknowledgedFrame;result.fpgaFrame=network.fpgaFrame;result.syncLine=network.requestedSyncLine;result.fpgaVCount=network.fpgaVCount;result.acknowledgedFrames=network.acknowledgedFrames;result.missedAcks=network.missedAcks;result.streamTimeUs=network.streamTimeUs;result.ackAgeMs=network.ackAgeMs;result.rasterCorrectionUs=network.rasterCorrectionUs;result.vramSynced=network.vramSynced;result.vgaFrameskip=network.vgaFrameskip;result.vgaVblank=network.vgaVblank;auto seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-startedAt_).count();if(seconds>0){result.captureFps=result.capturedFrames/seconds;result.streamFps=result.sentFrames/seconds;}return result;}
-void StreamSession::setState(SessionState s,std::optional<SessionError>e){state_=s;if(callback_)callback_(s,e);}
-void StreamSession::fail(SessionError e){stop_=true;setState(SessionState::Error,e);cv_.notify_all();}
-bool StreamSession::start(const AppConfig&c,StateCallback cb,std::string*err){if(state_!=SessionState::Idle&&state_!=SessionState::Error){if(err)*err="stream is already active";return false;}stop();callback_=std::move(cb);config_=c;if(auto e=c.validate()){if(err)*err=*e;setState(SessionState::Error,SessionError{"config",*e,"Correct the settings and try again."});return false;}if(c.target.empty()){if(err)*err="target address is required";return false;}stop_=false;dropped_=captured_=sent_=audioDropped_=audioUnderrun_=audioPeak_=0;audioRing_.reset();{std::lock_guard<std::mutex>l(mutex_);frames_.clear();captureRequested_=true;}setState(SessionState::Starting);auto onError=[this](SessionError e){fail(std::move(e));};if(!video_->start(c.source.monitor,onError)){if(err)*err="video capture initialization failed";setState(SessionState::Error);return false;}uint32_t rate=48000;if(c.source.audio&&!audio_->start(c.source.audioSink,onError)){video_->stop();if(err)*err="audio capture initialization failed";setState(SessionState::Error);return false;}if(c.source.audio)rate=audio_->sampleRate();std::string e;if(!transport_.open(c.target,rate,e)||!transport_.switchMode(c.modeline,c.source.progressiveInterlaceBuffer,e)){audio_->stop();video_->stop();transport_.close();if(err)*err=e;setState(SessionState::Error,SessionError{"network",e,"Verify the address, MiSTer core, and UDP port 32100."});return false;}transport_.setSyncOptions(c.source.syncRefresh,c.source.frameDelay);startedAt_=std::chrono::steady_clock::now();if(c.source.audio)audioThread_=std::thread(&StreamSession::audioLoop,this);captureThread_=std::thread(&StreamSession::captureLoop,this);renderThread_=std::thread(&StreamSession::renderLoop,this);setState(SessionState::Streaming);return true;}
-void StreamSession::stop()noexcept{auto s=state_.load();if(s==SessionState::Idle&&!captureThread_.joinable()&&!renderThread_.joinable()&&!audioThread_.joinable())return;if(s!=SessionState::Error)setState(SessionState::Stopping);stop_=true;cv_.notify_all();video_->stop();if(captureThread_.joinable()&&captureThread_.get_id()!=std::this_thread::get_id())captureThread_.join();if(renderThread_.joinable()&&renderThread_.get_id()!=std::this_thread::get_id())renderThread_.join();if(audioThread_.joinable()&&audioThread_.get_id()!=std::this_thread::get_id())audioThread_.join();audio_->stop();transport_.close();{std::lock_guard<std::mutex>l(mutex_);frames_.clear();}setState(SessionState::Idle);}
-void StreamSession::captureLoop(){auto nextPreview=std::chrono::steady_clock::now();while(!stop_){{std::unique_lock<std::mutex>l(mutex_);cv_.wait(l,[&]{return stop_||captureRequested_;});if(stop_)break;captureRequested_=false;}Frame f;if(!video_->next(f,std::chrono::milliseconds(100))){if(!stop_){std::this_thread::sleep_for(std::chrono::milliseconds(5));std::lock_guard<std::mutex>l(mutex_);captureRequested_=true;}continue;}++captured_;auto now=std::chrono::steady_clock::now();if(config_.source.preview&&previewCallback_&&now>=nextPreview){previewCallback_(f);nextPreview=now+std::chrono::milliseconds(100);}{std::lock_guard<std::mutex>l(mutex_);if(!frames_.empty()){frames_.clear();++dropped_;}frames_.push_back(std::move(f));}cv_.notify_all();}}
-void StreamSession::renderLoop(){
- uint32_t number=0;uint8_t field=0;
- std::vector<int16_t>audioSamples,audioSourceSamples;bool firstAudio=true;AudioPacer audioPacer(audio_->sampleRate());
- if(config_.source.audio){audioSamples.reserve(32000);const auto prebufferSamples=audio_->sampleRate()/10;const auto timeout=std::chrono::steady_clock::now()+std::chrono::milliseconds(100);while(!stop_&&audioRing_.size()<prebufferSamples&&std::chrono::steady_clock::now()<timeout)std::this_thread::sleep_for(std::chrono::milliseconds(2));}
- auto audioClock=std::chrono::steady_clock::now();
- while(!stop_){
-  Frame f;{std::unique_lock<std::mutex>l(mutex_);cv_.wait(l,[&]{return stop_||!frames_.empty();});if(stop_)break;while(frames_.size()>1){frames_.pop_front();++dropped_;}f=std::move(frames_.front());frames_.pop_front();}
-  ++number;transport_.alignFrame(number,field);
-  std::vector<uint8_t>rgb;std::string e;if(!transformRgb24(f,config_.source,config_.modeline,field,rgb,e)){fail({"stream",e,"Check capture geometry and network connectivity."});break;}
-  if(config_.source.audio){auto now=std::chrono::steady_clock::now();size_t count;if(firstAudio){const auto lineNs=uint64_t(std::llround(double(config_.modeline.hTotal)*1000.0/config_.modeline.pixelClockMHz));const auto cycleNs=lineNs*config_.modeline.vTotal/(config_.modeline.interlaced?2:1);count=audioPacer.valuesDue(cycleNs,32000);firstAudio=false;audioSamples.resize(count);auto real=audioRing_.pop(audioSamples.data(),count);audioUnderrun_+=count-real;}else{auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(now-audioClock).count();count=audioPacer.valuesDue(uint64_t(std::max<int64_t>(elapsed,0)),32000);const auto buffered=audioRing_.size();const auto rate=audio_->sampleRate();const auto targetValues=(size_t(rate)*2/25)&~size_t(1);const auto hysteresisValues=size_t(rate/50)&~size_t(1);const auto sourceCount=audioPacer.sourceValuesFor(count,buffered,targetValues,hysteresisValues);audioSourceSamples.resize(sourceCount);auto real=audioRing_.pop(audioSourceSamples.data(),sourceCount);audioUnderrun_+=sourceCount-real;AudioPacer::conformStereo(audioSourceSamples.data(),sourceCount,audioSamples,count);}audioClock=now;if(count&&!transport_.sendAudio(audioSamples.data(),audioSamples.size(),e)){fail({"audio",e,"Check the network and restart streaming."});break;}}
-  if(!transport_.sendFrame(number,field,rgb,e)){fail({"stream",e,"Check network connectivity."});break;}++sent_;
-  if(config_.modeline.interlaced)field^=1;
-  transport_.waitSync();
-  {std::lock_guard<std::mutex>l(mutex_);captureRequested_=true;}cv_.notify_all();
- }
+StreamSession::StreamSession(std::unique_ptr<IVideoCapture> v,
+                             std::unique_ptr<IAudioCapture> a)
+    : video_(std::move(v)), audio_(std::move(a)) {}
+StreamSession::~StreamSession() { stop(); }
+SessionStats StreamSession::stats() const {
+  SessionStats result;
+  result.capturedFrames = captured_;
+  result.sentFrames = sent_;
+  result.droppedFrames = dropped_;
+  result.audioDroppedSamples = audioDropped_;
+  result.audioUnderrunSamples = audioUnderrun_;
+  result.audioBufferedSamples = audioRing_.size();
+  result.audioSampleRate = config_.source.audio ? audio_->sampleRate() : 0;
+  result.audioPeak = audioPeak_ / 32768.0;
+  result.misterAudioEnabled = transport_.misterAudioEnabled();
+  auto network = transport_.stats();
+  result.acknowledgedFrame = network.acknowledgedFrame;
+  result.fpgaFrame = network.fpgaFrame;
+  result.syncLine = network.requestedSyncLine;
+  result.fpgaVCount = network.fpgaVCount;
+  result.acknowledgedFrames = network.acknowledgedFrames;
+  result.missedAcks = network.missedAcks;
+  result.streamTimeUs = network.streamTimeUs;
+  result.ackAgeMs = network.ackAgeMs;
+  result.rasterCorrectionUs = network.rasterCorrectionUs;
+  result.vramSynced = network.vramSynced;
+  result.vgaFrameskip = network.vgaFrameskip;
+  result.vgaVblank = network.vgaVblank;
+  auto seconds = std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - startedAt_)
+                     .count();
+  if (seconds > 0) {
+    result.captureFps = result.capturedFrames / seconds;
+    result.streamFps = result.sentFrames / seconds;
+  }
+  return result;
 }
-void StreamSession::audioLoop(){while(!stop_){PcmBlock b;if(!audio_->next(b,std::chrono::milliseconds(100))){if(!stop_)std::this_thread::sleep_for(std::chrono::milliseconds(5));continue;}uint32_t peak=0;for(auto sample:b.samples){auto magnitude=sample==INT16_MIN?32768u:uint32_t(std::abs(int(sample)));peak=std::max(peak,magnitude);}audioPeak_=peak;audioDropped_+=audioRing_.push(b.samples.data(),b.samples.size());}}
+void StreamSession::setState(SessionState s, std::optional<SessionError> e) {
+  state_ = s;
+  if (callback_) callback_(s, e);
 }
+void StreamSession::fail(SessionError e) {
+  stop_ = true;
+  setState(SessionState::Error, e);
+  cv_.notify_all();
+}
+bool StreamSession::start(const AppConfig& c, StateCallback cb,
+                          std::string* err) {
+  if (state_ != SessionState::Idle && state_ != SessionState::Error) {
+    if (err) *err = "stream is already active";
+    return false;
+  }
+  stop();
+  callback_ = std::move(cb);
+  config_ = c;
+  if (auto e = c.validate()) {
+    if (err) *err = *e;
+    setState(SessionState::Error,
+             SessionError{"config", *e, "Correct the settings and try again."});
+    return false;
+  }
+  if (c.target.empty()) {
+    if (err) *err = "target address is required";
+    return false;
+  }
+  stop_ = false;
+  dropped_ = captured_ = sent_ = audioDropped_ = audioUnderrun_ = audioPeak_ =
+      0;
+  audioRing_.reset();
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    frames_.clear();
+    captureRequested_ = true;
+  }
+  setState(SessionState::Starting);
+  auto onError = [this](SessionError e) { fail(std::move(e)); };
+  if (!video_->start(c.source.monitor, onError)) {
+    if (err) *err = "video capture initialization failed";
+    setState(SessionState::Error);
+    return false;
+  }
+  uint32_t rate = 48000;
+  if (c.source.audio && !audio_->start(c.source.audioSink, onError)) {
+    video_->stop();
+    if (err) *err = "audio capture initialization failed";
+    setState(SessionState::Error);
+    return false;
+  }
+  if (c.source.audio) rate = audio_->sampleRate();
+  std::string e;
+  if (!transport_.open(c.target, rate, e) ||
+      !transport_.switchMode(c.modeline, c.source.progressiveInterlaceBuffer,
+                             e)) {
+    audio_->stop();
+    video_->stop();
+    transport_.close();
+    if (err) *err = e;
+    setState(
+        SessionState::Error,
+        SessionError{"network", e,
+                     "Verify the address, MiSTer core, and UDP port 32100."});
+    return false;
+  }
+  transport_.setSyncOptions(c.source.syncRefresh, c.source.frameDelay);
+  startedAt_ = std::chrono::steady_clock::now();
+  if (c.source.audio)
+    audioThread_ = std::thread(&StreamSession::audioLoop, this);
+  captureThread_ = std::thread(&StreamSession::captureLoop, this);
+  renderThread_ = std::thread(&StreamSession::renderLoop, this);
+  setState(SessionState::Streaming);
+  return true;
+}
+void StreamSession::stop() noexcept {
+  auto s = state_.load();
+  if (s == SessionState::Idle && !captureThread_.joinable() &&
+      !renderThread_.joinable() && !audioThread_.joinable())
+    return;
+  if (s != SessionState::Error) setState(SessionState::Stopping);
+  stop_ = true;
+  cv_.notify_all();
+  video_->stop();
+  if (captureThread_.joinable() &&
+      captureThread_.get_id() != std::this_thread::get_id())
+    captureThread_.join();
+  if (renderThread_.joinable() &&
+      renderThread_.get_id() != std::this_thread::get_id())
+    renderThread_.join();
+  if (audioThread_.joinable() &&
+      audioThread_.get_id() != std::this_thread::get_id())
+    audioThread_.join();
+  audio_->stop();
+  transport_.close();
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    frames_.clear();
+  }
+  setState(SessionState::Idle);
+}
+void StreamSession::captureLoop() {
+  auto nextPreview = std::chrono::steady_clock::now();
+  while (!stop_) {
+    {
+      std::unique_lock<std::mutex> l(mutex_);
+      cv_.wait(l, [&] { return stop_ || captureRequested_; });
+      if (stop_) break;
+      captureRequested_ = false;
+    }
+    Frame f;
+    if (!video_->next(f, std::chrono::milliseconds(100))) {
+      if (!stop_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::lock_guard<std::mutex> l(mutex_);
+        captureRequested_ = true;
+      }
+      continue;
+    }
+    ++captured_;
+    auto now = std::chrono::steady_clock::now();
+    if (config_.source.preview && previewCallback_ && now >= nextPreview) {
+      previewCallback_(f);
+      nextPreview = now + std::chrono::milliseconds(100);
+    }
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      if (!frames_.empty()) {
+        frames_.clear();
+        ++dropped_;
+      }
+      frames_.push_back(std::move(f));
+    }
+    cv_.notify_all();
+  }
+}
+void StreamSession::renderLoop() {
+  uint32_t number = 0;
+  uint8_t field = 0;
+  std::vector<int16_t> audioSamples, audioSourceSamples;
+  bool firstAudio = true;
+  AudioPacer audioPacer(audio_->sampleRate());
+  if (config_.source.audio) {
+    audioSamples.reserve(32000);
+    const auto prebufferSamples = audio_->sampleRate() / 10;
+    const auto timeout =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (!stop_ && audioRing_.size() < prebufferSamples &&
+           std::chrono::steady_clock::now() < timeout)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  auto audioClock = std::chrono::steady_clock::now();
+  while (!stop_) {
+    Frame f;
+    {
+      std::unique_lock<std::mutex> l(mutex_);
+      cv_.wait(l, [&] { return stop_ || !frames_.empty(); });
+      if (stop_) break;
+      while (frames_.size() > 1) {
+        frames_.pop_front();
+        ++dropped_;
+      }
+      f = std::move(frames_.front());
+      frames_.pop_front();
+    }
+    ++number;
+    transport_.alignFrame(number, field);
+    std::vector<uint8_t> rgb;
+    std::string e;
+    if (!transformRgb24(f, config_.source, config_.modeline, field, rgb, e)) {
+      fail({"stream", e, "Check capture geometry and network connectivity."});
+      break;
+    }
+    if (config_.source.audio) {
+      auto now = std::chrono::steady_clock::now();
+      size_t count;
+      if (firstAudio) {
+        const auto lineNs =
+            uint64_t(std::llround(double(config_.modeline.hTotal) * 1000.0 /
+                                  config_.modeline.pixelClockMHz));
+        const auto cycleNs = lineNs * config_.modeline.vTotal /
+                             (config_.modeline.interlaced ? 2 : 1);
+        count = audioPacer.valuesDue(cycleNs, 32000);
+        firstAudio = false;
+        audioSamples.resize(count);
+        auto real = audioRing_.pop(audioSamples.data(), count);
+        audioUnderrun_ += count - real;
+      } else {
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           now - audioClock)
+                           .count();
+        count = audioPacer.valuesDue(uint64_t(std::max<int64_t>(elapsed, 0)),
+                                     32000);
+        const auto buffered = audioRing_.size();
+        const auto rate = audio_->sampleRate();
+        const auto targetValues = (size_t(rate) * 2 / 25) & ~size_t(1);
+        const auto hysteresisValues = size_t(rate / 50) & ~size_t(1);
+        const auto sourceCount = audioPacer.sourceValuesFor(
+            count, buffered, targetValues, hysteresisValues);
+        audioSourceSamples.resize(sourceCount);
+        auto real = audioRing_.pop(audioSourceSamples.data(), sourceCount);
+        audioUnderrun_ += sourceCount - real;
+        AudioPacer::conformStereo(audioSourceSamples.data(), sourceCount,
+                                  audioSamples, count);
+      }
+      audioClock = now;
+      if (count &&
+          !transport_.sendAudio(audioSamples.data(), audioSamples.size(), e)) {
+        fail({"audio", e, "Check the network and restart streaming."});
+        break;
+      }
+    }
+    if (!transport_.sendFrame(number, field, rgb, e)) {
+      fail({"stream", e, "Check network connectivity."});
+      break;
+    }
+    ++sent_;
+    if (config_.modeline.interlaced) field ^= 1;
+    transport_.waitSync();
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      captureRequested_ = true;
+    }
+    cv_.notify_all();
+  }
+}
+void StreamSession::audioLoop() {
+  while (!stop_) {
+    PcmBlock b;
+    if (!audio_->next(b, std::chrono::milliseconds(100))) {
+      if (!stop_) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      continue;
+    }
+    uint32_t peak = 0;
+    for (auto sample : b.samples) {
+      auto magnitude =
+          sample == INT16_MIN ? 32768u : uint32_t(std::abs(int(sample)));
+      peak = std::max(peak, magnitude);
+    }
+    audioPeak_ = peak;
+    audioDropped_ += audioRing_.push(b.samples.data(), b.samples.size());
+  }
+}
+}  // namespace mistercast

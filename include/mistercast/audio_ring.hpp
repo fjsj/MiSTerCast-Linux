@@ -5,12 +5,16 @@
 #include <vector>
 namespace mistercast {
 class AudioRing {
-public:
+ public:
   explicit AudioRing(size_t capacitySamples);
-  size_t push(const int16_t*, size_t); // returns samples dropped
-  size_t pop(int16_t*, size_t); // zero-fills underrun, returns real samples
-  void reset(); size_t size() const;
-private:
-  mutable std::mutex mutex_; std::vector<int16_t> data_; size_t read_{}, write_{}, size_{};
+  size_t push(const int16_t*, size_t);  // returns samples dropped
+  size_t pop(int16_t*, size_t);  // zero-fills underrun, returns real samples
+  void reset();
+  size_t size() const;
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<int16_t> data_;
+  size_t read_{}, write_{}, size_{};
 };
-}
+}  // namespace mistercast
