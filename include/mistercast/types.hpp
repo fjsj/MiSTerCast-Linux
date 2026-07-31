@@ -59,6 +59,9 @@ struct AppConfig {
   std::optional<std::string> validate() const;
 };
 
+struct CropRect {
+  uint32_t x{}, y{}, width{}, height{};
+};
 struct Frame {
   uint32_t width{}, height{}, stride{};
   uint64_t sequence{};

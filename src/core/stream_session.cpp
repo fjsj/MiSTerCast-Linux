@@ -90,6 +90,21 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     setState(SessionState::Error);
     return false;
   }
+  // Restrict capture to the crop up front so only the pixels that will be sent
+  // are ever transferred out of the X server.
+  const auto monitor = video_->selected();
+  CropRect crop;
+  std::string cropError;
+  if (!calculateCrop(monitor.width, monitor.height, c.source, c.modeline, crop,
+                     cropError)) {
+    video_->stop();
+    if (err) *err = cropError;
+    setState(SessionState::Error,
+             SessionError{"video", cropError,
+                          "Check the crop size, offsets, and monitor."});
+    return false;
+  }
+  video_->setRegion(crop);
   uint32_t rate = 48000;
   if (c.source.audio && !audio_->start(c.source.audioSink, onError)) {
     video_->stop();
@@ -185,6 +200,7 @@ void StreamSession::captureLoop() {
 void StreamSession::renderLoop() {
   uint32_t number = 0;
   uint8_t field = 0;
+  std::vector<uint8_t> rgb;
   std::vector<int16_t> audioSamples, audioSourceSamples;
   bool firstAudio = true;
   AudioPacer audioPacer(audio_->sampleRate());
@@ -213,9 +229,11 @@ void StreamSession::renderLoop() {
     }
     ++number;
     transport_.alignFrame(number, field);
-    std::vector<uint8_t> rgb;
     std::string e;
-    if (!transformRgb24(f, config_.source, config_.modeline, field, rgb, e)) {
+    // The captured frame is already the crop region, so sample all of it.
+    const CropRect wholeFrame{0, 0, f.width, f.height};
+    if (!transformRgb24(f, wholeFrame, config_.source, config_.modeline, field,
+                        rgb, e)) {
       fail({"stream", e, "Check capture geometry and network connectivity."});
       break;
     }

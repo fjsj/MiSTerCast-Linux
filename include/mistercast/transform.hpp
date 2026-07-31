@@ -3,12 +3,15 @@
 
 #include "mistercast/types.hpp"
 namespace mistercast {
-struct CropRect {
-  uint32_t x{}, y{}, width{}, height{};
-};
 bool calculateCrop(uint32_t sourceWidth, uint32_t sourceHeight,
                    const SourceOptions&, const Modeline&, CropRect&,
                    std::string& error);
+// Samples an explicit frame-relative crop. Callers that already restricted
+// capture to the crop region pass the whole frame and avoid cropping twice.
+bool transformRgb24(const Frame&, const CropRect&, const SourceOptions&,
+                    const Modeline&, uint8_t field, std::vector<uint8_t>&,
+                    std::string& error);
+// Derives the crop from the source options, for whole-monitor frames.
 bool transformRgb24(const Frame&, const SourceOptions&, const Modeline&,
                     uint8_t field, std::vector<uint8_t>&, std::string& error);
 bool normalizeToBgra(const uint8_t* source, size_t size, uint32_t width,
