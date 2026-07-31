@@ -1,22 +1,183 @@
 #include "mistercast/config.hpp"
+
 #include <cstdlib>
 #include <fstream>
 #include <regex>
 #include <sstream>
 #include <system_error>
+#include <type_traits>
 #include <unistd.h>
 
 namespace mistercast {
-std::filesystem::path configPath(){if(const char*x=std::getenv("XDG_CONFIG_HOME");x&&*x)return std::filesystem::path(x)/"mistercast/config.json";if(const char*h=std::getenv("HOME");h&&*h)return std::filesystem::path(h)/".config/mistercast/config.json";return std::filesystem::current_path()/"config.json";}
-static std::string escape(const std::string&s){std::string o;for(char c:s){if(c=='"'||c=='\\')o+='\\';if(c=='\n'){o+="\\n";continue;}o+=c;}return o;}
-static bool stringValue(const std::string&s,const char*k,std::string&o){std::regex r(std::string("\\\"")+k+"\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"");std::smatch m;if(!std::regex_search(s,m,r))return false;o=m[1];return true;}
-static bool numberValue(const std::string&s,const char*k,double&o){std::regex r(std::string("\\\"")+k+"\\\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)");std::smatch m;if(!std::regex_search(s,m,r))return false;try{o=std::stod(m[1]);return true;}catch(...){return false;}}
-static bool boolValue(const std::string&s,const char*k,bool&o){std::regex r(std::string("\\\"")+k+"\\\"\\s*:\\s*(true|false)");std::smatch m;if(!std::regex_search(s,m,r))return false;o=m[1]=="true";return true;}
-static bool modelineObject(const std::string&s,Modeline&m){double n;stringValue(s,"name",m.name);auto get=[&](const char*k,auto&v){double x;if(!numberValue(s,k,x))return false;v=static_cast<std::decay_t<decltype(v)>>(x);return true;};bool interlace=false;if(!numberValue(s,"pixelClockMHz",n))return false;m.pixelClockMHz=n;if(!get("hActive",m.hActive)||!get("hBegin",m.hBegin)||!get("hEnd",m.hEnd)||!get("hTotal",m.hTotal)||!get("vActive",m.vActive)||!get("vBegin",m.vBegin)||!get("vEnd",m.vEnd)||!get("vTotal",m.vTotal))return false;boolValue(s,"interlaced",interlace);m.interlaced=interlace;return !m.validate();}
-AppConfig loadConfig(const std::filesystem::path&p,std::string*w){AppConfig c;std::ifstream f(p);if(!f)return c;std::stringstream b;b<<f.rdbuf();auto s=b.str();double n;
-  if(!numberValue(s,"version",n)||n!=1){if(w)*w="invalid or unsupported config; safe defaults loaded";return AppConfig{};}c.version=1;stringValue(s,"target",c.target);stringValue(s,"monitor",c.source.monitor);stringValue(s,"modelineName",c.modeline.name);
-  auto num=[&](const char*k,auto&v){double x;if(numberValue(s,k,x))v=static_cast<std::decay_t<decltype(v)>>(x);};num("frameDelay",c.source.frameDelay);num("width",c.source.width);num("height",c.source.height);num("xOffset",c.source.xOffset);num("yOffset",c.source.yOffset);num("pixelClockMHz",c.modeline.pixelClockMHz);num("hActive",c.modeline.hActive);num("hBegin",c.modeline.hBegin);num("hEnd",c.modeline.hEnd);num("hTotal",c.modeline.hTotal);num("vActive",c.modeline.vActive);num("vBegin",c.modeline.vBegin);num("vEnd",c.modeline.vEnd);num("vTotal",c.modeline.vTotal);boolValue(s,"syncRefresh",c.source.syncRefresh);boolValue(s,"progressiveInterlaceBuffer",c.source.progressiveInterlaceBuffer);boolValue(s,"audio",c.source.audio);boolValue(s,"preview",c.source.preview);boolValue(s,"interlaced",c.modeline.interlaced);
-  std::string x;if(stringValue(s,"alignment",x))parseAlignment(x,c.source.alignment);if(stringValue(s,"crop",x))parseCropMode(x,c.source.crop);if(stringValue(s,"rotation",x))parseRotation(x,c.source.rotation);auto array=s.find("\"customModelines\"");if(array!=std::string::npos){auto begin=s.find('[',array),end=s.find(']',begin);if(begin!=std::string::npos&&end!=std::string::npos){std::regex object("\\{([^{}]*)\\}");for(std::sregex_iterator it(s.begin()+begin,s.begin()+end,object),last;it!=last;++it){Modeline custom;if(modelineObject((*it)[1],custom))c.customModelines.push_back(std::move(custom));}}}if(auto e=c.validate()){if(w)*w="invalid config ("+*e+"); safe defaults loaded";return AppConfig{};}return c;}
-bool saveConfig(const AppConfig&c,const std::filesystem::path&p,std::string&e){if(auto x=c.validate()){e=*x;return false;}std::error_code ec;std::filesystem::create_directories(p.parent_path(),ec);if(ec){e=ec.message();return false;}auto tmp=p;tmp+=".tmp."+std::to_string(::getpid());std::ofstream f(tmp,std::ios::trunc);if(!f){e="cannot create temporary configuration";return false;}
- f<<"{\n  \"version\": 1,\n  \"target\": \""<<escape(c.target)<<"\",\n  \"monitor\": \""<<escape(c.source.monitor)<<"\",\n  \"syncRefresh\": "<<(c.source.syncRefresh?"true":"false")<<",\n  \"progressiveInterlaceBuffer\": "<<(c.source.progressiveInterlaceBuffer?"true":"false")<<",\n  \"audio\": "<<(c.source.audio?"true":"false")<<",\n  \"preview\": "<<(c.source.preview?"true":"false")<<",\n  \"frameDelay\": "<<c.source.frameDelay<<",\n  \"alignment\": \""<<toString(c.source.alignment)<<"\",\n  \"crop\": \""<<toString(c.source.crop)<<"\",\n  \"width\": "<<c.source.width<<", \"height\": "<<c.source.height<<",\n  \"xOffset\": "<<c.source.xOffset<<", \"yOffset\": "<<c.source.yOffset<<",\n  \"rotation\": \""<<toString(c.source.rotation)<<"\",\n  \"modelineName\": \""<<escape(c.modeline.name)<<"\",\n  \"pixelClockMHz\": "<<c.modeline.pixelClockMHz<<",\n  \"hActive\": "<<c.modeline.hActive<<", \"hBegin\": "<<c.modeline.hBegin<<", \"hEnd\": "<<c.modeline.hEnd<<", \"hTotal\": "<<c.modeline.hTotal<<",\n  \"vActive\": "<<c.modeline.vActive<<", \"vBegin\": "<<c.modeline.vBegin<<", \"vEnd\": "<<c.modeline.vEnd<<", \"vTotal\": "<<c.modeline.vTotal<<",\n  \"interlaced\": "<<(c.modeline.interlaced?"true":"false")<<",\n  \"customModelines\": [";for(size_t i=0;i<c.customModelines.size();++i){auto&m=c.customModelines[i];if(i)f<<',';f<<"\n    {\"name\":\""<<escape(m.name)<<"\",\"pixelClockMHz\":"<<m.pixelClockMHz<<",\"hActive\":"<<m.hActive<<",\"hBegin\":"<<m.hBegin<<",\"hEnd\":"<<m.hEnd<<",\"hTotal\":"<<m.hTotal<<",\"vActive\":"<<m.vActive<<",\"vBegin\":"<<m.vBegin<<",\"vEnd\":"<<m.vEnd<<",\"vTotal\":"<<m.vTotal<<",\"interlaced\":"<<(m.interlaced?"true":"false")<<'}';}f<<"\n  ]\n}\n";f.flush();if(!f){e="failed writing configuration";f.close();std::filesystem::remove(tmp);return false;}f.close();std::filesystem::rename(tmp,p,ec);if(ec){e=ec.message();std::filesystem::remove(tmp);return false;}return true;}
+std::filesystem::path configPath() {
+  if (const char* value = std::getenv("XDG_CONFIG_HOME"); value && *value)
+    return std::filesystem::path(value) / "mistercast/config.json";
+  if (const char* home = std::getenv("HOME"); home && *home)
+    return std::filesystem::path(home) / ".config/mistercast/config.json";
+  return std::filesystem::current_path() / "config.json";
 }
+
+static std::string escape(const std::string& value) {
+  std::string result;
+  for (char character : value) {
+    if (character == '"' || character == '\\') result += '\\';
+    if (character == '\n') { result += "\\n"; continue; }
+    result += character;
+  }
+  return result;
+}
+
+static bool stringValue(const std::string& json, const char* key, std::string& value) {
+  const std::regex expression(std::string("\\\"") + key + "\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"");
+  std::smatch match;
+  if (!std::regex_search(json, match, expression)) return false;
+  value = match[1];
+  return true;
+}
+
+static bool numberValue(const std::string& json, const char* key, double& value) {
+  const std::regex expression(std::string("\\\"") + key + "\\\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)");
+  std::smatch match;
+  if (!std::regex_search(json, match, expression)) return false;
+  try { value = std::stod(match[1]); return true; } catch (...) { return false; }
+}
+
+static bool boolValue(const std::string& json, const char* key, bool& value) {
+  const std::regex expression(std::string("\\\"") + key + "\\\"\\s*:\\s*(true|false)");
+  std::smatch match;
+  if (!std::regex_search(json, match, expression)) return false;
+  value = match[1] == "true";
+  return true;
+}
+
+static bool modelineObject(const std::string& json, Modeline& modeline) {
+  double number = 0;
+  stringValue(json, "name", modeline.name);
+  auto get = [&](const char* key, auto& value) {
+    double parsed = 0;
+    if (!numberValue(json, key, parsed)) return false;
+    value = static_cast<std::decay_t<decltype(value)>>(parsed);
+    return true;
+  };
+  if (!numberValue(json, "pixelClockMHz", number)) return false;
+  modeline.pixelClockMHz = number;
+  if (!get("hActive", modeline.hActive) || !get("hBegin", modeline.hBegin) ||
+      !get("hEnd", modeline.hEnd) || !get("hTotal", modeline.hTotal) ||
+      !get("vActive", modeline.vActive) || !get("vBegin", modeline.vBegin) ||
+      !get("vEnd", modeline.vEnd) || !get("vTotal", modeline.vTotal)) return false;
+  bool interlaced = false;
+  boolValue(json, "interlaced", interlaced);
+  modeline.interlaced = interlaced;
+  return !modeline.validate();
+}
+
+AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
+  AppConfig config;
+  std::ifstream file(path);
+  if (!file) return config;
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  const auto json = buffer.str();
+  double version = 0;
+  if (!numberValue(json, "version", version) || version != 1) {
+    if (warning) *warning = "invalid or unsupported config; safe defaults loaded";
+    return AppConfig{};
+  }
+  config.version = 1;
+  stringValue(json, "target", config.target);
+  stringValue(json, "monitor", config.source.monitor);
+  stringValue(json, "audioSink", config.source.audioSink);
+  stringValue(json, "modelineName", config.modeline.name);
+  auto number = [&](const char* key, auto& value) {
+    double parsed = 0;
+    if (numberValue(json, key, parsed)) value = static_cast<std::decay_t<decltype(value)>>(parsed);
+  };
+  number("frameDelay", config.source.frameDelay);
+  number("width", config.source.width); number("height", config.source.height);
+  number("xOffset", config.source.xOffset); number("yOffset", config.source.yOffset);
+  number("pixelClockMHz", config.modeline.pixelClockMHz);
+  number("hActive", config.modeline.hActive); number("hBegin", config.modeline.hBegin);
+  number("hEnd", config.modeline.hEnd); number("hTotal", config.modeline.hTotal);
+  number("vActive", config.modeline.vActive); number("vBegin", config.modeline.vBegin);
+  number("vEnd", config.modeline.vEnd); number("vTotal", config.modeline.vTotal);
+  boolValue(json, "syncRefresh", config.source.syncRefresh);
+  boolValue(json, "progressiveInterlaceBuffer", config.source.progressiveInterlaceBuffer);
+  boolValue(json, "audio", config.source.audio); boolValue(json, "preview", config.source.preview);
+  boolValue(json, "interlaced", config.modeline.interlaced);
+  std::string value;
+  if (stringValue(json, "alignment", value)) parseAlignment(value, config.source.alignment);
+  if (stringValue(json, "crop", value)) parseCropMode(value, config.source.crop);
+  if (stringValue(json, "rotation", value)) parseRotation(value, config.source.rotation);
+  const auto array = json.find("\"customModelines\"");
+  if (array != std::string::npos) {
+    const auto begin = json.find('[', array), end = json.find(']', begin);
+    if (begin != std::string::npos && end != std::string::npos) {
+      const std::regex object("\\{([^{}]*)\\}");
+      for (std::sregex_iterator it(json.begin() + begin, json.begin() + end, object), last; it != last; ++it) {
+        Modeline custom;
+        if (modelineObject((*it)[1], custom)) config.customModelines.push_back(std::move(custom));
+      }
+    }
+  }
+  if (auto error = config.validate()) {
+    if (warning) *warning = "invalid config (" + *error + "); safe defaults loaded";
+    return AppConfig{};
+  }
+  return config;
+}
+
+bool saveConfig(const AppConfig& config, const std::filesystem::path& path, std::string& error) {
+  if (auto validation = config.validate()) { error = *validation; return false; }
+  std::error_code filesystemError;
+  std::filesystem::create_directories(path.parent_path(), filesystemError);
+  if (filesystemError) { error = filesystemError.message(); return false; }
+  auto temporary = path;
+  temporary += ".tmp." + std::to_string(::getpid());
+  std::ofstream file(temporary, std::ios::trunc);
+  if (!file) { error = "cannot create temporary configuration"; return false; }
+  file << "{\n  \"version\": 1,\n"
+       << "  \"target\": \"" << escape(config.target) << "\",\n"
+       << "  \"monitor\": \"" << escape(config.source.monitor) << "\",\n"
+       << "  \"audioSink\": \"" << escape(config.source.audioSink) << "\",\n"
+       << "  \"syncRefresh\": " << (config.source.syncRefresh ? "true" : "false") << ",\n"
+       << "  \"progressiveInterlaceBuffer\": " << (config.source.progressiveInterlaceBuffer ? "true" : "false") << ",\n"
+       << "  \"audio\": " << (config.source.audio ? "true" : "false") << ",\n"
+       << "  \"preview\": " << (config.source.preview ? "true" : "false") << ",\n"
+       << "  \"frameDelay\": " << config.source.frameDelay << ",\n"
+       << "  \"alignment\": \"" << toString(config.source.alignment) << "\",\n"
+       << "  \"crop\": \"" << toString(config.source.crop) << "\",\n"
+       << "  \"width\": " << config.source.width << ", \"height\": " << config.source.height << ",\n"
+       << "  \"xOffset\": " << config.source.xOffset << ", \"yOffset\": " << config.source.yOffset << ",\n"
+       << "  \"rotation\": \"" << toString(config.source.rotation) << "\",\n"
+       << "  \"modelineName\": \"" << escape(config.modeline.name) << "\",\n"
+       << "  \"pixelClockMHz\": " << config.modeline.pixelClockMHz << ",\n"
+       << "  \"hActive\": " << config.modeline.hActive << ", \"hBegin\": " << config.modeline.hBegin
+       << ", \"hEnd\": " << config.modeline.hEnd << ", \"hTotal\": " << config.modeline.hTotal << ",\n"
+       << "  \"vActive\": " << config.modeline.vActive << ", \"vBegin\": " << config.modeline.vBegin
+       << ", \"vEnd\": " << config.modeline.vEnd << ", \"vTotal\": " << config.modeline.vTotal << ",\n"
+       << "  \"interlaced\": " << (config.modeline.interlaced ? "true" : "false") << ",\n"
+       << "  \"customModelines\": [";
+  for (size_t index = 0; index < config.customModelines.size(); ++index) {
+    const auto& modeline = config.customModelines[index];
+    if (index) file << ',';
+    file << "\n    {\"name\":\"" << escape(modeline.name) << "\",\"pixelClockMHz\":" << modeline.pixelClockMHz
+         << ",\"hActive\":" << modeline.hActive << ",\"hBegin\":" << modeline.hBegin
+         << ",\"hEnd\":" << modeline.hEnd << ",\"hTotal\":" << modeline.hTotal
+         << ",\"vActive\":" << modeline.vActive << ",\"vBegin\":" << modeline.vBegin
+         << ",\"vEnd\":" << modeline.vEnd << ",\"vTotal\":" << modeline.vTotal
+         << ",\"interlaced\":" << (modeline.interlaced ? "true" : "false") << '}';
+  }
+  file << "\n  ]\n}\n";
+  file.flush();
+  if (!file) {
+    error = "failed writing configuration";
+    file.close(); std::filesystem::remove(temporary); return false;
+  }
+  file.close();
+  std::filesystem::rename(temporary, path, filesystemError);
+  if (filesystemError) {
+    error = filesystemError.message(); std::filesystem::remove(temporary); return false;
+  }
+  return true;
+}
+} // namespace mistercast

@@ -23,6 +23,7 @@ struct Modeline {
 
 struct SourceOptions {
   std::string monitor;
+  std::string audioSink;
   bool syncRefresh{true}, progressiveInterlaceBuffer{false}, audio{true}, preview{true};
   uint16_t frameDelay{0}, width{320}, height{240};
   int16_t xOffset{0}, yOffset{0};
@@ -47,6 +48,7 @@ struct Frame {
   std::vector<uint8_t> bgra;
 };
 struct Monitor { std::string name; int16_t x{}, y{}; uint16_t width{}, height{}; bool primary{}; };
+struct AudioSink { std::string name, description; bool isDefault{}; };
 struct PcmBlock { uint32_t sampleRate{}; uint64_t timestampNs{}; std::vector<int16_t> samples; };
 struct SessionError { std::string component, message, hint; };
 

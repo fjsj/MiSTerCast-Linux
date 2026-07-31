@@ -2,6 +2,7 @@
 #include "mistercast/audio_pacer.hpp"
 #include "mistercast/config.hpp"
 #include "mistercast/groovy_transport.hpp"
+#include "mistercast/interfaces.hpp"
 #include "mistercast/transform.hpp"
 #include <arpa/inet.h>
 #include <atomic>
@@ -36,5 +37,6 @@ int main(){
  checkInterlaceTransport(false,1,1,1,6);
  checkInterlaceTransport(true,1,2,0,12);
  auto dir=std::filesystem::temp_directory_path()/"mistercast-core-test";std::filesystem::create_directories(dir);auto path=dir/"config.json";AppConfig cfg;cfg.target="mister.local";cfg.source.progressiveInterlaceBuffer=true;auto custom=Modeline::safeDefault();custom.name="My preset";cfg.customModelines.push_back(custom);CHECK(saveConfig(cfg,path,error));std::string warning;auto loaded=loadConfig(path,&warning);CHECK(loaded.target==cfg.target&&loaded.source.progressiveInterlaceBuffer&&warning.empty());CHECK(loaded.customModelines.size()==1&&loaded.customModelines[0].name=="My preset");{std::ofstream f2(path);f2<<"broken";}loaded=loadConfig(path,&warning);CHECK(loaded.target.empty()&&!warning.empty());std::filesystem::remove_all(dir);
+ auto audioConfigPath=std::filesystem::temp_directory_path()/"mistercast-audio-config-test.json";AppConfig audioConfig;audioConfig.source.audioSink=SilentAudioSink;CHECK(saveConfig(audioConfig,audioConfigPath,error));auto loadedAudioConfig=loadConfig(audioConfigPath);CHECK(loadedAudioConfig.source.audioSink==SilentAudioSink);std::filesystem::remove(audioConfigPath);
  if(failed)std::cerr<<failed<<" test(s) failed\n";return failed?1:0;
 }

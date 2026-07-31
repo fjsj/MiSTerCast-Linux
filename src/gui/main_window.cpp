@@ -47,7 +47,7 @@ class MainWindow final : public QMainWindow {
 
   QPushButton *streamButton_{}, *saveButton_{}, *loadButton_{}, *applyModelineButton_{};
   QLineEdit *target_{};
-  QComboBox *monitor_{}, *preset_{}, *crop_{}, *alignment_{}, *rotation_{};
+  QComboBox *monitor_{}, *audioSink_{}, *preset_{}, *crop_{}, *alignment_{}, *rotation_{};
   QDoubleSpinBox *pixelClock_{};
   QSpinBox *hActive_{}, *hBegin_{}, *hEnd_{}, *hTotal_{};
   QSpinBox *vActive_{}, *vBegin_{}, *vEnd_{}, *vTotal_{};
@@ -123,6 +123,7 @@ class MainWindow final : public QMainWindow {
   void configFromControls() {
     config_.target = target_->text().trimmed().toStdString();
     config_.source.monitor = monitor_->currentText().toStdString();
+    config_.source.audioSink = audioSink_->currentData().toString().toStdString();
     config_.source.audio = audio_->isChecked();
     config_.source.preview = preview_->isChecked();
     config_.source.width = uint16_t(width_->value());
@@ -141,6 +142,12 @@ class MainWindow final : public QMainWindow {
     target_->setText(QString::fromStdString(config_.target));
     auto monitorIndex = monitor_->findText(QString::fromStdString(config_.source.monitor));
     if (monitorIndex >= 0) monitor_->setCurrentIndex(monitorIndex);
+    auto audioSinkIndex = audioSink_->findData(QString::fromStdString(config_.source.audioSink));
+    if (audioSinkIndex < 0 && !config_.source.audioSink.empty()) {
+      audioSink_->addItem(QString::fromStdString(config_.source.audioSink), QString::fromStdString(config_.source.audioSink));
+      audioSinkIndex = audioSink_->count() - 1;
+    }
+    audioSink_->setCurrentIndex(std::max(audioSinkIndex, 0));
     crop_->setCurrentIndex(int(config_.source.crop));
     alignment_->setCurrentIndex(int(config_.source.alignment));
     rotation_->setCurrentIndex(int(config_.source.rotation));
@@ -285,7 +292,7 @@ public:
     auto* sourceLayout = new QHBoxLayout(sourceBox);
     auto* sourceControls = new QWidget;
     auto* sourceGrid = new QGridLayout(sourceControls);
-    monitor_ = new QComboBox; crop_ = new QComboBox; alignment_ = new QComboBox; rotation_ = new QComboBox;
+    monitor_ = new QComboBox; audioSink_ = new QComboBox; crop_ = new QComboBox; alignment_ = new QComboBox; rotation_ = new QComboBox;
     crop_->addItems({"Custom Size", "1X Crop", "2X Crop", "3X Crop", "4X Crop", "5X Crop", "Full 4:3 Crop", "Full 5:4 Crop"});
     alignment_->addItems({"Centered", "Top Left", "Top", "Top Right", "Right", "Bottom Right", "Bottom", "Bottom Left", "Left"});
     rotation_->addItems({"No Rotate", "90° CW", "90° CCW", "180°"});
@@ -296,14 +303,15 @@ public:
     progressiveInterlaceBuffer_->setToolTip("Send every interlaced update as one full-height framebuffer. This prevents field-buffer index changes, but doubles video work and payload and may add latency.");
     audio_ = new QCheckBox("Enable Audio"); preview_ = new QCheckBox("Enable Preview");
     sourceGrid->addWidget(new QLabel("Monitor"), 0, 0); sourceGrid->addWidget(monitor_, 0, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Crop"), 1, 0); sourceGrid->addWidget(crop_, 1, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Alignment"), 2, 0); sourceGrid->addWidget(alignment_, 2, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Rotation"), 3, 0); sourceGrid->addWidget(rotation_, 3, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Size"), 4, 0); sourceGrid->addWidget(width_, 4, 1); sourceGrid->addWidget(height_, 4, 2);
-    sourceGrid->addWidget(new QLabel("Offset"), 5, 0); sourceGrid->addWidget(xOffset_, 5, 1); sourceGrid->addWidget(yOffset_, 5, 2);
-    sourceGrid->addWidget(new QLabel("Frame delay"), 6, 0); sourceGrid->addWidget(frameDelay_, 6, 1, 1, 2);
-    sourceGrid->addWidget(progressiveInterlaceBuffer_, 7, 0, 1, 3);
-    sourceGrid->addWidget(audio_, 8, 0, 1, 3); sourceGrid->addWidget(preview_, 9, 0, 1, 3); sourceGrid->setColumnStretch(1, 1); sourceGrid->setColumnStretch(2, 1);
+    sourceGrid->addWidget(new QLabel("Audio output"), 1, 0); sourceGrid->addWidget(audioSink_, 1, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Crop"), 2, 0); sourceGrid->addWidget(crop_, 2, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Alignment"), 3, 0); sourceGrid->addWidget(alignment_, 3, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Rotation"), 4, 0); sourceGrid->addWidget(rotation_, 4, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Size"), 5, 0); sourceGrid->addWidget(width_, 5, 1); sourceGrid->addWidget(height_, 5, 2);
+    sourceGrid->addWidget(new QLabel("Offset"), 6, 0); sourceGrid->addWidget(xOffset_, 6, 1); sourceGrid->addWidget(yOffset_, 6, 2);
+    sourceGrid->addWidget(new QLabel("Frame delay"), 7, 0); sourceGrid->addWidget(frameDelay_, 7, 1, 1, 2);
+    sourceGrid->addWidget(progressiveInterlaceBuffer_, 8, 0, 1, 3);
+    sourceGrid->addWidget(audio_, 9, 0, 1, 3); sourceGrid->addWidget(preview_, 10, 0, 1, 3); sourceGrid->setColumnStretch(1, 1); sourceGrid->setColumnStretch(2, 1);
     sourceLayout->addWidget(sourceControls, 1);
     previewImage_ = new QLabel("Preview Disabled");
     previewImage_->setAlignment(Qt::AlignCenter); previewImage_->setMinimumSize(450, 260);
@@ -321,6 +329,15 @@ public:
     std::string monitorError; auto capture = makeX11Capture();
     for (auto& monitor : capture->monitors(monitorError)) monitor_->addItem(QString::fromStdString(monitor.name));
     if (!monitorError.empty()) append(monitorError);
+    audioSink_->addItem("Default output (PC audio remains on)", QString());
+    audioSink_->addItem("MiSTerCast silent output (CRT only)", QString::fromLatin1(SilentAudioSink));
+    audioSink_->setToolTip("Silent output temporarily routes active and new playback into a virtual sink. Original routing is restored when streaming stops.");
+    std::string audioError;
+    for (const auto& sink : pulseAudioSinks(audioError)) {
+      const auto label = QString::fromStdString(sink.description) + (sink.isDefault ? " (default)" : "");
+      audioSink_->addItem(label, QString::fromStdString(sink.name));
+    }
+    if (!audioError.empty()) append("Audio outputs: " + audioError);
     presets_ = bundledModelines(); presets_.insert(presets_.end(), config_.customModelines.begin(), config_.customModelines.end());
     for (const auto& preset : presets_) preset_->addItem(QString::fromStdString(preset.name));
     audio_->setChecked(config_.source.audio); preview_->setChecked(config_.source.preview); controlsFromConfig();
@@ -340,6 +357,8 @@ public:
     connect(help, &QPushButton::clicked, this, [this] { QMessageBox::information(this, "MiSTerCast", "Linux/X11 MiSTerCast\n\nEnter the MiSTer address, select a modeline and monitor, then press Start Stream.\nGroovy_MiSTer uses UDP port 32100."); });
     connect(target_, &QLineEdit::textChanged, this, [this] { refreshStartEnabled(); });
     connect(preview_, &QCheckBox::toggled, this, [this](bool enabled) { if (!enabled) { previewImage_->setPixmap({}); previewImage_->setText("Preview Disabled"); } else previewImage_->setText("Waiting for preview…"); });
+    connect(audio_, &QCheckBox::toggled, audioSink_, &QComboBox::setEnabled);
+    audioSink_->setEnabled(audio_->isChecked());
     for (auto* spin : {hActive_, hBegin_, hEnd_, hTotal_, vActive_, vBegin_, vEnd_, vTotal_}) connect(spin, &QSpinBox::valueChanged, this, [this] { refreshStartEnabled(); });
     connect(pixelClock_, &QDoubleSpinBox::valueChanged, this, [this] { refreshStartEnabled(); });
     connect(interlaced_, &QCheckBox::toggled, progressiveInterlaceBuffer_, &QCheckBox::setEnabled);

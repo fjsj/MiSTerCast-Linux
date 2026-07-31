@@ -43,6 +43,7 @@ The GUI exposes every routine streaming setting except `syncRefresh`. The CLI ac
 | `monitor` | RandR monitor name; primary monitor by default | X11 capture source on the current `$DISPLAY`. CLI: `--monitor NAME`. |
 | `modeline` | Bundled 320×240 NTSC preset by default | MiSTer output timings and transformed frame dimensions. Select/edit it in the GUI, or use `--modeline 'CLOCK HACTIVE HBEGIN HEND HTOTAL VACTIVE VBEGIN VEND VTOTAL INTERLACE'`. Clock is MHz and interlace is `0` or `1`. |
 | `audio` | `true` by default | Captures stereo S16LE system playback. CLI: `--audio` or `--no-audio`. |
+| `audioSink` | Default output by default | GUI audio source. Choose `MiSTerCast silent output (CRT only)` to temporarily route current and new playback away from PC speakers and into the stream, or choose a named output sink to capture its monitor without changing playback routing. |
 | `preview` | `true` by default | Shows a throttled, prescaled GUI preview. It does not affect CLI output. |
 | `crop` | `4:3` by default | `custom`, integer `1x`–`5x`, full `4:3`, or full `5:4` source crop. CLI: `--crop MODE`. |
 | `width`, `height` | 320×240 by default | Custom crop dimensions, used directly by `custom` mode and as saved source geometry. CLI: `--size WxH`. |
@@ -123,7 +124,9 @@ These are MiSTer-side options rather than MiSTerCast configuration:
 
 ## Audio
 
-Audio uses PulseAudio or `pipewire-pulse`, stereo S16LE at 48 kHz. Select the default output device's **monitor** as MiSTerCast's recording source (for example in `pavucontrol`). Use `--no-audio` if no monitor source is available.
+Audio uses PulseAudio or `pipewire-pulse`, stereo S16LE at 48 kHz. The GUI's default and named-output choices capture that sink's monitor while the PC continues playing normally.
+
+For CRT-only sound, choose **MiSTerCast silent output (CRT only)** before starting the stream. MiSTerCast creates a temporary null sink, makes it the default, and moves active playback into it, so its audio is captured for MiSTer without reaching PC speakers. On stop, the prior default and active-stream routes are restored and the temporary sink is removed. Applications that explicitly force a hardware device can bypass the system default; set those applications to the system/default output.
 
 ## Packages
 
@@ -144,7 +147,7 @@ cmake --install build --prefix AppDir/usr
 
 - `DISPLAY is not set`: log into Xorg and run from that session.
 - `target did not acknowledge CMD_INIT`: verify the address, Groovy_MiSTer is running, and UDP/32100 is not filtered.
-- Audio errors: ensure PulseAudio/pipewire-pulse is running and select the sink monitor source.
+- Audio errors: ensure PulseAudio/pipewire-pulse is running. If CRT-only mode cannot create a sink, verify that the server permits `module-null-sink`; otherwise select an existing output.
 - Monitor disappeared: stop, run `list-monitors`, select the current output, and restart.
 - Moving or intermittent tear line: keep `syncRefresh` enabled and `frameDelay` at automatic first. Check that ACK misses do not keep increasing and that sender/FPGA frame numbers remain adjacent.
 - Interlaced line parity/index appears to change: enable `Stable interlace (progressive framebuffer)`. If the artifact remains, it originates before the core framebuffer (for example an X11 source tear) or after it (display deinterlacing), rather than from alternating MiSTer field buffers.
