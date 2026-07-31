@@ -32,9 +32,9 @@ static std::string escape(const std::string& value) {
 }
 
 // Returns the document with the contents of every nested object and array
-// removed, so that a top-level lookup cannot match a key of the same name inside
-// customModelines. The key-matching below is positional, so without this the
-// result depends on the order the writer happened to emit keys in.
+// removed, so that a top-level lookup cannot match a key of the same name
+// inside customModelines. The key-matching below is positional, so without this
+// the result depends on the order the writer happened to emit keys in.
 static std::string topLevelScope(const std::string& json) {
   std::string result;
   int depth = 0;

@@ -216,8 +216,8 @@ bool normalizeToBgra(const uint8_t* s, size_t n, uint32_t w, uint32_t h,
       std::memcpy(o.bgra.data(), s, size_t(o.stride) * h);
     else
       for (uint32_t y = 0; y < h; ++y)
-        std::memcpy(o.bgra.data() + size_t(y) * o.stride, s + size_t(y) * stride,
-                    size_t(w) * 4);
+        std::memcpy(o.bgra.data() + size_t(y) * o.stride,
+                    s + size_t(y) * stride, size_t(w) * 4);
     return true;
   }
   for (uint32_t y = 0; y < h; ++y) {

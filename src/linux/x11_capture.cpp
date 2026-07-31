@@ -57,8 +57,7 @@ class X11Capture final : public IVideoCapture {
       if (f.data->depth == depth_) bitsPerPixel_ = f.data->bits_per_pixel;
   }
   CropRect clampRegion(const CropRect& r) const {
-    if (!r.width || !r.height)
-      return {0, 0, selected_.width, selected_.height};
+    if (!r.width || !r.height) return {0, 0, selected_.width, selected_.height};
     CropRect c;
     c.width = std::min<uint32_t>(r.width, selected_.width);
     c.height = std::min<uint32_t>(r.height, selected_.height);
@@ -134,8 +133,8 @@ class X11Capture final : public IVideoCapture {
   }
   // Re-resolves the display and the selected monitor after a failed capture. A
   // monitor can be resized, rotated, or replugged mid-stream, which invalidates
-  // the cached geometry and the shared segment; recovering here keeps the stream
-  // alive instead of ending the session on a transient fault.
+  // the cached geometry and the shared segment; recovering here keeps the
+  // stream alive instead of ending the session on a transient fault.
   bool recoverLocked() {
     if (connection_ && xcb_connection_has_error(connection_)) close();
     std::string ignored;
@@ -264,8 +263,8 @@ class X11Capture final : public IVideoCapture {
     const uint16_t height = uint16_t(region_.height);
     if (useShm_) {
       auto ck =
-          xcb_shm_get_image(connection_, screen_->root, x, y, width, height, ~0u,
-                            XCB_IMAGE_FORMAT_Z_PIXMAP, shmSeg_, 0);
+          xcb_shm_get_image(connection_, screen_->root, x, y, width, height,
+                            ~0u, XCB_IMAGE_FORMAT_Z_PIXMAP, shmSeg_, 0);
       shared = xcb_shm_get_image_reply(connection_, ck, &xe);
       if (shared) {
         depth = shared->depth;
@@ -300,9 +299,9 @@ class X11Capture final : public IVideoCapture {
     if (depth != depth_) resolvePixelFormat(depth);
     uint32_t stride = height ? uint32_t(len) / height : 0;
     std::string e;
-    bool ok = normalizeToBgra(data, len, width, height, stride, bitsPerPixel_,
-                              redMask_, greenMask_, blueMask_, lsbFirst_, out,
-                              e);
+    bool ok =
+        normalizeToBgra(data, len, width, height, stride, bitsPerPixel_,
+                        redMask_, greenMask_, blueMask_, lsbFirst_, out, e);
     free(shared);
     free(normal);
     return ok;

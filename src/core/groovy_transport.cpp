@@ -359,10 +359,11 @@ void GroovyTransport::waitSync() noexcept {
   auto deadline = pacingDeadline(correctionNs);
   // While the ACK is still outstanding, spend the wait sleeping on the socket
   // rather than on a timer, so an ACK that arrives late still corrects this
-  // frame instead of being counted as missed. Windows likewise polled the raster
-  // inside WaitSync rather than only before it. The window is a short guaranteed
-  // minimum extended across the rest of the pacing wait, which for a real
-  // modeline is most of a frame period rather than the previous fixed 2 ms.
+  // frame instead of being counted as missed. Windows likewise polled the
+  // raster inside WaitSync rather than only before it. The window is a short
+  // guaranteed minimum extended across the rest of the pacing wait, which for a
+  // real modeline is most of a frame period rather than the previous fixed 2
+  // ms.
   const auto ackFloor = start + std::chrono::milliseconds(2);
   while (!matched && fd_ >= 0) {
     const auto until =
@@ -371,8 +372,9 @@ void GroovyTransport::waitSync() noexcept {
     if (now >= until) break;
     pollfd descriptor{fd_, POLLIN, 0};
     const int timeoutMs = std::max(
-        1, int(std::chrono::duration_cast<std::chrono::milliseconds>(until - now)
-                   .count()));
+        1,
+        int(std::chrono::duration_cast<std::chrono::milliseconds>(until - now)
+                .count()));
     if (poll(&descriptor, 1, timeoutMs) <= 0) break;
     if (!drainStatus(currentFrame_)) continue;
     matched = true;
