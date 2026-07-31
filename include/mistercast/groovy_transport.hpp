@@ -10,7 +10,8 @@ namespace mistercast {
 struct GroovyTransportStats {
   uint32_t acknowledgedFrame{}, fpgaFrame{};
   uint16_t requestedSyncLine{}, fpgaVCount{};
-  uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{};
+  uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{},
+      sendErrors{}, networkRttUs{};
   int64_t rasterCorrectionUs{};
   bool vramSynced{}, vgaFrameskip{}, vgaVblank{};
 };
@@ -51,8 +52,10 @@ class GroovyTransport {
   bool syncRefresh_{true}, progressiveInterlaceBuffer_{};
   uint64_t frameTimeNs_{}, lineTimeNs_{}, networkRttNs_{}, lastStreamNs_{};
   uint32_t currentFrame_{};
+  uint8_t coreVersion_{};
   FpgaStatus fpga_{};
-  std::chrono::steady_clock::time_point syncEpoch_{}, lastAckAt_{};
+  std::chrono::steady_clock::time_point syncEpoch_{}, lastAckAt_{},
+      lastSendEndAt_{};
   bool sendPacket(const void*, size_t, std::string&);
   bool sendChunks(const uint8_t*, size_t, std::string&);
   bool drainStatus(uint32_t expectedFrame) noexcept;
@@ -62,7 +65,7 @@ class GroovyTransport {
   std::atomic<uint32_t> ackFrame_{0}, fpgaFrame_{0};
   std::atomic<uint16_t> syncLine_{0}, fpgaVCount_{0};
   std::atomic<uint64_t> ackedFrames_{0}, missedAcks_{0}, streamTimeUs_{0},
-      ackAgeMs_{0};
+      ackAgeMs_{0}, sendErrors_{0};
   std::atomic<int64_t> rasterCorrectionUs_{0};
 };
 }  // namespace mistercast

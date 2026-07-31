@@ -17,7 +17,8 @@ struct SessionStats {
   double captureFps{}, streamFps{}, audioPeak{};
   uint32_t acknowledgedFrame{}, fpgaFrame{};
   uint16_t syncLine{}, fpgaVCount{};
-  uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{};
+  uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{},
+      sendErrors{}, networkRttUs{};
   int64_t rasterCorrectionUs{};
   bool misterAudioEnabled{}, vramSynced{}, vgaFrameskip{}, vgaVblank{};
 };
@@ -58,6 +59,9 @@ class StreamSession {
       audioUnderrun_{0};
   std::atomic<uint32_t> audioPeak_{0};
   std::chrono::steady_clock::time_point startedAt_{};
+  // Monitor geometry the active crop was computed for. Set before the threads
+  // start, then owned by the capture thread.
+  Monitor cropMonitor_{};
   std::mutex mutex_;
   std::condition_variable cv_;
   // Newest completed capture, waiting to be picked up. The rendering thread

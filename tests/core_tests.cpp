@@ -14,6 +14,7 @@
 #include "mistercast/config.hpp"
 #include "mistercast/groovy_transport.hpp"
 #include "mistercast/interfaces.hpp"
+#include "mistercast/stream_session.hpp"
 #include "mistercast/transform.hpp"
 using namespace mistercast;
 static int failed = 0;
@@ -108,6 +109,238 @@ static void checkInterlaceTransport(bool progressive, uint8_t sentField,
         receivedField == expectedField && receivedSyncLine == 2);
   close(server);
 }
+// A core reload makes the MiSTer answer ICMP port unreachable, so the next send
+// fails with ECONNREFUSED. That must cost datagrams, not the session.
+static void checkSendErrorsAreNotFatal() {
+  int server = socket(AF_INET, SOCK_DGRAM, 0);
+  if (server < 0) return;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+      0) {
+    close(server);
+    return;
+  }
+  socklen_t alen = sizeof(address);
+  getsockname(server, reinterpret_cast<sockaddr*>(&address), &alen);
+  std::thread endpoint([&] {
+    uint8_t packet[2048];
+    sockaddr_storage peer{};
+    socklen_t plen = sizeof(peer);
+    auto n = recvfrom(server, packet, sizeof(packet), 0,
+                      reinterpret_cast<sockaddr*>(&peer), &plen);
+    if (n > 0 && packet[0] == 2) {
+      uint8_t ack[13]{};
+      sendto(server, ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&peer),
+             plen);
+    }
+  });
+  std::string error;
+  GroovyTransport transport;
+  CHECK(transport.open("localhost", 48000, error, ntohs(address.sin_port)));
+  endpoint.join();
+  close(server);  // nothing is listening now, so sends get ECONNREFUSED
+  Modeline tiny{"tiny", 1, 2, 3, 4, 5, 2, 3, 4, 5, false};
+  CHECK(transport.switchMode(tiny, false, error));
+  std::vector<uint8_t> pixels(12, 42);
+  // Two frames: the first send primes the ICMP error, the second observes it.
+  CHECK(transport.sendFrame(1, 0, pixels, error));
+  CHECK(transport.sendFrame(2, 0, pixels, error));
+  CHECK(transport.stats().sendErrors > 0);
+  transport.close();
+}
+namespace {
+// Synthetic capture sources, so session behaviour that depends on the monitor
+// changing or on the core's audio bit can be driven deterministically.
+class FakeVideo final : public IVideoCapture {
+ public:
+  std::atomic<uint16_t> width{1920}, height{1080};
+  std::atomic<uint32_t> captured{0};
+  mutable std::mutex mutex;
+  std::vector<CropRect> regions;
+  CropRect region{};
+  Monitor geometry() const {
+    Monitor m;
+    m.name = "fake";
+    m.width = width;
+    m.height = height;
+    m.primary = true;
+    return m;
+  }
+  std::vector<Monitor> monitors(std::string&) override { return {geometry()}; }
+  bool start(const std::string&, ErrorCallback) override { return true; }
+  Monitor selected() const override { return geometry(); }
+  void setRegion(const CropRect& r) override {
+    std::lock_guard<std::mutex> l(mutex);
+    region = r;
+    regions.push_back(r);
+  }
+  bool next(Frame& out, std::chrono::milliseconds) override {
+    CropRect r;
+    {
+      std::lock_guard<std::mutex> l(mutex);
+      r = region;
+    }
+    if (!r.width || !r.height) return false;
+    out.width = r.width;
+    out.height = r.height;
+    out.stride = r.width * 4;
+    out.bgra.assign(size_t(out.stride) * out.height, 128);
+    ++captured;
+    return true;
+  }
+  void stop() noexcept override {}
+};
+class FakeAudio final : public IAudioCapture {
+ public:
+  std::atomic<bool> produce{false};
+  bool start(const std::string&, ErrorCallback) override { return true; }
+  bool next(PcmBlock& b, std::chrono::milliseconds) override {
+    if (!produce) return false;
+    b.sampleRate = 48000;
+    b.samples.assign(960, 1000);  // 10 ms of stereo tone
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return true;
+  }
+  void stop() noexcept override {}
+  uint32_t sampleRate() const noexcept override { return 48000; }
+};
+// Minimal Groovy endpoint: acks CMD_INIT and every blit, counting audio packets.
+class FakeMister {
+ public:
+  std::atomic<bool> running{true};
+  std::atomic<uint32_t> audioPackets{0}, blits{0};
+  uint8_t statusBits;
+  int fd{-1};
+  uint16_t port{};
+  // StreamSession always dials the protocol port, so the fake must own it. If
+  // it is taken the session tests skip rather than fail.
+  explicit FakeMister(uint8_t bits) : statusBits(bits) {
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(32100);
+    if (fd < 0 || bind(fd, reinterpret_cast<sockaddr*>(&address),
+                       sizeof(address)) != 0) {
+      if (fd >= 0) close(fd);
+      fd = -1;
+      return;
+    }
+    port = 32100;
+    timeval timeout{0, 200000};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    worker = std::thread([this] { serve(); });
+  }
+  void serve() {
+    uint8_t packet[2048];
+    sockaddr_storage peer{};
+    socklen_t plen = sizeof(peer);
+    while (running) {
+      auto n = recvfrom(fd, packet, sizeof(packet), 0,
+                        reinterpret_cast<sockaddr*>(&peer), &plen);
+      if (n <= 0) continue;
+      if (packet[0] == 2) {
+        uint8_t ack[13]{};
+        ack[12] = statusBits;
+        sendto(fd, ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&peer),
+               plen);
+      } else if (packet[0] == 4)
+        ++audioPackets;
+      else if (packet[0] == 7) {
+        ++blits;
+        uint32_t frame;
+        uint16_t line;
+        std::memcpy(&frame, packet + 1, 4);
+        std::memcpy(&line, packet + 6, 2);
+        uint8_t ack[13]{};
+        std::memcpy(ack, &frame, 4);
+        std::memcpy(ack + 4, &line, 2);
+        std::memcpy(ack + 6, &frame, 4);
+        std::memcpy(ack + 10, &line, 2);
+        ack[12] = statusBits;
+        sendto(fd, ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&peer),
+               plen);
+      }
+    }
+  }
+  ~FakeMister() {
+    running = false;
+    if (worker.joinable()) worker.join();
+    if (fd >= 0) close(fd);
+  }
+  std::thread worker;
+};
+AppConfig sessionConfig() {
+  AppConfig c;
+  c.target = "127.0.0.1";
+  c.source.audio = false;
+  c.source.preview = false;
+  c.source.crop = CropMode::Full43;
+  c.modeline = Modeline::safeDefault();
+  return c;
+}
+}  // namespace
+
+// A monitor resized mid-stream must have its crop recomputed, not keep streaming
+// a rectangle sized for the old geometry.
+static void checkCropFollowsMonitorResize() {
+  FakeMister mister(0x44);
+  if (mister.port == 0) return;
+  auto video = std::make_unique<FakeVideo>();
+  auto* raw = video.get();
+  StreamSession session(std::move(video), std::make_unique<FakeAudio>());
+  auto config = sessionConfig();
+  std::string error;
+  // 4:3 of a 1080-tall monitor is 1440x1080.
+  if (!session.start(config, {}, &error)) {
+    std::cerr << "session start failed: " << error << "\n";
+    ++failed;
+    return;
+  }
+  for (int i = 0; i < 100 && raw->captured < 3; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  raw->height = 720;  // 4:3 of 720 is 960x720
+  const auto before = raw->captured.load();
+  for (int i = 0; i < 100 && raw->captured < before + 3; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  session.stop();
+  std::lock_guard<std::mutex> l(raw->mutex);
+  CHECK(raw->regions.size() >= 2);
+  CHECK(raw->regions.front().width == 1440 &&
+        raw->regions.front().height == 1080);
+  CHECK(raw->regions.back().width == 960 && raw->regions.back().height == 720);
+}
+
+// The core reporting audio off must stop audio being sent at all.
+static void checkAudioSkippedWhenCoreHasAudioOff() {
+  for (bool coreAudio : {false, true}) {
+    FakeMister mister(coreAudio ? 0x44 : 0x04);
+    if (mister.port == 0) return;
+    auto video = std::make_unique<FakeVideo>();
+    auto audio = std::make_unique<FakeAudio>();
+    auto* rawVideo = video.get();
+    audio->produce = true;
+    StreamSession session(std::move(video), std::move(audio));
+    auto config = sessionConfig();
+    config.source.audio = true;
+    std::string error;
+    if (!session.start(config, {}, &error)) {
+      std::cerr << "session start failed: " << error << "\n";
+      ++failed;
+      return;
+    }
+    for (int i = 0; i < 200 && rawVideo->captured < 30; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    session.stop();
+    if (coreAudio)
+      CHECK(mister.audioPackets > 0);
+    else
+      CHECK(mister.audioPackets == 0);
+  }
+}
+
 int main() {
   auto safe = Modeline::safeDefault();
   CHECK(!safe.validate());
@@ -226,6 +459,9 @@ int main() {
   CHECK(nf.bgra[0] == 0 && nf.bgra[1] == 0 && nf.bgra[2] == 255);
   checkInterlaceTransport(false, 1, 1, 1, 6);
   checkInterlaceTransport(true, 1, 2, 0, 12);
+  checkSendErrorsAreNotFatal();
+  checkCropFollowsMonitorResize();
+  checkAudioSkippedWhenCoreHasAudioOff();
   auto dir = std::filesystem::temp_directory_path() / "mistercast-core-test";
   std::filesystem::create_directories(dir);
   auto path = dir / "config.json";

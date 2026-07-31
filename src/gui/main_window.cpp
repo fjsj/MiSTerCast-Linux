@@ -64,7 +64,8 @@ class MainWindow final : public QMainWindow {
   QPlainTextEdit* log_{};
   std::vector<QWidget*> streamLockedControls_;
   QTimer statsTimer_;
-  uint64_t previousDropped_{}, previousAudioDropped_{}, previousUnderrun_{};
+  uint64_t previousDropped_{}, previousAudioDropped_{}, previousUnderrun_{},
+      previousSendErrors_{};
 
   void append(const QString& message) { log_->appendPlainText(message); }
 
@@ -251,6 +252,7 @@ class MainWindow final : public QMainWindow {
     showState(SessionState::Streaming);
     saveSettings(false);
     previousDropped_ = previousAudioDropped_ = previousUnderrun_ = 0;
+    previousSendErrors_ = 0;
     append("Streaming to " + config_.target + ".");
   }
 
@@ -285,6 +287,12 @@ class MainWindow final : public QMainWindow {
       append(QString("Performance: audio overrun dropped %1 samples.")
                  .arg(stats.audioDroppedSamples));
       previousAudioDropped_ = stats.audioDroppedSamples;
+    }
+    if (stats.sendErrors > previousSendErrors_) {
+      append(QString("Network: %1 datagrams could not be sent (stream "
+                     "continues).")
+                 .arg(stats.sendErrors));
+      previousSendErrors_ = stats.sendErrors;
     }
     if (stats.audioUnderrunSamples > previousUnderrun_ + 4800) {
       append(QString("Performance: audio underrun inserted %1 silent samples.")

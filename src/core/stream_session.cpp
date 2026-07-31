@@ -34,6 +34,8 @@ SessionStats StreamSession::stats() const {
   result.streamTimeUs = network.streamTimeUs;
   result.ackAgeMs = network.ackAgeMs;
   result.rasterCorrectionUs = network.rasterCorrectionUs;
+  result.sendErrors = network.sendErrors;
+  result.networkRttUs = network.networkRttUs;
   result.vramSynced = network.vramSynced;
   result.vgaFrameskip = network.vgaFrameskip;
   result.vgaVblank = network.vgaVblank;
@@ -106,6 +108,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     return false;
   }
   video_->setRegion(crop);
+  cropMonitor_ = monitor;
   uint32_t rate = 48000;
   if (c.source.audio && !audio_->start(c.source.audioSink, onError)) {
     video_->stop();
@@ -173,6 +176,19 @@ void StreamSession::captureLoop() {
       cv_.wait(l, [&] { return stop_ || captureRequested_; });
       if (stop_) break;
       captureRequested_ = false;
+    }
+    // The monitor can be resized or replugged mid-stream, which changes what the
+    // crop should be. Recompute it rather than streaming a stale rectangle.
+    if (const auto monitor = video_->selected();
+        monitor.width != cropMonitor_.width ||
+        monitor.height != cropMonitor_.height) {
+      CropRect crop;
+      std::string cropError;
+      if (calculateCrop(monitor.width, monitor.height, config_.source,
+                        config_.modeline, crop, cropError)) {
+        video_->setRegion(crop);
+        cropMonitor_ = monitor;
+      }
     }
     if (!video_->next(working, std::chrono::milliseconds(100))) {
       if (!stop_) {

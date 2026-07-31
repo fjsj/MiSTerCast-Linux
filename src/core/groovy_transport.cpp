@@ -68,10 +68,16 @@ bool GroovyTransport::sendPacket(const void* p, size_t n, std::string& e) {
     e = "transport is closed";
     return false;
   }
-  auto r = ::send(fd_, p, n, MSG_NOSIGNAL);
+  // Non-blocking, and a failed datagram is counted rather than fatal. A core
+  // reload makes the MiSTer answer ICMP port unreachable, so the next send
+  // returns ECONNREFUSED; a burst can return ENOBUFS. Tearing the session down
+  // for either is worse than dropping the datagram, which this protocol already
+  // tolerates via its ACKs. A blocking send would instead stall the render
+  // thread whenever the socket buffer filled.
+  auto r = ::send(fd_, p, n, MSG_NOSIGNAL | MSG_DONTWAIT);
   if (r < 0 || size_t(r) != n) {
-    e = std::string("UDP send failed: ") + std::strerror(errno);
-    return false;
+    ++sendErrors_;
+    return true;
   }
   return true;
 }
@@ -91,7 +97,9 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
   close();
   ackFrame_ = fpgaFrame_ = 0;
   syncLine_ = fpgaVCount_ = 0;
-  ackedFrames_ = missedAcks_ = streamTimeUs_ = ackAgeMs_ = 0;
+  ackedFrames_ = missedAcks_ = streamTimeUs_ = ackAgeMs_ = sendErrors_ = 0;
+  coreVersion_ = 0;
+  lastSendEndAt_ = {};
   rasterCorrectionUs_ = 0;
   fpga_ = {};
   if (host.empty()) {
@@ -154,14 +162,21 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
   }
   uint8_t ack[32];
   auto received = recv(fd_, ack, sizeof(ack), 0);
-  if (received <= 0) {
+  // Groovy answers CMD_INIT with a one-byte core version, and blit ACKs are 13
+  // bytes. Anything else is not this protocol, so do not accept it as proof the
+  // target is a MiSTer.
+  if (received != 1 && received != 13) {
     e = "invalid CMD_INIT acknowledgment";
     close();
     return false;
   }
+  // Seeds the round-trip estimate that biases the automatic sync line; waitSync
+  // then keeps refining it from real ACKs, so one unlucky startup sample cannot
+  // skew the whole session.
   networkRttNs_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now() - pingStart)
                       .count();
+  if (received == 1) coreVersion_ = ack[0];
   if (received == 13) {
     fpga_.frameEcho = readLe<uint32_t>(ack);
     fpga_.vCountEcho = readLe<uint16_t>(ack + 4);
@@ -284,8 +299,9 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
   if (csize) std::memcpy(h + 8, &csize, 4);
   size_t hs = csize ? 12 : 8;
   if (!sendPacket(h, hs, e) || !sendChunks(payload, bytes, e)) return false;
+  lastSendEndAt_ = std::chrono::steady_clock::now();
   lastStreamNs_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      std::chrono::steady_clock::now() - sendStart)
+                      lastSendEndAt_ - sendStart)
                       .count();
   streamTimeUs_ = lastStreamNs_ / 1000;
   drainStatus(frame);
@@ -308,9 +324,19 @@ void GroovyTransport::waitSync() noexcept {
       matched = drainStatus(currentFrame_);
     }
   }
-  if (matched)
+  if (matched) {
     ++ackedFrames_;
-  else
+    // Track the round trip continuously instead of trusting the single startup
+    // sample. Implausible samples are ignored so a late ACK cannot poison it.
+    if (lastSendEndAt_.time_since_epoch().count() &&
+        lastAckAt_ >= lastSendEndAt_) {
+      const auto sample = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              lastAckAt_ - lastSendEndAt_)
+                              .count();
+      if (uint64_t(sample) < frameTimeNs_)
+        networkRttNs_ = (networkRttNs_ * 7 + uint64_t(sample)) / 8;
+    }
+  } else
     ++missedAcks_;
   int64_t correctionNs = 0;
   if (syncRefresh_ && fpga_.frameEcho == currentFrame_ && fpga_.vCountEcho &&
@@ -367,6 +393,8 @@ GroovyTransportStats GroovyTransport::stats() const noexcept {
   s.streamTimeUs = streamTimeUs_;
   s.ackAgeMs = ackAgeMs_;
   s.rasterCorrectionUs = rasterCorrectionUs_;
+  s.sendErrors = sendErrors_;
+  s.networkRttUs = networkRttNs_ / 1000;
   s.vramSynced = vramSynced_;
   s.vgaFrameskip = vgaFrameskip_;
   s.vgaVblank = vgaVblank_;

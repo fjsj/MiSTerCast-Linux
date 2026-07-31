@@ -183,7 +183,9 @@ int main(int argc, char** argv) {
                 << s.acknowledgedFrame << "/" << s.fpgaFrame << ", correction "
                 << s.rasterCorrectionUs << " us, stream " << s.streamTimeUs
                 << " us, ACK " << s.acknowledgedFrames << "/" << s.missedAcks
-                << ", VRAM " << (s.vramSynced ? "synced" : "unsynced")
+                << ", RTT " << s.networkRttUs << " us, send errors "
+                << s.sendErrors << ", VRAM "
+                << (s.vramSynced ? "synced" : "unsynced")
                 << (s.vgaFrameskip ? "/fb" : "") << ", audio buffered "
                 << s.audioBufferedSamples << " samples, level "
                 << int(s.audioPeak * 100) << "%, MiSTer audio "

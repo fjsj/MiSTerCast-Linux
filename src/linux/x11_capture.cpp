@@ -35,6 +35,9 @@ class X11Capture final : public IVideoCapture {
   uint32_t redMask_{0xff0000}, greenMask_{0xff00}, blueMask_{0xff};
   uint8_t depth_{}, bitsPerPixel_{32};
   bool lsbFirst_{true};
+  uint32_t consecutiveFailures_{}, shmFailures_{};
+  // Roughly two seconds of retries at the capture rate before giving up.
+  static constexpr uint32_t kMaxConsecutiveFailures = 120, kMaxShmFailures = 5;
   void resolvePixelFormat(uint8_t depth) {
     auto* setup = xcb_get_setup(connection_);
     lsbFirst_ = setup->image_byte_order == XCB_IMAGE_ORDER_LSB_FIRST;
@@ -108,10 +111,52 @@ class X11Capture final : public IVideoCapture {
     return true;
   }
 
- public:
-  ~X11Capture() override { stop(); }
-  std::vector<Monitor> monitors(std::string& error) override {
-    std::lock_guard<std::mutex> l(mutex_);
+  bool setupShm() {
+    auto version = xcb_shm_query_version_reply(
+        connection_, xcb_shm_query_version(connection_), nullptr);
+    if (!version) return false;
+    free(version);
+    shmSize_ = size_t(selected_.width) * selected_.height * 4;
+    shmId_ = shmget(IPC_PRIVATE, shmSize_, IPC_CREAT | 0600);
+    if (shmId_ >= 0) {
+      auto* p = shmat(shmId_, nullptr, 0);
+      if (p != reinterpret_cast<void*>(-1)) {
+        shmData_ = static_cast<uint8_t*>(p);
+        shmSeg_ = xcb_generate_id(connection_);
+        auto cookie = xcb_shm_attach_checked(connection_, shmSeg_, shmId_, 0);
+        auto* attachError = xcb_request_check(connection_, cookie);
+        if (!attachError) useShm_ = true;
+        free(attachError);
+      }
+    }
+    if (!useShm_) closeShm();
+    return useShm_;
+  }
+  // Re-resolves the display and the selected monitor after a failed capture. A
+  // monitor can be resized, rotated, or replugged mid-stream, which invalidates
+  // the cached geometry and the shared segment; recovering here keeps the stream
+  // alive instead of ending the session on a transient fault.
+  bool recoverLocked() {
+    if (connection_ && xcb_connection_has_error(connection_)) close();
+    std::string ignored;
+    auto ms = monitorsLocked(ignored);
+    auto it = std::find_if(ms.begin(), ms.end(), [&](const Monitor& m) {
+      return m.name == selected_.name;
+    });
+    if (it == ms.end()) return false;
+    const bool moved = it->width != selected_.width ||
+                       it->height != selected_.height || it->x != selected_.x ||
+                       it->y != selected_.y;
+    selected_ = *it;
+    region_ = clampRegion(region_);
+    if (moved || !useShm_ || !shmData_) {
+      closeShm();
+      setupShm();
+      resolvePixelFormat(screen_ ? screen_->root_depth : depth_);
+    }
+    return true;
+  }
+  std::vector<Monitor> monitorsLocked(std::string& error) {
     if (!connect(error)) return {};
     std::vector<Monitor> result;
 #ifdef MISTERCAST_HAVE_RANDR
@@ -138,6 +183,13 @@ class X11Capture final : public IVideoCapture {
                         screen_->height_in_pixels, true});
     return result;
   }
+
+ public:
+  ~X11Capture() override { stop(); }
+  std::vector<Monitor> monitors(std::string& error) override {
+    std::lock_guard<std::mutex> l(mutex_);
+    return monitorsLocked(error);
+  }
   bool start(const std::string& name, ErrorCallback cb) override {
     std::string e;
     auto ms = monitors(e);
@@ -160,25 +212,8 @@ class X11Capture final : public IVideoCapture {
     region_ = {0, 0, selected_.width, selected_.height};
     error_ = std::move(cb);
     resolvePixelFormat(screen_->root_depth);
-    auto version = xcb_shm_query_version_reply(
-        connection_, xcb_shm_query_version(connection_), nullptr);
-    if (version) {
-      free(version);
-      shmSize_ = size_t(selected_.width) * selected_.height * 4;
-      shmId_ = shmget(IPC_PRIVATE, shmSize_, IPC_CREAT | 0600);
-      if (shmId_ >= 0) {
-        auto* p = shmat(shmId_, nullptr, 0);
-        if (p != reinterpret_cast<void*>(-1)) {
-          shmData_ = static_cast<uint8_t*>(p);
-          shmSeg_ = xcb_generate_id(connection_);
-          auto cookie = xcb_shm_attach_checked(connection_, shmSeg_, shmId_, 0);
-          auto* attachError = xcb_request_check(connection_, cookie);
-          if (!attachError) useShm_ = true;
-          free(attachError);
-        }
-      }
-      if (!useShm_) closeShm();
-    }
+    setupShm();
+    consecutiveFailures_ = 0;
     running_ = true;
     return true;
   }
@@ -194,13 +229,26 @@ class X11Capture final : public IVideoCapture {
     (void)timeout;
     if (!running_) return false;
     std::lock_guard<std::mutex> l(mutex_);
-    if (!connection_ || xcb_connection_has_error(connection_)) {
+    if (captureLocked(out)) {
+      consecutiveFailures_ = 0;
+      out.sequence = ++sequence_;
+      return true;
+    }
+    // A resize, rotation, replug, or X server restart invalidates the cached
+    // geometry and the shared segment. Recover and let the caller retry, so a
+    // transient fault costs frames instead of the whole session; only a fault
+    // that persists for roughly two seconds is reported as fatal.
+    recoverLocked();
+    if (++consecutiveFailures_ >= kMaxConsecutiveFailures) {
       running_ = false;
       if (error_)
-        error_({"video", "X11 session disconnected",
-                "Restart after reconnecting the display."});
-      return false;
+        error_({"video", "X11 capture kept failing",
+                "Check the monitor selection and X11 session."});
     }
+    return false;
+  }
+  bool captureLocked(Frame& out) {
+    if (!connection_ || xcb_connection_has_error(connection_)) return false;
     xcb_generic_error_t* xe = nullptr;
     uint8_t* data = nullptr;
     size_t len = 0;
@@ -223,10 +271,14 @@ class X11Capture final : public IVideoCapture {
         depth = shared->depth;
         len = std::min<size_t>(shared->size, shmSize_);
         data = shmData_;
+        shmFailures_ = 0;
       } else {
         free(xe);
         xe = nullptr;
-        closeShm();
+        // One failed request does not mean MIT-SHM is unusable: a stale region
+        // after a resize fails the same way. Fall back for this frame and only
+        // settle on the slow path once it keeps failing.
+        if (++shmFailures_ >= kMaxShmFailures) closeShm();
       }
     }
     if (!data) {
@@ -240,19 +292,12 @@ class X11Capture final : public IVideoCapture {
       }
     }
     if (!data) {
-      std::string m =
-          xe ? "X11 capture request failed" : "X11 monitor disappeared";
       free(xe);
       free(shared);
       free(normal);
-      if (error_)
-        error_({"video", m, "Check monitor selection and X11 session."});
       return false;
     }
-    if (depth != depth_) {
-      depth_ = depth;
-      resolvePixelFormat(screen_->root_depth);
-    }
+    if (depth != depth_) resolvePixelFormat(depth);
     uint32_t stride = height ? uint32_t(len) / height : 0;
     std::string e;
     bool ok = normalizeToBgra(data, len, width, height, stride, bitsPerPixel_,
@@ -260,10 +305,6 @@ class X11Capture final : public IVideoCapture {
                               e);
     free(shared);
     free(normal);
-    if (ok)
-      out.sequence = ++sequence_;
-    else if (error_)
-      error_({"video", e, "Use a standard TrueColor X11 visual."});
     return ok;
   }
   void stop() noexcept override {
