@@ -150,6 +150,61 @@ static void checkSendErrorsAreNotFatal() {
   CHECK(transport.stats().sendErrors > 0);
   transport.close();
 }
+// With no blit ACKs at all the warm-up gate must still open, otherwise the
+// automatic sync line stays pinned at vTotal/2 and the raster correction never
+// applies for the rest of the session.
+static void checkWarmUpGateUsesFrameNumber() {
+  int server = socket(AF_INET, SOCK_DGRAM, 0);
+  if (server < 0) return;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+      0) {
+    close(server);
+    return;
+  }
+  socklen_t alen = sizeof(address);
+  getsockname(server, reinterpret_cast<sockaddr*>(&address), &alen);
+  std::atomic<bool> done{false};
+  std::thread endpoint([&] {
+    uint8_t packet[2048];
+    sockaddr_storage peer{};
+    socklen_t plen = sizeof(peer);
+    timeval timeout{0, 200000};
+    setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    while (!done) {
+      auto n = recvfrom(server, packet, sizeof(packet), 0,
+                        reinterpret_cast<sockaddr*>(&peer), &plen);
+      if (n <= 0) continue;
+      if (packet[0] != 2) continue;  // deliberately never acks a blit
+      uint8_t ack[13]{};
+      sendto(server, ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&peer),
+             plen);
+    }
+  });
+  std::string error;
+  GroovyTransport transport;
+  CHECK(transport.open("localhost", 48000, error, ntohs(address.sin_port)));
+  Modeline vga{"vga", 25.175, 640, 656, 752, 800, 480, 490, 492, 525, false};
+  CHECK(transport.switchMode(vga, false, error));
+  transport.setSyncOptions(true, 0);
+  std::vector<uint8_t> pixels(size_t(640) * 480 * 3, 42);
+  uint16_t warmUpLine = 0, steadyLine = 0;
+  for (uint32_t frame = 1; frame <= 12; ++frame) {
+    CHECK(transport.sendFrame(frame, 0, pixels, error));
+    transport.waitSync();
+    if (frame == 5) warmUpLine = transport.stats().requestedSyncLine;
+    if (frame == 12) steadyLine = transport.stats().requestedSyncLine;
+  }
+  transport.close();
+  done = true;
+  endpoint.join();
+  close(server);
+  CHECK(transport.stats().acknowledgedFrames == 0);
+  CHECK(warmUpLine == 525 / 2);
+  CHECK(steadyLine != 525 / 2 && steadyLine > 0);
+}
 namespace {
 // Synthetic capture sources, so session behaviour that depends on the monitor
 // changing or on the core's audio bit can be driven deterministically.
@@ -460,6 +515,7 @@ int main() {
   checkInterlaceTransport(false, 1, 1, 1, 6);
   checkInterlaceTransport(true, 1, 2, 0, 12);
   checkSendErrorsAreNotFatal();
+  checkWarmUpGateUsesFrameNumber();
   checkCropFollowsMonitorResize();
   checkAudioSkippedWhenCoreHasAudioOff();
   auto dir = std::filesystem::temp_directory_path() / "mistercast-core-test";

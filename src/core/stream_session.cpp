@@ -1,5 +1,9 @@
 #include "mistercast/stream_session.hpp"
 
+#include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
+
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -9,6 +13,20 @@
 #include "mistercast/audio_pacer.hpp"
 #include "mistercast/transform.hpp"
 namespace mistercast {
+namespace {
+// The capture, pacing, and audio loops all have to wake on time; on a loaded
+// desktop the default scheduler will not guarantee that. Windows put its cast
+// thread at THREAD_PRIORITY_HIGHEST, and round-robin at the lowest realtime
+// priority is the closest equivalent that cannot monopolise a core. Both steps
+// need privileges an ordinary desktop process usually lacks, so failure is
+// silent and streaming simply continues on the normal scheduler.
+void raiseThreadPriority() {
+  sched_param parameters{};
+  parameters.sched_priority = sched_get_priority_min(SCHED_RR) + 1;
+  if (pthread_setschedparam(pthread_self(), SCHED_RR, &parameters) == 0) return;
+  setpriority(PRIO_PROCESS, 0, -10);
+}
+}  // namespace
 StreamSession::StreamSession(std::unique_ptr<IVideoCapture> v,
                              std::unique_ptr<IAudioCapture> a)
     : video_(std::move(v)), audio_(std::move(a)) {}
@@ -168,6 +186,7 @@ void StreamSession::stop() noexcept {
   setState(SessionState::Idle);
 }
 void StreamSession::captureLoop() {
+  raiseThreadPriority();
   auto nextPreview = std::chrono::steady_clock::now();
   Frame working;
   while (!stop_) {
@@ -216,6 +235,7 @@ void StreamSession::captureLoop() {
   }
 }
 void StreamSession::renderLoop() {
+  raiseThreadPriority();
   uint32_t number = 0;
   uint8_t field = 0;
   std::vector<uint8_t> rgb;
@@ -339,6 +359,7 @@ void StreamSession::renderLoop() {
   }
 }
 void StreamSession::audioLoop() {
+  raiseThreadPriority();
   while (!stop_) {
     PcmBlock b;
     if (!audio_->next(b, std::chrono::milliseconds(100))) {

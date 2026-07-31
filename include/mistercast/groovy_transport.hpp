@@ -49,7 +49,7 @@ class GroovyTransport {
   uint16_t mtu_{1472}, vTotal_{}, frameDelay_{};
   uint8_t interlaceShift_{};
   std::vector<uint8_t> compressed_;
-  bool syncRefresh_{true}, progressiveInterlaceBuffer_{};
+  bool syncRefresh_{true}, progressiveInterlaceBuffer_{}, firstFrame_{true};
   uint64_t frameTimeNs_{}, lineTimeNs_{}, networkRttNs_{}, lastStreamNs_{};
   uint32_t currentFrame_{};
   uint8_t coreVersion_{};
@@ -60,6 +60,7 @@ class GroovyTransport {
   bool sendChunks(const uint8_t*, size_t, std::string&);
   bool drainStatus(uint32_t expectedFrame) noexcept;
   uint16_t syncLine(uint64_t workNs) const noexcept;
+  int64_t rasterCorrection() const noexcept;
   std::atomic<bool> misterAudioEnabled_{false}, vramSynced_{false},
       vgaFrameskip_{false}, vgaVblank_{false};
   std::atomic<uint32_t> ackFrame_{0}, fpgaFrame_{0};

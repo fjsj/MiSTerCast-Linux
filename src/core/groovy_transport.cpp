@@ -224,6 +224,7 @@ bool GroovyTransport::switchMode(const Modeline& m,
   lastAckAt_ = {};
   lastStreamNs_ = 0;
   currentFrame_ = 0;
+  firstFrame_ = true;
   return sendPacket(b, sizeof(b), e);
 }
 
@@ -249,7 +250,11 @@ uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
         uint32_t(std::llround(double(vTotal_) * frameDelay_ / 10.0)) + 1;
     return uint16_t(std::min<uint32_t>(line, vTotal_));
   }
-  if (ackedFrames_.load() < 10) return std::max<uint16_t>(1, vTotal_ >> 1);
+  // Warm-up is keyed on the frame number, as Windows did. Keying it on
+  // successful ACKs meant that on a link where ACKs miss the poll window,
+  // ackedFrames_ never reached ten, so the sync line stayed pinned at vTotal/2
+  // and the raster correction never applied for the whole session.
+  if (currentFrame_ <= 10) return std::max<uint16_t>(1, vTotal_ >> 1);
   const int64_t leadNs =
       int64_t(networkRttNs_ + kAutoMarginNs + workNs) - int64_t(lastStreamNs_);
   if (leadNs <= 0) return 1;
@@ -268,15 +273,24 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
     return false;
   }
   const auto sendStart = std::chrono::steady_clock::now();
+  if (firstFrame_) {
+    // Start pacing from the first real frame. syncEpoch_ was set when the mode
+    // was sent, and the thread startup and audio prebuffer in between are not
+    // work this frame should be charged for. Windows instead skipped blitting
+    // frame one, but that was to hide MAME loading its roms; the part worth
+    // keeping is resetting the timing baseline.
+    syncEpoch_ = sendStart;
+    firstFrame_ = false;
+  }
   const uint64_t workNs =
       syncEpoch_.time_since_epoch().count()
           ? std::chrono::duration_cast<std::chrono::nanoseconds>(sendStart -
                                                                  syncEpoch_)
                 .count()
           : 0;
+  currentFrame_ = frame;
   const uint16_t vsync = syncLine(workNs);
   syncLine_ = vsync;
-  currentFrame_ = frame;
   const uint8_t* payload = rgb.data();
   size_t bytes = rgb.size();
   uint32_t csize = 0;
@@ -308,21 +322,54 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
   return true;
 }
 
+int64_t GroovyTransport::rasterCorrection() const noexcept {
+  if (!syncRefresh_ || fpga_.frameEcho != currentFrame_ || !fpga_.vCountEcho ||
+      !vTotal_)
+    return 0;
+  const int64_t requested =
+      (int64_t(fpga_.frameEcho) - 1) * vTotal_ + fpga_.vCountEcho;
+  const int64_t raster = int64_t(fpga_.frame) * vTotal_ + fpga_.vCount;
+  const int64_t correctionNs =
+      (int64_t(lineTimeNs_) * ((requested - raster) >> interlaceShift_)) / 2;
+  return std::clamp<int64_t>(correctionNs, -int64_t(frameTimeNs_),
+                             int64_t(frameTimeNs_));
+}
+
 void GroovyTransport::waitSync() noexcept {
   if (!frameTimeNs_) return;
+  const auto start = std::chrono::steady_clock::now();
+  const auto workNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(start - syncEpoch_)
+          .count();
+  auto pacingDeadline = [&](int64_t correctionNs) {
+    return start + std::chrono::nanoseconds(std::clamp<int64_t>(
+                       int64_t(frameTimeNs_) - workNs + correctionNs, 0,
+                       int64_t(frameTimeNs_ * 2)));
+  };
   bool matched = fpga_.frameEcho == currentFrame_ || drainStatus(currentFrame_);
-  if (!matched && fd_ >= 0) {
-    const auto ackDeadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
-    while (!matched && std::chrono::steady_clock::now() < ackDeadline) {
-      pollfd descriptor{fd_, POLLIN, 0};
-      const auto remaining =
-          std::chrono::duration_cast<std::chrono::microseconds>(
-              ackDeadline - std::chrono::steady_clock::now());
-      const int timeoutMs = std::max(0, int((remaining.count() + 999) / 1000));
-      if (poll(&descriptor, 1, timeoutMs) <= 0) break;
-      matched = drainStatus(currentFrame_);
-    }
+  int64_t correctionNs = rasterCorrection();
+  auto deadline = pacingDeadline(correctionNs);
+  // While the ACK is still outstanding, spend the wait sleeping on the socket
+  // rather than on a timer, so an ACK that arrives late still corrects this
+  // frame instead of being counted as missed. Windows likewise polled the raster
+  // inside WaitSync rather than only before it. The window is a short guaranteed
+  // minimum extended across the rest of the pacing wait, which for a real
+  // modeline is most of a frame period rather than the previous fixed 2 ms.
+  const auto ackFloor = start + std::chrono::milliseconds(2);
+  while (!matched && fd_ >= 0) {
+    const auto until =
+        std::max(ackFloor, deadline - std::chrono::milliseconds(1));
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= until) break;
+    pollfd descriptor{fd_, POLLIN, 0};
+    const int timeoutMs = std::max(
+        1, int(std::chrono::duration_cast<std::chrono::milliseconds>(until - now)
+                   .count()));
+    if (poll(&descriptor, 1, timeoutMs) <= 0) break;
+    if (!drainStatus(currentFrame_)) continue;
+    matched = true;
+    correctionNs = rasterCorrection();
+    deadline = pacingDeadline(correctionNs);
   }
   if (matched) {
     ++ackedFrames_;
@@ -338,30 +385,11 @@ void GroovyTransport::waitSync() noexcept {
     }
   } else
     ++missedAcks_;
-  int64_t correctionNs = 0;
-  if (syncRefresh_ && fpga_.frameEcho == currentFrame_ && fpga_.vCountEcho &&
-      vTotal_) {
-    const int64_t requested =
-        (int64_t(fpga_.frameEcho) - 1) * vTotal_ + fpga_.vCountEcho;
-    const int64_t raster = int64_t(fpga_.frame) * vTotal_ + fpga_.vCount;
-    correctionNs =
-        (int64_t(lineTimeNs_) * ((requested - raster) >> interlaceShift_)) / 2;
-    correctionNs = std::clamp<int64_t>(correctionNs, -int64_t(frameTimeNs_),
-                                       int64_t(frameTimeNs_));
-  }
   rasterCorrectionUs_ = correctionNs / 1000;
-  const auto now = std::chrono::steady_clock::now();
-  const auto workNs =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(now - syncEpoch_)
-          .count();
-  const int64_t waitNs =
-      std::clamp<int64_t>(int64_t(frameTimeNs_) - workNs + correctionNs, 0,
-                          int64_t(frameTimeNs_ * 2));
-  if (waitNs > 200000)
-    std::this_thread::sleep_for(std::chrono::nanoseconds(waitNs - 100000));
-  while (std::chrono::steady_clock::now() <
-         now + std::chrono::nanoseconds(waitNs))
-    std::this_thread::yield();
+  const auto sleepUntil = deadline - std::chrono::microseconds(100);
+  if (sleepUntil > std::chrono::steady_clock::now())
+    std::this_thread::sleep_until(sleepUntil);
+  while (std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
   syncEpoch_ = std::chrono::steady_clock::now();
   if (lastAckAt_.time_since_epoch().count())
     ackAgeMs_ = std::chrono::duration_cast<std::chrono::milliseconds>(
