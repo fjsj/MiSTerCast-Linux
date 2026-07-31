@@ -80,7 +80,8 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   audioRing_.reset();
   {
     std::lock_guard<std::mutex> l(mutex_);
-    frames_.clear();
+    readyFrame_ = {};
+    frameReady_ = false;
     captureRequested_ = true;
   }
   setState(SessionState::Starting);
@@ -158,12 +159,14 @@ void StreamSession::stop() noexcept {
   transport_.close();
   {
     std::lock_guard<std::mutex> l(mutex_);
-    frames_.clear();
+    readyFrame_ = {};
+    frameReady_ = false;
   }
   setState(SessionState::Idle);
 }
 void StreamSession::captureLoop() {
   auto nextPreview = std::chrono::steady_clock::now();
+  Frame working;
   while (!stop_) {
     {
       std::unique_lock<std::mutex> l(mutex_);
@@ -171,28 +174,27 @@ void StreamSession::captureLoop() {
       if (stop_) break;
       captureRequested_ = false;
     }
-    Frame f;
-    if (!video_->next(f, std::chrono::milliseconds(100))) {
+    if (!video_->next(working, std::chrono::milliseconds(100))) {
       if (!stop_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         std::lock_guard<std::mutex> l(mutex_);
         captureRequested_ = true;
+        cv_.notify_all();
       }
       continue;
     }
     ++captured_;
     auto now = std::chrono::steady_clock::now();
     if (config_.source.preview && previewCallback_ && now >= nextPreview) {
-      previewCallback_(f);
+      previewCallback_(working);
       nextPreview = now + std::chrono::milliseconds(100);
     }
     {
       std::lock_guard<std::mutex> l(mutex_);
-      if (!frames_.empty()) {
-        frames_.clear();
-        ++dropped_;
-      }
-      frames_.push_back(std::move(f));
+      // Publish and take the previous buffer back in one swap.
+      if (frameReady_) ++dropped_;
+      std::swap(readyFrame_, working);
+      frameReady_ = true;
     }
     cv_.notify_all();
   }
@@ -214,18 +216,29 @@ void StreamSession::renderLoop() {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   auto audioClock = std::chrono::steady_clock::now();
+  Frame f;
+  bool haveFrame = false;
   while (!stop_) {
-    Frame f;
     {
       std::unique_lock<std::mutex> l(mutex_);
-      cv_.wait(l, [&] { return stop_ || !frames_.empty(); });
-      if (stop_) break;
-      while (frames_.size() > 1) {
-        frames_.pop_front();
-        ++dropped_;
+      // Only the very first frame is worth blocking for. From then on the
+      // newest finished capture is taken if one is ready, and otherwise the
+      // previous frame is sent again; waiting here would put the capture back
+      // on the critical path in front of every blit.
+      if (!haveFrame &&
+          !cv_.wait_for(l, std::chrono::seconds(5),
+                        [&] { return stop_ || frameReady_; })) {
+        l.unlock();
+        fail({"video", "no frame was captured within 5 seconds",
+              "Check the monitor selection and X11 session."});
+        break;
       }
-      f = std::move(frames_.front());
-      frames_.pop_front();
+      if (stop_) break;
+      if (frameReady_) {
+        std::swap(f, readyFrame_);
+        frameReady_ = false;
+        haveFrame = true;
+      }
     }
     ++number;
     transport_.alignFrame(number, field);
@@ -281,13 +294,16 @@ void StreamSession::renderLoop() {
       break;
     }
     ++sent_;
-    if (config_.modeline.interlaced) field ^= 1;
-    transport_.waitSync();
+    // Start the next capture before pacing, so it runs during the wait for the
+    // MiSTer raster rather than in front of the next blit. alignFrame sets the
+    // field from the FPGA state at the top of every iteration, so there is
+    // nothing to advance here.
     {
       std::lock_guard<std::mutex> l(mutex_);
       captureRequested_ = true;
     }
     cv_.notify_all();
+    transport_.waitSync();
   }
 }
 void StreamSession::audioLoop() {

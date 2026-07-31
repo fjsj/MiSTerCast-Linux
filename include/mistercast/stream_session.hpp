@@ -1,7 +1,6 @@
 #pragma once
 #include <atomic>
 #include <condition_variable>
-#include <deque>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -61,7 +60,11 @@ class StreamSession {
   std::chrono::steady_clock::time_point startedAt_{};
   std::mutex mutex_;
   std::condition_variable cv_;
-  std::deque<Frame> frames_;
+  // Newest completed capture, waiting to be picked up. The rendering thread
+  // swaps its own frame in, so the two buffers cycle between the threads and
+  // neither allocates once they have grown to the capture size.
+  Frame readyFrame_;
+  bool frameReady_{false};
   bool captureRequested_{true};
   std::thread captureThread_, renderThread_, audioThread_;
 };
