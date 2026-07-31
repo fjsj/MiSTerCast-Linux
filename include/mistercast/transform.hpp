@@ -7,7 +7,8 @@ struct CropRect {
   uint32_t x{}, y{}, width{}, height{};
 };
 bool calculateCrop(uint32_t sourceWidth, uint32_t sourceHeight,
-                   const SourceOptions&, CropRect&, std::string& error);
+                   const SourceOptions&, const Modeline&, CropRect&,
+                   std::string& error);
 bool transformRgb24(const Frame&, const SourceOptions&, const Modeline&,
                     uint8_t field, std::vector<uint8_t>&, std::string& error);
 bool normalizeToBgra(const uint8_t* source, size_t size, uint32_t width,

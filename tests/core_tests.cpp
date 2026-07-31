@@ -152,6 +152,39 @@ int main() {
   AudioPacer::conformStereo(servoSource, 6, servoOutput, 8);
   CHECK(servoOutput.size() == 8 && servoOutput[0] == 0 && servoOutput[4] == 4 &&
         servoOutput[6] == 4);
+  SourceOptions crop;
+  Modeline cropMode = Modeline::safeDefault();  // 320x240 active
+  CropRect rect;
+  crop.crop = CropMode::X1;
+  crop.width = crop.height = 64;  // must be ignored for 1x-5x
+  CHECK(calculateCrop(3840, 2160, crop, cropMode, rect, error));
+  CHECK(rect.width == 320 && rect.height == 240);
+  crop.crop = CropMode::X3;
+  CHECK(calculateCrop(3840, 2160, crop, cropMode, rect, error));
+  CHECK(rect.width == 960 && rect.height == 720);
+  crop.crop = CropMode::Full43;
+  CHECK(calculateCrop(3840, 2160, crop, cropMode, rect, error));
+  CHECK(rect.width == 2880 && rect.height == 2160);
+  crop.rotation = Rotation::CW90;
+  CHECK(calculateCrop(3840, 2160, crop, cropMode, rect, error));
+  CHECK(rect.width == 1620 && rect.height == 2160);
+  crop.rotation = Rotation::CCW90;
+  crop.crop = CropMode::Full54;
+  CHECK(calculateCrop(3840, 2160, crop, cropMode, rect, error));
+  CHECK(rect.width == 1728 && rect.height == 2160);
+  crop.rotation = Rotation::None;
+  crop.crop = CropMode::Custom;
+  crop.width = 640;
+  crop.height = 480;
+  crop.alignment = Alignment::TopLeft;
+  crop.xOffset = 4000;
+  crop.yOffset = 2000;
+  CHECK(calculateCrop(3840, 2160, crop, cropMode, rect, error));
+  CHECK(rect.x == 3200 && rect.y == 1680);
+  crop.xOffset = -3000;
+  crop.yOffset = -2000;
+  CHECK(calculateCrop(3840, 2160, crop, cropMode, rect, error));
+  CHECK(rect.x == 0 && rect.y == 0);
   Frame f;
   f.width = 4;
   f.height = 2;

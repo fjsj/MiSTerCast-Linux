@@ -5,22 +5,27 @@
 #include <limits>
 namespace mistercast {
 bool calculateCrop(uint32_t sw, uint32_t sh, const SourceOptions& o,
-                   CropRect& r, std::string& e) {
+                   const Modeline& m, CropRect& r, std::string& e) {
   if (!sw || !sh) {
     e = "capture frame has zero dimensions";
     return false;
   }
   uint32_t w = o.width, h = o.height;
-  if (o.crop == CropMode::Full43) {
+  const bool quarterTurn =
+      o.rotation == Rotation::CW90 || o.rotation == Rotation::CCW90;
+  if (o.crop == CropMode::Full43 || o.crop == CropMode::Full54) {
+    // A quarter turn maps source height onto output width, so the crop has to
+    // carry the inverse aspect for the rotated result to stay 4:3 or 5:4.
+    const uint32_t wide = o.crop == CropMode::Full43 ? 4 : 5;
+    const uint32_t tall = o.crop == CropMode::Full43 ? 3 : 4;
     h = sh;
-    w = std::min(sw, sh * 4 / 3);
-  } else if (o.crop == CropMode::Full54) {
-    h = sh;
-    w = std::min(sw, sh * 5 / 4);
+    w = std::min(sw, quarterTurn ? sh * tall / wide : sh * wide / tall);
   } else if (o.crop != CropMode::Custom) {
-    unsigned m = static_cast<unsigned>(o.crop);
-    w = std::min(sw, uint32_t(o.width * m));
-    h = std::min(sh, uint32_t(o.height * m));
+    // 1x-5x are multiples of the modeline's active area, not of the custom
+    // width/height fields, so a 1x crop is pixel-exact for the target mode.
+    const uint32_t multiple = static_cast<uint32_t>(o.crop);
+    w = std::min(sw, uint32_t(m.hActive) * multiple);
+    h = std::min(sh, uint32_t(m.vActive) * multiple);
   }
   w = std::min(w, sw);
   h = std::min(h, sh);
@@ -63,10 +68,10 @@ bool calculateCrop(uint32_t sw, uint32_t sh, const SourceOptions& o,
   }
   x += o.xOffset;
   y += o.yOffset;
-  if (x < 0 || y < 0 || x + int64_t(w) > sw || y + int64_t(h) > sh) {
-    e = "crop offsets place the source outside the monitor";
-    return false;
-  }
+  // An offset that would push the crop off-screen is clamped back into range
+  // rather than refusing to stream, matching the upstream Windows sender.
+  x = std::clamp<int64_t>(x, 0, int64_t(sw) - w);
+  y = std::clamp<int64_t>(y, 0, int64_t(sh) - h);
   r = {uint32_t(x), uint32_t(y), w, h};
   return true;
 }
@@ -81,7 +86,7 @@ bool transformRgb24(const Frame& f, const SourceOptions& o, const Modeline& m,
     return false;
   }
   CropRect c;
-  if (!calculateCrop(f.width, f.height, o, c, e)) return false;
+  if (!calculateCrop(f.width, f.height, o, m, c, e)) return false;
   const bool fieldBuffer = m.interlaced && !o.progressiveInterlaceBuffer;
   uint32_t oh = fieldBuffer ? m.vActive / 2 : m.vActive;
   if (!oh) {
