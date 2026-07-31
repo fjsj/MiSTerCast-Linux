@@ -122,7 +122,7 @@ void GroovyTransport::setSyncOptions(bool syncRefresh,uint16_t frameDelay)noexce
 }
 
 void GroovyTransport::alignFrame(uint32_t&frame,uint8_t&field)const noexcept{
- if(fpga_.frame>=frame)frame=fpga_.frame+1;
+ if(fpga_.frame>frame)frame=fpga_.frame+1;
  if(interlaceShift_)field=uint8_t((!(fpga_.bits&0x20))^((frame-fpga_.frame)&1));
  else field=0;
 }
