@@ -90,6 +90,49 @@ struct AreaTables {
   std::vector<uint32_t> offsets, indices, weights;
 };
 
+struct AxisMapping {
+  uint32_t origin{}, extent{};
+  bool reversed{};
+};
+
+struct TransformMapping {
+  AxisMapping horizontal, vertical;
+  bool swapped{};
+};
+
+TransformMapping transformMapping(const CropRect& crop, Rotation rotation) {
+  const AxisMapping x{crop.x, crop.width, false};
+  const AxisMapping reverseX{crop.x, crop.width, true};
+  const AxisMapping y{crop.y, crop.height, false};
+  const AxisMapping reverseY{crop.y, crop.height, true};
+  switch (rotation) {
+    case Rotation::None:
+      return {x, y, false};
+    case Rotation::Flip180:
+      return {reverseX, reverseY, false};
+    case Rotation::CW90:
+      return {reverseY, x, true};
+    case Rotation::CCW90:
+      return {y, reverseX, true};
+  }
+  return {x, y, false};
+}
+
+uint32_t fullOutputRow(uint32_t row, bool fieldBuffer, uint8_t field) {
+  return fieldBuffer ? row * 2 + !(field & 1) : row;
+}
+
+void buildPointTable(uint32_t destinationExtent, const AxisMapping& source,
+                     std::vector<uint32_t>& table) {
+  table.resize(destinationExtent);
+  for (uint32_t destination = 0; destination < destinationExtent;
+       ++destination) {
+    const double position = (destination + .5) / destinationExtent;
+    table[destination] = sampleIndex(source.reversed ? 1 - position : position,
+                                     source.origin, source.extent);
+  }
+}
+
 LinearSample linearSample(uint32_t destination, uint32_t destinationExtent,
                           uint32_t sourceOrigin, uint32_t sourceExtent,
                           bool reversed) {
@@ -147,6 +190,142 @@ void buildAreaTables(uint32_t destinationExtent, uint32_t sourceOrigin,
   }
   table.offsets[destinationExtent] = uint32_t(table.indices.size());
 }
+
+void transformPoint(const Frame& frame, const TransformMapping& mapping,
+                    const Modeline& modeline, bool fieldBuffer, uint8_t field,
+                    uint32_t outputHeight, std::vector<uint8_t>& output) {
+  thread_local std::vector<uint32_t> columns, rows;
+  buildPointTable(modeline.hActive, mapping.horizontal, columns);
+  buildPointTable(modeline.vActive, mapping.vertical, rows);
+  output.resize(size_t(modeline.hActive) * outputHeight * 3);
+  uint8_t* destination = output.data();
+  for (uint32_t y = 0; y < outputHeight; ++y) {
+    const uint32_t fullY = fullOutputRow(y, fieldBuffer, field);
+    if (mapping.swapped) {
+      const size_t column = size_t(rows[fullY]) * 4;
+      for (uint32_t x = 0; x < modeline.hActive; ++x, destination += 3) {
+        const uint8_t* pixel =
+            &frame.bgra[size_t(columns[x]) * frame.stride + column];
+        destination[0] = pixel[0];
+        destination[1] = pixel[1];
+        destination[2] = pixel[2];
+      }
+    } else {
+      const uint8_t* row = &frame.bgra[size_t(rows[fullY]) * frame.stride];
+      for (uint32_t x = 0; x < modeline.hActive; ++x, destination += 3) {
+        const uint8_t* pixel = row + size_t(columns[x]) * 4;
+        destination[0] = pixel[0];
+        destination[1] = pixel[1];
+        destination[2] = pixel[2];
+      }
+    }
+  }
+}
+
+void transformBilinear(const Frame& frame, const TransformMapping& mapping,
+                       const Modeline& modeline, bool fieldBuffer,
+                       uint8_t field, uint32_t outputHeight,
+                       std::vector<uint8_t>& output) {
+  thread_local std::vector<LinearSample> columns, rows;
+  columns.resize(modeline.hActive);
+  rows.resize(modeline.vActive);
+  for (uint32_t x = 0; x < modeline.hActive; ++x)
+    columns[x] = linearSample(x, modeline.hActive, mapping.horizontal.origin,
+                              mapping.horizontal.extent,
+                              mapping.horizontal.reversed);
+  for (uint32_t y = 0; y < modeline.vActive; ++y)
+    rows[y] = linearSample(y, modeline.vActive, mapping.vertical.origin,
+                           mapping.vertical.extent, mapping.vertical.reversed);
+  const auto pixel = [&](uint32_t horizontal, uint32_t vertical) {
+    const uint32_t sx = mapping.swapped ? vertical : horizontal;
+    const uint32_t sy = mapping.swapped ? horizontal : vertical;
+    return &frame.bgra[size_t(sy) * frame.stride + size_t(sx) * 4];
+  };
+  output.resize(size_t(modeline.hActive) * outputHeight * 3);
+  uint8_t* destination = output.data();
+  for (uint32_t y = 0; y < outputHeight; ++y) {
+    const auto& vertical = rows[fullOutputRow(y, fieldBuffer, field)];
+    const uint32_t wy1 = vertical.fraction, wy0 = 256 - wy1;
+    for (uint32_t x = 0; x < modeline.hActive; ++x, destination += 3) {
+      const auto& horizontal = columns[x];
+      const uint32_t wx1 = horizontal.fraction, wx0 = 256 - wx1;
+      const uint8_t* p00 = pixel(horizontal.first, vertical.first);
+      const uint8_t* p10 = pixel(horizontal.second, vertical.first);
+      const uint8_t* p01 = pixel(horizontal.first, vertical.second);
+      const uint8_t* p11 = pixel(horizontal.second, vertical.second);
+      for (unsigned channel = 0; channel < 3; ++channel) {
+        const uint32_t sum = uint32_t(p00[channel]) * wx0 * wy0 +
+                             uint32_t(p10[channel]) * wx1 * wy0 +
+                             uint32_t(p01[channel]) * wx0 * wy1 +
+                             uint32_t(p11[channel]) * wx1 * wy1;
+        destination[channel] = uint8_t((sum + 32768) >> 16);
+      }
+    }
+  }
+}
+
+void transformLineBlend(const Frame& frame, const TransformMapping& mapping,
+                        const Modeline& modeline, bool fieldBuffer,
+                        uint8_t field, uint32_t outputHeight,
+                        std::vector<uint8_t>& output) {
+  thread_local std::vector<uint32_t> columns;
+  thread_local AreaTables rows;
+  thread_local std::vector<size_t> rowOffsets;
+  buildPointTable(modeline.hActive, mapping.horizontal, columns);
+  buildAreaTables(modeline.vActive, mapping.vertical.origin,
+                  mapping.vertical.extent, mapping.vertical.reversed, rows);
+  if (!mapping.swapped) {
+    rowOffsets.resize(rows.indices.size());
+    for (size_t i = 0; i < rows.indices.size(); ++i)
+      rowOffsets[i] = size_t(rows.indices[i]) * frame.stride;
+  }
+  const uint32_t verticalExtent = mapping.vertical.extent;
+  const uint64_t reciprocal = (uint64_t{1} << 32) / verticalExtent;
+  const auto normalize = [verticalExtent, reciprocal](uint32_t sum) {
+    const uint32_t rounded = sum + verticalExtent / 2;
+    uint32_t quotient = uint32_t((uint64_t(rounded) * reciprocal) >> 32);
+    if (rounded - quotient * verticalExtent >= verticalExtent) ++quotient;
+    return uint8_t(quotient);
+  };
+  output.resize(size_t(modeline.hActive) * outputHeight * 3);
+  uint8_t* destination = output.data();
+  for (uint32_t y = 0; y < outputHeight; ++y) {
+    const uint32_t fullY = fullOutputRow(y, fieldBuffer, field);
+    if (!mapping.swapped) {
+      for (uint32_t x = 0; x < modeline.hActive; ++x, destination += 3) {
+        uint32_t blue = 0, green = 0, red = 0;
+        const size_t column = size_t(columns[x]) * 4;
+        for (uint32_t i = rows.offsets[fullY]; i < rows.offsets[fullY + 1];
+             ++i) {
+          const uint8_t* pixel = &frame.bgra[rowOffsets[i] + column];
+          blue += uint32_t(pixel[0]) * rows.weights[i];
+          green += uint32_t(pixel[1]) * rows.weights[i];
+          red += uint32_t(pixel[2]) * rows.weights[i];
+        }
+        destination[0] = normalize(blue);
+        destination[1] = normalize(green);
+        destination[2] = normalize(red);
+      }
+      continue;
+    }
+    for (uint32_t x = 0; x < modeline.hActive; ++x, destination += 3) {
+      uint32_t blue = 0, green = 0, red = 0;
+      for (uint32_t i = rows.offsets[fullY]; i < rows.offsets[fullY + 1];
+           ++i) {
+        const uint32_t sx = rows.indices[i];
+        const uint32_t sy = columns[x];
+        const uint8_t* pixel =
+            &frame.bgra[size_t(sy) * frame.stride + size_t(sx) * 4];
+        blue += uint32_t(pixel[0]) * rows.weights[i];
+        green += uint32_t(pixel[1]) * rows.weights[i];
+        red += uint32_t(pixel[2]) * rows.weights[i];
+      }
+      destination[0] = normalize(blue);
+      destination[1] = normalize(green);
+      destination[2] = normalize(red);
+    }
+  }
+}
 }  // namespace
 
 bool transformRgb24(const Frame& f, const CropRect& c, const SourceOptions& o,
@@ -171,188 +350,20 @@ bool transformRgb24(const Frame& f, const CropRect& c, const SourceOptions& o,
     e = "interlaced active height must be at least two";
     return false;
   }
-  // A quarter turn feeds the output column from the source Y axis and the
-  // output row from the source X axis; the other rotations keep the axes.
-  const bool swapAxes =
-      o.rotation == Rotation::CW90 || o.rotation == Rotation::CCW90;
-  // Source coordinates are separable per axis, so they are tabulated once per
-  // frame instead of recomputing two divisions for every output pixel. Reused
-  // across calls on the rendering thread to keep the hot path allocation-free.
-  thread_local std::vector<uint32_t> columnSource, rowSource;
-  columnSource.resize(m.hActive);
-  rowSource.resize(m.vActive);
-  for (uint32_t dx = 0; dx < m.hActive; ++dx) {
-    const double u = (dx + .5) / m.hActive;
-    switch (o.rotation) {
-      case Rotation::None:
-        columnSource[dx] = sampleIndex(u, c.x, c.width);
-        break;
-      case Rotation::Flip180:
-        columnSource[dx] = sampleIndex(1 - u, c.x, c.width);
-        break;
-      case Rotation::CW90:
-        columnSource[dx] = sampleIndex(1 - u, c.y, c.height);
-        break;
-      case Rotation::CCW90:
-        columnSource[dx] = sampleIndex(u, c.y, c.height);
-        break;
-    }
+  const auto mapping = transformMapping(c, o.rotation);
+  switch (o.sampling) {
+    case SamplingMode::Point:
+      transformPoint(f, mapping, m, fieldBuffer, field, oh, out);
+      return true;
+    case SamplingMode::Bilinear:
+      transformBilinear(f, mapping, m, fieldBuffer, field, oh, out);
+      return true;
+    case SamplingMode::LineBlend:
+      transformLineBlend(f, mapping, m, fieldBuffer, field, oh, out);
+      return true;
   }
-  for (uint32_t y = 0; y < m.vActive; ++y) {
-    const double v = (y + .5) / m.vActive;
-    switch (o.rotation) {
-      case Rotation::None:
-        rowSource[y] = sampleIndex(v, c.y, c.height);
-        break;
-      case Rotation::Flip180:
-        rowSource[y] = sampleIndex(1 - v, c.y, c.height);
-        break;
-      case Rotation::CW90:
-        rowSource[y] = sampleIndex(v, c.x, c.width);
-        break;
-      case Rotation::CCW90:
-        rowSource[y] = sampleIndex(1 - v, c.x, c.width);
-        break;
-    }
-  }
-  out.resize(size_t(m.hActive) * oh * 3);
-  uint8_t* d = out.data();
-  if (o.sampling == SamplingMode::Bilinear) {
-    thread_local std::vector<LinearSample> columns, rows;
-    columns.resize(m.hActive);
-    rows.resize(m.vActive);
-    const uint32_t horizontalOrigin = swapAxes ? c.y : c.x;
-    const uint32_t horizontalExtent = swapAxes ? c.height : c.width;
-    const uint32_t verticalOrigin = swapAxes ? c.x : c.y;
-    const uint32_t verticalExtent = swapAxes ? c.width : c.height;
-    const bool horizontalReversed = o.rotation == Rotation::Flip180 ||
-                                    o.rotation == Rotation::CW90;
-    const bool verticalReversed = o.rotation == Rotation::Flip180 ||
-                                  o.rotation == Rotation::CCW90;
-    for (uint32_t x = 0; x < m.hActive; ++x)
-      columns[x] = linearSample(x, m.hActive, horizontalOrigin,
-                                horizontalExtent, horizontalReversed);
-    for (uint32_t y = 0; y < m.vActive; ++y)
-      rows[y] = linearSample(y, m.vActive, verticalOrigin, verticalExtent,
-                             verticalReversed);
-    auto pixel = [&](uint32_t horizontal, uint32_t vertical) {
-      const uint32_t sx = swapAxes ? vertical : horizontal;
-      const uint32_t sy = swapAxes ? horizontal : vertical;
-      return &f.bgra[size_t(sy) * f.stride + size_t(sx) * 4];
-    };
-    for (uint32_t dy = 0; dy < oh; ++dy) {
-      const uint32_t fullY = fieldBuffer ? dy * 2 + !(field & 1) : dy;
-      const auto& vertical = rows[fullY];
-      const uint32_t wy1 = vertical.fraction, wy0 = 256 - wy1;
-      for (uint32_t dx = 0; dx < m.hActive; ++dx, d += 3) {
-        const auto& horizontal = columns[dx];
-        const uint32_t wx1 = horizontal.fraction, wx0 = 256 - wx1;
-        const uint8_t* p00 = pixel(horizontal.first, vertical.first);
-        const uint8_t* p10 = pixel(horizontal.second, vertical.first);
-        const uint8_t* p01 = pixel(horizontal.first, vertical.second);
-        const uint8_t* p11 = pixel(horizontal.second, vertical.second);
-        for (unsigned channel = 0; channel < 3; ++channel) {
-          const uint32_t sum =
-              uint32_t(p00[channel]) * wx0 * wy0 +
-              uint32_t(p10[channel]) * wx1 * wy0 +
-              uint32_t(p01[channel]) * wx0 * wy1 +
-              uint32_t(p11[channel]) * wx1 * wy1;
-          d[channel] = uint8_t((sum + 32768) >> 16);
-        }
-      }
-    }
-    return true;
-  }
-  if (o.sampling == SamplingMode::LineBlend) {
-    thread_local AreaTables rows;
-    thread_local std::vector<size_t> rowOffsets;
-    const uint32_t verticalOrigin = swapAxes ? c.x : c.y;
-    const uint32_t verticalExtent = swapAxes ? c.width : c.height;
-    const bool verticalReversed = o.rotation == Rotation::Flip180 ||
-                                  o.rotation == Rotation::CCW90;
-    buildAreaTables(m.vActive, verticalOrigin, verticalExtent,
-                    verticalReversed, rows);
-    if (!swapAxes) {
-      rowOffsets.resize(rows.indices.size());
-      for (size_t i = 0; i < rows.indices.size(); ++i)
-        rowOffsets[i] = size_t(rows.indices[i]) * f.stride;
-    }
-    const uint64_t reciprocal = (uint64_t{1} << 32) / verticalExtent;
-    const auto normalize = [verticalExtent, reciprocal](uint32_t sum) {
-      const uint32_t rounded = sum + verticalExtent / 2;
-      uint32_t quotient = uint32_t((uint64_t(rounded) * reciprocal) >> 32);
-      // A floor reciprocal can underestimate by one. This correction retains
-      // exact integer rounding without a runtime division in the pixel loop.
-      if (rounded - quotient * verticalExtent >= verticalExtent) ++quotient;
-      return uint8_t(quotient);
-    };
-    for (uint32_t dy = 0; dy < oh; ++dy) {
-      const uint32_t fullY = fieldBuffer ? dy * 2 + !(field & 1) : dy;
-      if (!swapAxes) {
-        for (uint32_t dx = 0; dx < m.hActive; ++dx, d += 3) {
-          uint32_t blue = 0, green = 0, red = 0;
-          const size_t column = size_t(columnSource[dx]) * 4;
-          for (uint32_t i = rows.offsets[fullY]; i < rows.offsets[fullY + 1];
-               ++i) {
-            const uint8_t* pixel = &f.bgra[rowOffsets[i] + column];
-            blue += uint32_t(pixel[0]) * rows.weights[i];
-            green += uint32_t(pixel[1]) * rows.weights[i];
-            red += uint32_t(pixel[2]) * rows.weights[i];
-          }
-          d[0] = normalize(blue);
-          d[1] = normalize(green);
-          d[2] = normalize(red);
-        }
-        continue;
-      }
-      for (uint32_t dx = 0; dx < m.hActive; ++dx, d += 3) {
-        // The weights sum to verticalExtent (at most the validated 8192-pixel
-        // source size), so 255 * 8192 fits comfortably in 32 bits. Keeping the
-        // accumulator at that proven width avoids three costly 64-bit integer
-        // divisions per output pixel.
-        uint32_t blue = 0, green = 0, red = 0;
-        for (uint32_t i = rows.offsets[fullY]; i < rows.offsets[fullY + 1];
-             ++i) {
-          const uint32_t sx = rows.indices[i];
-          const uint32_t sy = columnSource[dx];
-          const uint8_t* pixel =
-              &f.bgra[size_t(sy) * f.stride + size_t(sx) * 4];
-          blue += uint32_t(pixel[0]) * rows.weights[i];
-          green += uint32_t(pixel[1]) * rows.weights[i];
-          red += uint32_t(pixel[2]) * rows.weights[i];
-        }
-        d[0] = normalize(blue);
-        d[1] = normalize(green);
-        d[2] = normalize(red);
-      }
-    }
-    return true;
-  }
-  for (uint32_t dy = 0; dy < oh; ++dy) {
-    // Field-buffer mode maps protocol field 0 to display field 1 (and vice
-    // versa), so sample the matching source parity. Progressive-buffer mode
-    // sends every line and does not select a field index here.
-    const uint32_t fullY = fieldBuffer ? dy * 2 + !(field & 1) : dy;
-    if (swapAxes) {
-      const size_t column = size_t(rowSource[fullY]) * 4;
-      for (uint32_t dx = 0; dx < m.hActive; ++dx, d += 3) {
-        const uint8_t* p =
-            &f.bgra[size_t(columnSource[dx]) * f.stride + column];
-        d[0] = p[0];
-        d[1] = p[1];
-        d[2] = p[2];
-      }
-    } else {
-      const uint8_t* row = &f.bgra[size_t(rowSource[fullY]) * f.stride];
-      for (uint32_t dx = 0; dx < m.hActive; ++dx, d += 3) {
-        const uint8_t* p = row + size_t(columnSource[dx]) * 4;
-        d[0] = p[0];
-        d[1] = p[1];
-        d[2] = p[2];
-      }
-    }
-  }
-  return true;
+  e = "unsupported sampling mode";
+  return false;
 }
 
 bool transformRgb24(const Frame& f, const SourceOptions& o, const Modeline& m,

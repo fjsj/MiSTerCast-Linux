@@ -39,6 +39,9 @@ std::optional<std::string> SourceOptions::validate() const {
   if (!width || !height || width > 8192 || height > 8192)
     return "source size must be between 1 and 8192 pixels";
   if (frameDelay > 10) return "frame delay must be automatic (0) or 1-10";
+  if (sampling != SamplingMode::Point && sampling != SamplingMode::Bilinear &&
+      sampling != SamplingMode::LineBlend)
+    return "unsupported sampling mode";
   return {};
 }
 std::optional<std::string> AppConfig::validate() const {
