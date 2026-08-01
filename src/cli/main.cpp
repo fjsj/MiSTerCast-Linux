@@ -189,7 +189,13 @@ int main(int argc, char** argv) {
                 << ", RTT " << s.networkRttUs << " us, send errors "
                 << s.sendErrors << ", VRAM "
                 << (s.vramSynced ? "synced" : "unsynced")
-                << (s.vgaFrameskip ? "/fb" : "") << ", audio buffered "
+                << (s.vgaFrameskip ? "/fb" : "");
+      if (s.interlacedFieldBuffer)
+        std::cerr << ", field " << unsigned(s.outgoingField) << "/FPGA "
+                  << unsigned(s.fpgaField)
+                  << (s.fieldPhaseValid ? " locked" : " acquiring")
+                  << ", realignments " << s.fieldRealignments;
+      std::cerr << ", audio buffered "
                 << s.audioBufferedSamples << " samples, level "
                 << int(s.audioPeak * 100) << "%, MiSTer audio "
                 << (s.misterAudioEnabled ? "on" : "off") << ", overruns "

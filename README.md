@@ -64,10 +64,10 @@ With `syncRefresh` enabled, MiSTerCast implements the Groovy_MiSTer client timin
 1. It decodes the 13-byte ACK containing the echoed frame/scanline, current FPGA frame/scanline, VRAM state, field, vblank, framebuffer fallback, and audio bit.
 2. Automatic frame delay converts measured capture/transform/network time plus a 1.5 ms safety margin into a nonzero target scanline.
 3. The ACK raster error corrects the next frame deadline without adding a queued frame.
-4. Interlaced streams rebase their frame number and choose the field from FPGA status before transforming pixels.
+4. Interlaced streams rebase their frame number and choose the field from FPGA status before transforming pixels. A modeline switch invalidates the old field phase; fields alternate from the core's deterministic reset phase until a matching post-switch ACK locks the sender back to FPGA feedback.
 5. The capture worker takes one frame when requested by the corrected raster cycle; it does not free-run on a second independent refresh clock or flood full-resolution captures.
 
-The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction and stream times, matched/missed ACKs, and VRAM state every five seconds. The GUI shows a compact subset in its status line. A small number of startup ACK misses or audio underrun samples can occur while buffers start; counters that continue increasing indicate a real timing or transport problem.
+The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction and stream times, matched/missed ACKs, and VRAM state every five seconds. Field-buffer interlace also reports the outgoing/FPGA field, whether phase is locked, and the number of feedback-driven realignments. The GUI shows a compact subset in its status line and logs each realignment once. A small number of startup ACK misses or audio underrun samples can occur while buffers start; counters that continue increasing indicate a real timing or transport problem.
 
 Synchronization does not introduce a permanent full-frame buffer. Automatic mode deliberately keeps the 1.5 ms safety margin used by the upstream client. Manual frame delay changes sub-frame phase. ACK acquisition is bounded to 2 ms and is accounted inside the existing refresh-period wait.
 

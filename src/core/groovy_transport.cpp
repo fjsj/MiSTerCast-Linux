@@ -27,6 +27,13 @@ T readLe(const uint8_t* p) {
   std::memcpy(&value, p, sizeof(value));
   return value;
 }
+
+// Frame counters wrap naturally. Signed serial-number comparison keeps a
+// nearby wrapped value ordered without treating UINT32_MAX as permanently
+// newer than zero.
+bool frameAfter(uint32_t a, uint32_t b) {
+  return int32_t(a - b) > 0;
+}
 }  // namespace
 
 bool compressionAvailable() noexcept {
@@ -57,17 +64,24 @@ bool GroovyTransport::drainStatus(uint32_t expectedFrame) noexcept {
     status.frame = readLe<uint32_t>(ack + 6);
     status.vCount = readLe<uint16_t>(ack + 10);
     status.bits = ack[12];
-    if (status.frameEcho < fpga_.frameEcho) continue;
+    if (frameAfter(fpga_.frameEcho, status.frameEcho)) continue;
     fpga_ = status;
     lastAckAt_ = std::chrono::steady_clock::now();
     ackFrame_ = status.frameEcho;
     fpgaFrame_ = status.frame;
     fpgaVCount_ = status.vCount;
+    fpgaField_ = (status.bits >> 5) & 1;
     vramSynced_ = (status.bits & 0x04) != 0;
     vgaFrameskip_ = (status.bits & 0x08) != 0;
     vgaVblank_ = (status.bits & 0x10) != 0;
     misterAudioEnabled_ = (status.bits & 0x40) != 0;
-    if (status.frameEcho == expectedFrame) matched = true;
+    if (status.frameEcho == expectedFrame) {
+      matched = true;
+      // switchMode invalidates the old raster phase. Only an ACK echoing a
+      // blit sent after that switch may establish the new mode's phase.
+      phaseValid_ = true;
+      fieldPhaseValid_ = true;
+    }
   }
 }
 
@@ -110,9 +124,13 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
   ackFrame_ = fpgaFrame_ = 0;
   syncLine_ = fpgaVCount_ = 0;
   ackedFrames_ = missedAcks_ = streamTimeUs_ = ackAgeMs_ = sendErrors_ = 0;
+  fieldRealignments_ = 0;
   coreVersion_ = 0;
   lastSendEndAt_ = {};
   rasterCorrectionUs_ = 0;
+  outgoingField_ = fpgaField_ = 0;
+  interlacedFieldBuffer_ = fieldPhaseValid_ = false;
+  phaseValid_ = fallbackPhaseSet_ = lastAligned_ = false;
   fpga_ = {};
   if (host.empty()) {
     e = "target address is required";
@@ -215,6 +233,14 @@ bool GroovyTransport::switchMode(const Modeline& m,
     return false;
   }
   progressiveInterlaceBuffer_ = m.interlaced && progressiveInterlaceBuffer;
+  // CMD_SWITCHRES can reset the FPGA raster and field to a different phase.
+  // Keep pre-switch status available for ordinary diagnostics, but never use
+  // it to select a field in the new mode. The first matching post-switch blit
+  // ACK re-establishes authoritative FPGA phase.
+  phaseValid_ = fallbackPhaseSet_ = lastAligned_ = false;
+  interlacedFieldBuffer_ = m.interlaced && !progressiveInterlaceBuffer_;
+  fieldPhaseValid_ = !interlacedFieldBuffer_;
+  outgoingField_ = 0;
   uint8_t b[26]{};
   b[0] = CMD_SWITCHRES;
   std::memcpy(b + 1, &m.pixelClockMHz, 8);
@@ -251,13 +277,33 @@ void GroovyTransport::setSyncOptions(bool syncRefresh,
   frameDelay_ = std::min<uint16_t>(frameDelay, 10);
 }
 
-void GroovyTransport::alignFrame(uint32_t& frame,
-                                 uint8_t& field) const noexcept {
-  if (fpga_.frame > frame) frame = fpga_.frame + 1;
-  if (interlaceShift_)
-    field = uint8_t((!(fpga_.bits & 0x20)) ^ ((frame - fpga_.frame) & 1));
-  else
+void GroovyTransport::alignFrame(uint32_t& frame, uint8_t& field) noexcept {
+  if (!interlaceShift_) {
     field = 0;
+  } else if (phaseValid_) {
+    if (frameAfter(fpga_.frame, frame)) frame = fpga_.frame + 1;
+    field = uint8_t((!(fpga_.bits & 0x20)) ^ ((frame - fpga_.frame) & 1));
+  } else {
+    // The mode reset deterministically starts from field zero. Continue that
+    // phase locally until a post-switch ACK arrives, rather than using stale
+    // pre-switch FPGA state or repeatedly updating the same field buffer.
+    if (!fallbackPhaseSet_) {
+      fallbackFrame_ = frame;
+      fallbackPhaseSet_ = true;
+    }
+    field = uint8_t((frame - fallbackFrame_) & 1);
+  }
+
+  if (interlaceShift_ && phaseValid_ && lastAligned_) {
+    const uint8_t continued =
+        uint8_t(lastAlignedField_ ^ ((frame - lastAlignedFrame_) & 1));
+    if (field != continued) ++fieldRealignments_;
+  }
+  lastAlignedFrame_ = frame;
+  lastAlignedField_ = field;
+  lastAligned_ = true;
+  outgoingField_ = progressiveInterlaceBuffer_ ? 0 : field;
+  fieldPhaseValid_ = !interlacedFieldBuffer_ || phaseValid_;
 }
 
 uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
@@ -456,9 +502,14 @@ GroovyTransportStats GroovyTransport::stats() const noexcept {
   s.rasterCorrectionUs = rasterCorrectionUs_;
   s.sendErrors = sendErrors_;
   s.networkRttUs = networkRttNs_ / 1000;
+  s.fieldRealignments = fieldRealignments_;
+  s.outgoingField = outgoingField_;
+  s.fpgaField = fpgaField_;
   s.vramSynced = vramSynced_;
   s.vgaFrameskip = vgaFrameskip_;
   s.vgaVblank = vgaVblank_;
+  s.interlacedFieldBuffer = interlacedFieldBuffer_;
+  s.fieldPhaseValid = fieldPhaseValid_;
   return s;
 }
 
@@ -474,6 +525,9 @@ void GroovyTransport::close() noexcept {
   vramSynced_ = false;
   vgaFrameskip_ = false;
   vgaVblank_ = false;
+  interlacedFieldBuffer_ = false;
+  fieldPhaseValid_ = false;
+  phaseValid_ = fallbackPhaseSet_ = lastAligned_ = false;
   progressiveInterlaceBuffer_ = false;
   frameBytes_ = 0;
   frameTimeNs_ = lineTimeNs_ = 0;

@@ -109,6 +109,173 @@ static void checkInterlaceTransport(bool progressive, uint8_t sentField,
         receivedField == expectedField && receivedSyncLine == 2);
   close(server);
 }
+
+static void checkFieldAlignment() {
+  int server = socket(AF_INET, SOCK_DGRAM, 0);
+  if (server < 0) return;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+      0) {
+    close(server);
+    return;
+  }
+  socklen_t alen = sizeof(address);
+  getsockname(server, reinterpret_cast<sockaddr*>(&address), &alen);
+  timeval timeout{2, 0};
+  setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  std::atomic<bool> done{false};
+  std::atomic<unsigned> blits{0};
+  std::thread endpoint([&] {
+    uint8_t packet[2048];
+    sockaddr_storage peer{};
+    socklen_t plen = sizeof(peer);
+    while (!done) {
+      auto n = recvfrom(server, packet, sizeof(packet), 0,
+                        reinterpret_cast<sockaddr*>(&peer), &plen);
+      if (n <= 0) break;
+      if (packet[0] == 2) {
+        const uint8_t version = 1;
+        sendto(server, &version, sizeof(version), 0,
+               reinterpret_cast<sockaddr*>(&peer), plen);
+      } else if (packet[0] == 7) {
+        uint32_t frame;
+        uint16_t line;
+        std::memcpy(&frame, packet + 1, 4);
+        std::memcpy(&line, packet + 6, 2);
+        const unsigned index = blits++;
+        const uint32_t fpgaFrame = index == 0 ? 42 : 43;
+        uint8_t ack[13]{};
+        std::memcpy(ack, &frame, 4);
+        std::memcpy(ack + 4, &line, 2);
+        std::memcpy(ack + 6, &fpgaFrame, 4);
+        const uint16_t fpgaLine = 1;
+        std::memcpy(ack + 10, &fpgaLine, 2);
+        ack[12] = index == 0 ? 0 : 0x20;
+        sendto(server, ack, sizeof(ack), 0,
+               reinterpret_cast<sockaddr*>(&peer), plen);
+      }
+    }
+  });
+
+  std::string error;
+  GroovyTransport transport;
+  CHECK(transport.open("localhost", 48000, error, ntohs(address.sin_port)));
+  Modeline tiny{"tiny", 1, 2, 3, 4, 5, 2, 3, 4, 5, true};
+  CHECK(transport.switchMode(tiny, false, error));
+  transport.setSyncOptions(true, 0);
+  std::vector<uint8_t> pixels(6, 42);
+
+  // A mode switch starts in deterministic local phase and does not consume an
+  // old ACK. The caller's stale field value is deliberately overwritten.
+  uint32_t frame = 40;
+  uint8_t field = 1;
+  transport.alignFrame(frame, field);
+  auto status = transport.stats();
+  CHECK(frame == 40 && field == 0 && status.outgoingField == 0 &&
+        status.interlacedFieldBuffer && !status.fieldPhaseValid);
+  CHECK(transport.sendFrame(frame, field, pixels, error));
+  transport.waitSync();
+  status = transport.stats();
+  CHECK(status.fieldPhaseValid && status.fpgaFrame == 42 &&
+        status.fpgaField == 0);
+
+  // The FPGA is ahead, so rebase to its next frame. Its returned F1 changes
+  // the fallback phase once, which is reported rather than silently hidden.
+  frame = 41;
+  transport.alignFrame(frame, field);
+  status = transport.stats();
+  CHECK(frame == 43 && field == 0 && status.fieldRealignments == 1);
+  CHECK(transport.sendFrame(frame, field, pixels, error));
+  transport.waitSync();
+
+  // Both FPGA field values and missed-ACK extrapolation retain parity.
+  frame = 44;
+  transport.alignFrame(frame, field);
+  CHECK(field == 1 && transport.stats().fpgaField == 1);
+  frame = 45;
+  transport.alignFrame(frame, field);
+  CHECK(field == 0 && transport.stats().fieldRealignments == 1);
+
+  // A second mode switch must invalidate the phase established above.
+  CHECK(transport.switchMode(tiny, false, error));
+  frame = 46;
+  field = 1;
+  transport.alignFrame(frame, field);
+  status = transport.stats();
+  CHECK(field == 0 && !status.fieldPhaseValid &&
+        status.fieldRealignments == 1);
+  transport.close();
+  done = true;
+  endpoint.join();
+  close(server);
+}
+
+static void checkFieldAlignmentWraparound() {
+  int server = socket(AF_INET, SOCK_DGRAM, 0);
+  if (server < 0) return;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+      0) {
+    close(server);
+    return;
+  }
+  socklen_t alen = sizeof(address);
+  getsockname(server, reinterpret_cast<sockaddr*>(&address), &alen);
+  timeval timeout{2, 0};
+  setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  std::thread endpoint([&] {
+    uint8_t packet[2048];
+    sockaddr_storage peer{};
+    socklen_t plen = sizeof(peer);
+    for (;;) {
+      auto n = recvfrom(server, packet, sizeof(packet), 0,
+                        reinterpret_cast<sockaddr*>(&peer), &plen);
+      if (n <= 0 || packet[0] == 1) break;
+      if (packet[0] == 2) {
+        const uint8_t version = 1;
+        sendto(server, &version, sizeof(version), 0,
+               reinterpret_cast<sockaddr*>(&peer), plen);
+      } else if (packet[0] == 7) {
+        uint32_t frame;
+        uint16_t line;
+        std::memcpy(&frame, packet + 1, 4);
+        std::memcpy(&line, packet + 6, 2);
+        uint8_t ack[13]{};
+        std::memcpy(ack, &frame, 4);
+        std::memcpy(ack + 4, &line, 2);
+        const uint32_t fpgaFrame = UINT32_MAX;
+        std::memcpy(ack + 6, &fpgaFrame, 4);
+        const uint16_t fpgaLine = 1;
+        std::memcpy(ack + 10, &fpgaLine, 2);
+        sendto(server, ack, sizeof(ack), 0,
+               reinterpret_cast<sockaddr*>(&peer), plen);
+      }
+    }
+  });
+
+  std::string error;
+  GroovyTransport transport;
+  CHECK(transport.open("localhost", 48000, error, ntohs(address.sin_port)));
+  Modeline tiny{"tiny", 1, 2, 3, 4, 5, 2, 3, 4, 5, true};
+  CHECK(transport.switchMode(tiny, false, error));
+  transport.setSyncOptions(true, 0);
+  std::vector<uint8_t> pixels(6, 42);
+  uint32_t frame = UINT32_MAX;
+  uint8_t field = 1;
+  transport.alignFrame(frame, field);
+  CHECK(transport.sendFrame(frame, field, pixels, error));
+  transport.waitSync();
+  frame = 0;
+  transport.alignFrame(frame, field);
+  CHECK(frame == 0 && field == 0 && transport.stats().fieldPhaseValid);
+  transport.close();
+  endpoint.join();
+  close(server);
+}
 // Once a connected UDP socket receives an ICMP port-unreachable error, the
 // next send must fail rather than silently omit part of a framed payload.
 static void checkSendErrorsAreFatal() {
@@ -571,6 +738,8 @@ int main() {
   CHECK(nf.bgra[0] == 0 && nf.bgra[1] == 0 && nf.bgra[2] == 255);
   checkInterlaceTransport(false, 1, 1, 1, 6);
   checkInterlaceTransport(true, 1, 2, 0, 12);
+  checkFieldAlignment();
+  checkFieldAlignmentWraparound();
   checkSendErrorsAreFatal();
   checkAutomaticSyncLine(false);
   checkAutomaticSyncLine(true);

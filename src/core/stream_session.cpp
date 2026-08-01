@@ -54,9 +54,14 @@ SessionStats StreamSession::stats() const {
   result.rasterCorrectionUs = network.rasterCorrectionUs;
   result.sendErrors = network.sendErrors;
   result.networkRttUs = network.networkRttUs;
+  result.fieldRealignments = network.fieldRealignments;
+  result.outgoingField = network.outgoingField;
+  result.fpgaField = network.fpgaField;
   result.vramSynced = network.vramSynced;
   result.vgaFrameskip = network.vgaFrameskip;
   result.vgaVblank = network.vgaVblank;
+  result.interlacedFieldBuffer = network.interlacedFieldBuffer;
+  result.fieldPhaseValid = network.fieldPhaseValid;
   auto seconds = std::chrono::duration<double>(
                      std::chrono::steady_clock::now() - startedAt_)
                      .count();

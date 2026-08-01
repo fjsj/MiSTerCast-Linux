@@ -65,7 +65,7 @@ class MainWindow final : public QMainWindow {
   std::vector<QWidget*> streamLockedControls_;
   QTimer statsTimer_, modelineApplyTimer_;
   uint64_t previousDropped_{}, previousAudioDropped_{}, previousUnderrun_{},
-      previousSendErrors_{};
+      previousSendErrors_{}, previousFieldRealignments_{};
 
   void append(const QString& message) { log_->appendPlainText(message); }
 
@@ -277,7 +277,7 @@ class MainWindow final : public QMainWindow {
     showState(SessionState::Streaming);
     saveSettings(false);
     previousDropped_ = previousAudioDropped_ = previousUnderrun_ = 0;
-    previousSendErrors_ = 0;
+    previousSendErrors_ = previousFieldRealignments_ = 0;
     append("Streaming to " + config_.target + ".");
   }
 
@@ -288,9 +288,15 @@ class MainWindow final : public QMainWindow {
         stats.audioSampleRate
             ? stats.audioBufferedSamples * 500.0 / stats.audioSampleRate
             : 0.0;
+    QString fieldStatus;
+    if (stats.interlacedFieldBuffer)
+      fieldStatus = QString("  |  field %1/FPGA %2 %3")
+                        .arg(stats.outgoingField)
+                        .arg(stats.fpgaField)
+                        .arg(stats.fieldPhaseValid ? "locked" : "acquiring");
     status_->setText(QString("Streaming  |  %1 fps  |  capture %2 fps  |  "
                              "dropped %3  |  sync %4/%5 (%6 us)  |  VRAM %7  | "
-                             " audio %8 ms / %9%  |  MiSTer audio %10")
+                             "audio %8 ms / %9%  |  MiSTer audio %10%11")
                          .arg(stats.streamFps, 0, 'f', 1)
                          .arg(stats.captureFps, 0, 'f', 1)
                          .arg(stats.droppedFrames)
@@ -302,7 +308,8 @@ class MainWindow final : public QMainWindow {
                                   : "unsynced")
                          .arg(audioMs, 0, 'f', 0)
                          .arg(stats.audioPeak * 100, 0, 'f', 0)
-                         .arg(stats.misterAudioEnabled ? "on" : "off"));
+                         .arg(stats.misterAudioEnabled ? "on" : "off")
+                         .arg(fieldStatus));
     if (stats.droppedFrames > previousDropped_ + 30) {
       append(QString("Performance: %1 video frames dropped.")
                  .arg(stats.droppedFrames));
@@ -318,6 +325,12 @@ class MainWindow final : public QMainWindow {
                      "continues).")
                  .arg(stats.sendErrors));
       previousSendErrors_ = stats.sendErrors;
+    }
+    if (stats.fieldRealignments > previousFieldRealignments_) {
+      append(QString("Interlace: FPGA feedback corrected field phase (%1 "
+                     "total).")
+                 .arg(stats.fieldRealignments));
+      previousFieldRealignments_ = stats.fieldRealignments;
     }
     if (stats.audioUnderrunSamples > previousUnderrun_ + 4800) {
       append(QString("Performance: audio underrun inserted %1 silent samples.")

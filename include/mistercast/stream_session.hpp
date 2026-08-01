@@ -18,9 +18,11 @@ struct SessionStats {
   uint32_t acknowledgedFrame{}, fpgaFrame{};
   uint16_t syncLine{}, fpgaVCount{};
   uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{},
-      sendErrors{}, networkRttUs{};
+      sendErrors{}, networkRttUs{}, fieldRealignments{};
   int64_t rasterCorrectionUs{};
-  bool misterAudioEnabled{}, vramSynced{}, vgaFrameskip{}, vgaVblank{};
+  uint8_t outgoingField{}, fpgaField{};
+  bool misterAudioEnabled{}, vramSynced{}, vgaFrameskip{}, vgaVblank{},
+      interlacedFieldBuffer{}, fieldPhaseValid{};
 };
 class StreamSession {
  public:
