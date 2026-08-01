@@ -1,4 +1,6 @@
 build/
+build-asan/
+build-tsan/
 _CPack_Packages/
 *.deb
 *.AppImage
@@ -402,3 +404,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# AI tooling
+.claude/
