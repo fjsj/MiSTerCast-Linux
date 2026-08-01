@@ -70,6 +70,10 @@ std::string toString(Rotation v) {
   static const char* n[] = {"none", "cw90", "ccw90", "180"};
   return enumString(v, n, 4);
 }
+std::string toString(SamplingMode v) {
+  static const char* n[] = {"point", "bilinear", "line-blend"};
+  return enumString(v, n, 3);
+}
 template <class E>
 static bool parseEnum(const std::string& s, E& out, const char* const* names,
                       size_t n) {
@@ -94,6 +98,10 @@ bool parseCropMode(const std::string& s, CropMode& o) {
 bool parseRotation(const std::string& s, Rotation& o) {
   static const char* n[] = {"none", "cw90", "ccw90", "180"};
   return parseEnum(s, o, n, 4);
+}
+bool parseSamplingMode(const std::string& s, SamplingMode& o) {
+  static const char* n[] = {"point", "bilinear", "line-blend"};
+  return parseEnum(s, o, n, 3);
 }
 bool parseModeline(const std::string& text, Modeline& out, std::string& error) {
   std::istringstream in(text);

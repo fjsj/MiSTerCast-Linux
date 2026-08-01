@@ -28,7 +28,7 @@ mistercast list-monitors
 mistercast list-modelines
 mistercast stream --target 192.168.1.50
 mistercast stream --target mister.local --monitor HDMI-1 --no-audio \
-  --crop 4:3 --rotation none --frame-delay 0
+  --crop 4:3 --rotation none --sampling line-blend --frame-delay 0
 ```
 
 Use `mistercast stream --help` for all overrides. Overrides last for that run unless `--save` is supplied. Settings are written atomically to `$XDG_CONFIG_HOME/mistercast/config.json`, or `~/.config/mistercast/config.json`. Invalid/corrupt settings fall back to the bundled 320×240 ~60 Hz preset.
@@ -50,6 +50,7 @@ The GUI exposes every routine streaming setting except `syncRefresh`. The CLI ac
 | `xOffset`, `yOffset` | 0,0 by default | Crop displacement from the selected alignment anchor. CLI: `--offset X,Y`. |
 | `alignment` | `center` by default | `center`, `top-left`, `top`, `top-right`, `right`, `bottom-right`, `bottom`, `bottom-left`, or `left`. CLI: `--alignment POSITION`. |
 | `rotation` | `none` by default | `none`, `cw90`, `ccw90`, or `180`. CLI: `--rotation VALUE`. |
+| `sampling` | `point` by default | Sender-side scaling filter: `point`, `bilinear`, or `line-blend`. Bilinear uses centered texel coordinates and matches GroovyMAME's four-neighbor filtering semantics, but it is not a large-footprint antialiasing filter. Line Blend keeps point sampling horizontally and applies an exact area-weighted filter vertically to reduce CRT line shimmer at modest CPU cost; after 90° rotation it blends source columns. GUI: `Sampling`. CLI: `--sampling MODE`. |
 | `frameDelay` | `0` (automatic) by default | Selects the MiSTer raster phase. Automatic mode measures work/network time and computes a safe scanline; `1`–`10` manually select tenths of a refresh interval. CLI: `--frame-delay N`. Higher manual values trade latency margin for a later presentation phase. |
 | `syncRefresh` | `true` by default | Enables MiSTer ACK/raster feedback and correction of the next frame deadline. This is currently configuration-file-only. `false` sends sync line zero and retains local refresh pacing. |
 | `progressiveInterlaceBuffer` | `false` by default | For interlaced modelines, sends Groovy_MiSTer's progressive-framebuffer mode (`interlace=2`) so both output fields always read one full-height framebuffer instead of alternating field-buffer indexes. GUI: `Stable interlace (progressive framebuffer)`. CLI: `--progressive-interlace-buffer` or `--interlaced-field-buffer` to disable it. |
@@ -67,7 +68,16 @@ With `syncRefresh` enabled, MiSTerCast implements the Groovy_MiSTer client timin
 4. Interlaced streams rebase their frame number and choose the field from FPGA status before transforming pixels. A modeline switch invalidates the old field phase; fields alternate from the core's deterministic reset phase until a matching post-switch ACK locks the sender back to FPGA feedback.
 5. The capture worker takes one frame when requested by the corrected raster cycle; it does not free-run on a second independent refresh clock or flood full-resolution captures.
 
-The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction and stream times, matched/missed ACKs, and VRAM state every five seconds. Field-buffer interlace also reports the outgoing/FPGA field, whether phase is locked, and the number of feedback-driven realignments. The GUI shows a compact subset in its status line and logs each realignment once. A small number of startup ACK misses or audio underrun samples can occur while buffers start; counters that continue increasing indicate a real timing or transport problem.
+The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction, stream, and transform times, matched/missed ACKs, and VRAM state every five seconds. Transform timing is shown as a 1/8 EWMA plus the since-start maximum. Field-buffer interlace also reports the outgoing/FPGA field, whether phase is locked, and the number of feedback-driven realignments. The GUI shows a compact subset in its status line and logs each realignment once. A small number of startup ACK misses or audio underrun samples can occur while buffers start; counters that continue increasing indicate a real timing or transport problem.
+
+For repeatable CPU comparisons, explicitly build and run the optional transform benchmark:
+
+```sh
+cmake --build build --target mistercast-transform-bench
+./build/mistercast-transform-bench
+```
+
+It reports median Point, Bilinear, and Line Blend transform times and deterministic checksums for 960×720, 1440×1080, and 2880×2160 sources targeting 320×240. Full two-dimensional Area sampling is intentionally deferred because its scalar cost does not fit the current render-thread critical path.
 
 Synchronization does not introduce a permanent full-frame buffer. Automatic mode deliberately keeps the 1.5 ms safety margin used by the upstream client. Manual frame delay changes sub-frame phase. ACK acquisition is bounded to 2 ms and is accounted inside the existing refresh-period wait.
 

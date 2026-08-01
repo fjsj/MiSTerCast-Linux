@@ -25,6 +25,146 @@ static int failed = 0;
       ++failed;                                                               \
     }                                                                         \
   } while (0)
+
+static Modeline testModeline(uint16_t width, uint16_t height,
+                             bool interlaced = false) {
+  return {"test", 1.0, width, uint16_t(width + 1), uint16_t(width + 2),
+          uint16_t(width + 3), height, uint16_t(height + 1),
+          uint16_t(height + 2), uint16_t(height + 3), interlaced};
+}
+
+static Frame grayFrame(uint32_t width, uint32_t height,
+                       const std::vector<uint8_t>& values) {
+  Frame frame;
+  frame.width = width;
+  frame.height = height;
+  frame.stride = width * 4;
+  frame.bgra.resize(size_t(frame.stride) * height);
+  for (size_t i = 0; i < values.size(); ++i) {
+    frame.bgra[i * 4] = values[i];
+    frame.bgra[i * 4 + 1] = values[i];
+    frame.bgra[i * 4 + 2] = values[i];
+    frame.bgra[i * 4 + 3] = 255;
+  }
+  return frame;
+}
+
+static std::vector<uint8_t> blueValues(const std::vector<uint8_t>& rgb) {
+  std::vector<uint8_t> result;
+  for (size_t i = 0; i < rgb.size(); i += 3) result.push_back(rgb[i]);
+  return result;
+}
+
+static void checkSamplingTransforms() {
+  SourceOptions source;
+  source.crop = CropMode::Custom;
+  std::vector<uint8_t> rgb;
+  std::string error;
+
+  SamplingMode parsed = SamplingMode::Point;
+  CHECK(parseSamplingMode("point", parsed) && parsed == SamplingMode::Point);
+  CHECK(parseSamplingMode("bilinear", parsed) &&
+        parsed == SamplingMode::Bilinear);
+  CHECK(parseSamplingMode("line-blend", parsed) &&
+        parsed == SamplingMode::LineBlend);
+  CHECK(!parseSamplingMode("area", parsed));
+  CHECK(toString(SamplingMode::LineBlend) == "line-blend");
+
+  source.sampling = SamplingMode::Bilinear;
+  auto frame = grayFrame(2, 2, {0, 64, 128, 255});
+  CHECK(transformRgb24(frame, {0, 0, 2, 2}, source, testModeline(1, 1), 0,
+                       rgb, error));
+  CHECK(blueValues(rgb) == std::vector<uint8_t>({112}));
+
+  frame = grayFrame(2, 1, {10, 110});
+  CHECK(transformRgb24(frame, {0, 0, 2, 1}, source, testModeline(4, 1), 0,
+                       rgb, error));
+  CHECK(blueValues(rgb) == std::vector<uint8_t>({10, 35, 85, 110}));
+
+  frame = grayFrame(18, 9, std::vector<uint8_t>(162));
+  for (uint32_t y = 0; y < 9; ++y)
+    for (uint32_t x = 0; x < 18; ++x)
+      for (unsigned channel = 0; channel < 3; ++channel)
+        frame.bgra[(size_t(y) * 18 + x) * 4 + channel] = uint8_t(y * 18 + x);
+  CHECK(transformRgb24(frame, {0, 0, 18, 9}, source, testModeline(2, 1), 0,
+                       rgb, error));
+  CHECK(blueValues(rgb) == std::vector<uint8_t>({76, 85}));
+
+  source.sampling = SamplingMode::LineBlend;
+  frame = grayFrame(1, 4, {10, 30, 50, 70});
+  CHECK(transformRgb24(frame, {0, 0, 1, 4}, source, testModeline(1, 2), 0,
+                       rgb, error));
+  CHECK(blueValues(rgb) == std::vector<uint8_t>({20, 60}));
+  frame = grayFrame(1, 5, {0, 10, 20, 30, 40});
+  CHECK(transformRgb24(frame, {0, 0, 1, 5}, source, testModeline(1, 2), 0,
+                       rgb, error));
+  CHECK(blueValues(rgb) == std::vector<uint8_t>({8, 32}));
+  std::vector<uint8_t> hdLines(1080);
+  for (size_t y = 0; y < hdLines.size(); ++y) hdLines[y] = uint8_t(y % 251);
+  frame = grayFrame(1, 1080, hdLines);
+  CHECK(transformRgb24(frame, {0, 0, 1, 1080}, source,
+                       testModeline(1, 240), 0, rgb, error));
+  const auto reducedLines = blueValues(rgb);
+  CHECK(reducedLines.size() == 240 && reducedLines[0] == 2 &&
+        reducedLines[1] == 6);
+  frame = grayFrame(1, 2, {20, 80});
+  CHECK(transformRgb24(frame, {0, 0, 1, 2}, source, testModeline(1, 3), 0,
+                       rgb, error));
+  CHECK(blueValues(rgb) == std::vector<uint8_t>({20, 50, 80}));
+  frame = grayFrame(3, 7, std::vector<uint8_t>(21, 123));
+  CHECK(transformRgb24(frame, {0, 0, 3, 7}, source, testModeline(2, 4), 0,
+                       rgb, error));
+  CHECK(std::all_of(rgb.begin(), rgb.end(), [](uint8_t x) { return x == 123; }));
+
+  frame = grayFrame(2, 3, {0, 1, 2, 3, 4, 5});
+  struct RotationCase {
+    Rotation rotation;
+    uint16_t width, height;
+    std::vector<uint8_t> expected;
+  };
+  const RotationCase rotations[] = {
+      {Rotation::None, 2, 3, {0, 1, 2, 3, 4, 5}},
+      {Rotation::Flip180, 2, 3, {5, 4, 3, 2, 1, 0}},
+      {Rotation::CW90, 3, 2, {4, 2, 0, 5, 3, 1}},
+      {Rotation::CCW90, 3, 2, {1, 3, 5, 0, 2, 4}},
+  };
+  for (const auto mode : {SamplingMode::Point, SamplingMode::Bilinear,
+                          SamplingMode::LineBlend}) {
+    source.sampling = mode;
+    for (const auto& rotation : rotations) {
+      source.rotation = rotation.rotation;
+      CHECK(transformRgb24(frame, {0, 0, 2, 3}, source,
+                           testModeline(rotation.width, rotation.height), 0,
+                           rgb, error));
+      CHECK(blueValues(rgb) == rotation.expected);
+    }
+  }
+
+  source.rotation = Rotation::None;
+  frame = grayFrame(2, 4, {0, 1, 2, 3, 4, 5, 6, 7});
+  for (const auto mode : {SamplingMode::Point, SamplingMode::Bilinear,
+                          SamplingMode::LineBlend}) {
+    source.sampling = mode;
+    auto interlaced = testModeline(2, 4, true);
+    source.progressiveInterlaceBuffer = false;
+    CHECK(transformRgb24(frame, {0, 0, 2, 4}, source, interlaced, 0, rgb,
+                         error));
+    CHECK(blueValues(rgb) == std::vector<uint8_t>({2, 3, 6, 7}));
+    CHECK(transformRgb24(frame, {0, 0, 2, 4}, source, interlaced, 1, rgb,
+                         error));
+    CHECK(blueValues(rgb) == std::vector<uint8_t>({0, 1, 4, 5}));
+    source.progressiveInterlaceBuffer = true;
+    CHECK(transformRgb24(frame, {0, 0, 2, 4}, source, interlaced, 1, rgb,
+                         error));
+    CHECK(blueValues(rgb) == std::vector<uint8_t>({0, 1, 2, 3, 4, 5, 6, 7}));
+    Frame malformed = frame;
+    malformed.bgra.pop_back();
+    CHECK(!transformRgb24(malformed, {0, 0, 2, 4}, source, interlaced, 0,
+                          rgb, error));
+    CHECK(!transformRgb24(frame, {1, 0, 2, 4}, source, interlaced, 0, rgb,
+                          error));
+  }
+}
 static void checkInterlaceTransport(bool progressive, uint8_t sentField,
                                     uint8_t expectedInterlace,
                                     uint8_t expectedField, size_t pixelValues) {
@@ -384,6 +524,7 @@ class FakeVideo final : public IVideoCapture {
  public:
   std::atomic<uint16_t> width{1920}, height{1080};
   std::atomic<uint32_t> captured{0};
+  std::atomic<bool> produce{true};
   mutable std::mutex mutex;
   std::vector<CropRect> regions;
   CropRect region{};
@@ -404,6 +545,7 @@ class FakeVideo final : public IVideoCapture {
     regions.push_back(r);
   }
   bool next(Frame& out, std::chrono::milliseconds) override {
+    if (!produce) return false;
     CropRect r;
     {
       std::lock_guard<std::mutex> l(mutex);
@@ -524,6 +666,31 @@ AppConfig sessionConfig() {
 }
 }  // namespace
 
+static void checkTransformStats() {
+  FakeMister mister(0x44);
+  if (mister.port == 0) return;
+  auto video = std::make_unique<FakeVideo>();
+  auto* raw = video.get();
+  raw->produce = false;
+  StreamSession session(std::move(video), std::make_unique<FakeAudio>());
+  auto config = sessionConfig();
+  config.source.sampling = SamplingMode::LineBlend;
+  std::string error;
+  CHECK(session.start(config, {}, &error));
+  auto stats = session.stats();
+  CHECK(stats.transformTimeUs == 0 && stats.transformMaxUs == 0);
+  raw->produce = true;
+  CHECK(waitFor([&] { return session.stats().sentFrames >= 3; }));
+  stats = session.stats();
+  CHECK(stats.transformMaxUs >= stats.transformTimeUs);
+  session.stop();
+  raw->produce = false;
+  CHECK(session.start(config, {}, &error));
+  stats = session.stats();
+  CHECK(stats.transformTimeUs == 0 && stats.transformMaxUs == 0);
+  session.stop();
+}
+
 // A monitor resized mid-stream must have its crop recomputed, not keep
 // streaming a rectangle sized for the old geometry.
 static void checkCropFollowsMonitorResize() {
@@ -621,6 +788,7 @@ static void checkAudioSkippedWhenCoreHasAudioOff() {
 }
 
 int main() {
+  checkSamplingTransforms();
   auto safe = Modeline::safeDefault();
   CHECK(!safe.validate());
   CHECK(safe.refreshHz() > 59 && safe.refreshHz() < 61);
@@ -746,12 +914,14 @@ int main() {
   checkCropFollowsMonitorResize();
   checkLiveModelineSwitch();
   checkAudioSkippedWhenCoreHasAudioOff();
+  checkTransformStats();
   auto dir = std::filesystem::temp_directory_path() / "mistercast-core-test";
   std::filesystem::create_directories(dir);
   auto path = dir / "config.json";
   AppConfig cfg;
   cfg.target = "mister.local";
   cfg.source.progressiveInterlaceBuffer = true;
+  cfg.source.sampling = SamplingMode::LineBlend;
   auto custom = Modeline::safeDefault();
   custom.name = "My preset";
   cfg.customModelines.push_back(custom);
@@ -759,7 +929,8 @@ int main() {
   std::string warning;
   auto loaded = loadConfig(path, &warning);
   CHECK(loaded.target == cfg.target &&
-        loaded.source.progressiveInterlaceBuffer && warning.empty());
+        loaded.source.progressiveInterlaceBuffer &&
+        loaded.source.sampling == SamplingMode::LineBlend && warning.empty());
   CHECK(loaded.customModelines.size() == 1 &&
         loaded.customModelines[0].name == "My preset");
   {
@@ -792,6 +963,13 @@ int main() {
   CHECK(!loaded.modeline.interlaced);
   CHECK(loaded.customModelines.size() == 1 &&
         loaded.customModelines[0].hActive == 111);
+  CHECK(loaded.source.sampling == SamplingMode::Point);
+  {
+    std::ofstream invalidSampling(path);
+    invalidSampling << R"({"version":1,"sampling":"area"})";
+  }
+  loaded = loadConfig(path, &warning);
+  CHECK(loaded.source.sampling == SamplingMode::Point && !warning.empty());
   std::filesystem::remove_all(dir);
   auto audioConfigPath = std::filesystem::temp_directory_path() /
                          "mistercast-audio-config-test.json";

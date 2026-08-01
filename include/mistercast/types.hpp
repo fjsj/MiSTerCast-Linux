@@ -18,6 +18,7 @@ enum class Alignment : uint8_t {
 };
 enum class CropMode : uint8_t { Custom, X1, X2, X3, X4, X5, Full43, Full54 };
 enum class Rotation : uint8_t { None, CW90, CCW90, Flip180 };
+enum class SamplingMode : uint8_t { Point, Bilinear, LineBlend };
 enum class SessionState : uint8_t {
   Idle,
   Starting,
@@ -47,6 +48,7 @@ struct SourceOptions {
   Alignment alignment{Alignment::Center};
   CropMode crop{CropMode::Full43};
   Rotation rotation{Rotation::None};
+  SamplingMode sampling{SamplingMode::Point};
   std::optional<std::string> validate() const;
 };
 
@@ -89,9 +91,11 @@ struct SessionError {
 std::string toString(Alignment value);
 std::string toString(CropMode value);
 std::string toString(Rotation value);
+std::string toString(SamplingMode value);
 bool parseAlignment(const std::string&, Alignment&);
 bool parseCropMode(const std::string&, CropMode&);
 bool parseRotation(const std::string&, Rotation&);
+bool parseSamplingMode(const std::string&, SamplingMode&);
 bool parseModeline(const std::string&, Modeline&, std::string& error);
 std::vector<Modeline> bundledModelines();
 }  // namespace mistercast

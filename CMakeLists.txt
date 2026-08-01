@@ -48,6 +48,11 @@ if(Qt6_FOUND)
   target_compile_definitions(mistercast PRIVATE MISTERCAST_HAVE_QT=1)
 endif()
 
+# Explicitly built with: cmake --build build --target mistercast-transform-bench
+add_executable(mistercast-transform-bench EXCLUDE_FROM_ALL
+  tools/transform_bench.cpp)
+target_link_libraries(mistercast-transform-bench PRIVATE mistercast-core)
+
 configure_file(data/mistercast.desktop.in mistercast.desktop @ONLY)
 install(TARGETS mistercast RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/modelines.dat DESTINATION ${CMAKE_INSTALL_DATADIR}/mistercast)
@@ -68,4 +73,7 @@ if(BUILD_TESTING)
   add_executable(mistercast-tests tests/core_tests.cpp)
   target_link_libraries(mistercast-tests PRIVATE mistercast-core)
   add_test(NAME core COMMAND mistercast-tests)
+  add_test(NAME cli-invalid-sampling
+    COMMAND mistercast stream --target 127.0.0.1 --sampling area)
+  set_tests_properties(cli-invalid-sampling PROPERTIES WILL_FAIL TRUE)
 endif()

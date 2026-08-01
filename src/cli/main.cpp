@@ -20,7 +20,8 @@ static void usage() {
          "check\n\nStream options: --monitor NAME --modeline 'TIMINGS' --audio "
          "--no-audio\n  --crop custom|1x|2x|3x|4x|5x|4:3|5:4 --size WxH "
          "--offset X,Y\n  --alignment POSITION --rotation none|cw90|ccw90|180 "
-         "--frame-delay 0..10\n  --progressive-interlace-buffer "
+         "--sampling point|bilinear|line-blend --frame-delay 0..10\n  "
+         "--progressive-interlace-buffer "
          "--interlaced-field-buffer --save\n";
 }
 static bool value(int& i, int n, char** v, std::string& o) {
@@ -113,6 +114,12 @@ int main(int argc, char** argv) {
         std::cerr << "Invalid rotation\n";
         return 2;
       }
+    } else if (a == "--sampling") {
+      if (!value(i, argc, argv, x) ||
+          !parseSamplingMode(x, c.source.sampling)) {
+        std::cerr << "Sampling must be point, bilinear, or line-blend\n";
+        return 2;
+      }
     } else if (a == "--size") {
       if (!value(i, argc, argv, x) ||
           sscanf(x.c_str(), "%hu%*c%hu", &c.source.width, &c.source.height) !=
@@ -185,7 +192,9 @@ int main(int argc, char** argv) {
                 << s.syncLine << ", raster " << s.fpgaVCount << ", frames "
                 << s.acknowledgedFrame << "/" << s.fpgaFrame << ", correction "
                 << s.rasterCorrectionUs << " us, stream " << s.streamTimeUs
-                << " us, ACK " << s.acknowledgedFrames << "/" << s.missedAcks
+                << " us, transform " << s.transformTimeUs << " us (max "
+                << s.transformMaxUs << " us), ACK " << s.acknowledgedFrames
+                << "/" << s.missedAcks
                 << ", RTT " << s.networkRttUs << " us, send errors "
                 << s.sendErrors << ", VRAM "
                 << (s.vramSynced ? "synced" : "unsynced")

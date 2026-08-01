@@ -53,7 +53,7 @@ class MainWindow final : public QMainWindow {
       *applyModelineButton_{};
   QLineEdit* target_{};
   QComboBox *monitor_{}, *audioSink_{}, *preset_{}, *crop_{}, *alignment_{},
-      *rotation_{};
+      *rotation_{}, *sampling_{};
   QDoubleSpinBox* pixelClock_{};
   QSpinBox *hActive_{}, *hBegin_{}, *hEnd_{}, *hTotal_{};
   QSpinBox *vActive_{}, *vBegin_{}, *vEnd_{}, *vTotal_{};
@@ -187,6 +187,7 @@ class MainWindow final : public QMainWindow {
     config_.source.crop = CropMode(crop_->currentIndex());
     config_.source.alignment = Alignment(alignment_->currentIndex());
     config_.source.rotation = Rotation(rotation_->currentIndex());
+    config_.source.sampling = SamplingMode(sampling_->currentIndex());
     config_.modeline = modelineFromControls();
   }
 
@@ -206,6 +207,7 @@ class MainWindow final : public QMainWindow {
     crop_->setCurrentIndex(int(config_.source.crop));
     alignment_->setCurrentIndex(int(config_.source.alignment));
     rotation_->setCurrentIndex(int(config_.source.rotation));
+    sampling_->setCurrentIndex(int(config_.source.sampling));
     width_->setValue(config_.source.width);
     height_->setValue(config_.source.height);
     xOffset_->setValue(config_.source.xOffset);
@@ -295,10 +297,13 @@ class MainWindow final : public QMainWindow {
                         .arg(stats.fpgaField)
                         .arg(stats.fieldPhaseValid ? "locked" : "acquiring");
     status_->setText(QString("Streaming  |  %1 fps  |  capture %2 fps  |  "
-                             "dropped %3  |  sync %4/%5 (%6 us)  |  VRAM %7  | "
-                             "audio %8 ms / %9%  |  MiSTer audio %10%11")
+                             "transform %3/%4 us  |  dropped %5  |  "
+                             "sync %6/%7 (%8 us)  |  VRAM %9  | "
+                             "audio %10 ms / %11%  |  MiSTer audio %12%13")
                          .arg(stats.streamFps, 0, 'f', 1)
                          .arg(stats.captureFps, 0, 'f', 1)
+                         .arg(stats.transformTimeUs)
+                         .arg(stats.transformMaxUs)
                          .arg(stats.droppedFrames)
                          .arg(stats.syncLine)
                          .arg(stats.fpgaVCount)
@@ -418,11 +423,16 @@ class MainWindow final : public QMainWindow {
     crop_ = new QComboBox;
     alignment_ = new QComboBox;
     rotation_ = new QComboBox;
+    sampling_ = new QComboBox;
     crop_->addItems({"Custom Size", "1X Crop", "2X Crop", "3X Crop", "4X Crop",
                      "5X Crop", "Full 4:3 Crop", "Full 5:4 Crop"});
     alignment_->addItems({"Centered", "Top Left", "Top", "Top Right", "Right",
                           "Bottom Right", "Bottom", "Bottom Left", "Left"});
     rotation_->addItems({"No Rotate", "90° CW", "90° CCW", "180°"});
+    sampling_->addItems({"Point", "Bilinear", "Line Blend"});
+    sampling_->setToolTip(
+        "Point is pixel-exact. Bilinear smooths adjacent pixels. Line Blend "
+        "reduces vertical CRT shimmer with an area-weighted line filter.");
     width_ = timingSpin();
     height_ = timingSpin();
     xOffset_ = new QSpinBox;
@@ -450,17 +460,19 @@ class MainWindow final : public QMainWindow {
     sourceGrid->addWidget(alignment_, 3, 1, 1, 2);
     sourceGrid->addWidget(new QLabel("Rotation"), 4, 0);
     sourceGrid->addWidget(rotation_, 4, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Size"), 5, 0);
-    sourceGrid->addWidget(width_, 5, 1);
-    sourceGrid->addWidget(height_, 5, 2);
-    sourceGrid->addWidget(new QLabel("Offset"), 6, 0);
-    sourceGrid->addWidget(xOffset_, 6, 1);
-    sourceGrid->addWidget(yOffset_, 6, 2);
-    sourceGrid->addWidget(new QLabel("Frame delay"), 7, 0);
-    sourceGrid->addWidget(frameDelay_, 7, 1, 1, 2);
-    sourceGrid->addWidget(progressiveInterlaceBuffer_, 8, 0, 1, 3);
-    sourceGrid->addWidget(audio_, 9, 0, 1, 3);
-    sourceGrid->addWidget(preview_, 10, 0, 1, 3);
+    sourceGrid->addWidget(new QLabel("Sampling"), 5, 0);
+    sourceGrid->addWidget(sampling_, 5, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Size"), 6, 0);
+    sourceGrid->addWidget(width_, 6, 1);
+    sourceGrid->addWidget(height_, 6, 2);
+    sourceGrid->addWidget(new QLabel("Offset"), 7, 0);
+    sourceGrid->addWidget(xOffset_, 7, 1);
+    sourceGrid->addWidget(yOffset_, 7, 2);
+    sourceGrid->addWidget(new QLabel("Frame delay"), 8, 0);
+    sourceGrid->addWidget(frameDelay_, 8, 1, 1, 2);
+    sourceGrid->addWidget(progressiveInterlaceBuffer_, 9, 0, 1, 3);
+    sourceGrid->addWidget(audio_, 10, 0, 1, 3);
+    sourceGrid->addWidget(preview_, 11, 0, 1, 3);
     sourceGrid->setColumnStretch(1, 1);
     sourceGrid->setColumnStretch(2, 1);
     sourceLayout->addWidget(sourceControls, 1);
@@ -516,7 +528,8 @@ class MainWindow final : public QMainWindow {
     // Timings stay editable while streaming: they are switched live, as the
     // Windows GUI did, which locked only the capture source and audio.
     streamLockedControls_ = {loadButton_, target_,    monitor_,  audioSink_,
-                             crop_,       alignment_, rotation_, width_,
+                             crop_,       alignment_, rotation_, sampling_,
+                             width_,
                              height_,     xOffset_,   yOffset_,  frameDelay_,
                              audio_,      preview_};
 

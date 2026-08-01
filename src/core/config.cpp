@@ -168,6 +168,11 @@ AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
     parseCropMode(value, config.source.crop);
   if (stringValue(json, "rotation", value))
     parseRotation(value, config.source.rotation);
+  if (stringValue(json, "sampling", value) &&
+      !parseSamplingMode(value, config.source.sampling)) {
+    if (warning) *warning = "invalid sampling mode; safe defaults loaded";
+    return AppConfig{};
+  }
   const auto array = document.find("\"customModelines\"");
   if (array != std::string::npos) {
     const auto begin = document.find('[', array),
@@ -230,6 +235,7 @@ bool saveConfig(const AppConfig& config, const std::filesystem::path& path,
        << "  \"xOffset\": " << config.source.xOffset
        << ", \"yOffset\": " << config.source.yOffset << ",\n"
        << "  \"rotation\": \"" << toString(config.source.rotation) << "\",\n"
+       << "  \"sampling\": \"" << toString(config.source.sampling) << "\",\n"
        << "  \"modelineName\": \"" << escape(config.modeline.name) << "\",\n"
        << "  \"pixelClockMHz\": " << config.modeline.pixelClockMHz << ",\n"
        << "  \"hActive\": " << config.modeline.hActive

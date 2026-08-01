@@ -18,7 +18,8 @@ struct SessionStats {
   uint32_t acknowledgedFrame{}, fpgaFrame{};
   uint16_t syncLine{}, fpgaVCount{};
   uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{},
-      sendErrors{}, networkRttUs{}, fieldRealignments{};
+      sendErrors{}, networkRttUs{}, fieldRealignments{}, transformTimeUs{},
+      transformMaxUs{};
   int64_t rasterCorrectionUs{};
   uint8_t outgoingField{}, fpgaField{};
   bool misterAudioEnabled{}, vramSynced{}, vgaFrameskip{}, vgaVblank{},
@@ -64,6 +65,7 @@ class StreamSession {
   std::atomic<uint64_t> dropped_{0}, captured_{0}, sent_{0}, audioDropped_{0},
       audioUnderrun_{0};
   std::atomic<uint32_t> audioPeak_{0};
+  std::atomic<uint64_t> transformTimeUs_{0}, transformMaxUs_{0};
   std::chrono::steady_clock::time_point startedAt_{};
   // Monitor geometry the active crop was computed for. Set before the threads
   // start, then owned by the capture thread.

@@ -42,6 +42,8 @@ SessionStats StreamSession::stats() const {
   result.audioSampleRate = config_.source.audio ? audio_->sampleRate() : 0;
   result.audioPeak = audioPeak_ / 32768.0;
   result.misterAudioEnabled = transport_.misterAudioEnabled();
+  result.transformTimeUs = transformTimeUs_;
+  result.transformMaxUs = transformMaxUs_;
   auto network = transport_.stats();
   result.acknowledgedFrame = network.acknowledgedFrame;
   result.fpgaFrame = network.fpgaFrame;
@@ -102,6 +104,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   stop_ = false;
   dropped_ = captured_ = sent_ = audioDropped_ = audioUnderrun_ = audioPeak_ =
       0;
+  transformTimeUs_ = transformMaxUs_ = 0;
   audioRing_.reset();
   {
     std::lock_guard<std::mutex> l(mutex_);
@@ -355,10 +358,20 @@ void StreamSession::renderLoop() {
     std::string e;
     // The captured frame is already the crop region, so sample all of it.
     const CropRect wholeFrame{0, 0, f.width, f.height};
+    const auto transformStarted = std::chrono::steady_clock::now();
     if (!transformRgb24(f, wholeFrame, source, modeline, field, rgb, e)) {
       fail({"stream", e, "Check capture geometry and network connectivity."});
       break;
     }
+    const auto transformUs = uint64_t(std::chrono::duration_cast<
+        std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                   transformStarted).count());
+    const auto previousEwma = transformTimeUs_.load();
+    transformTimeUs_ = previousEwma ? (previousEwma * 7 + transformUs) / 8
+                                    : transformUs;
+    auto previousMax = transformMaxUs_.load();
+    while (previousMax < transformUs &&
+           !transformMaxUs_.compare_exchange_weak(previousMax, transformUs)) {}
     if (config_.source.audio) {
       const auto now = std::chrono::steady_clock::now();
       if (!transport_.misterAudioEnabled()) {
