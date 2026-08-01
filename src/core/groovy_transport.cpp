@@ -76,16 +76,20 @@ bool GroovyTransport::sendPacket(const void* p, size_t n, std::string& e) {
     e = "transport is closed";
     return false;
   }
-  // Non-blocking, and a failed datagram is counted rather than fatal. A core
-  // reload makes the MiSTer answer ICMP port unreachable, so the next send
-  // returns ECONNREFUSED; a burst can return ENOBUFS. Tearing the session down
-  // for either is worse than dropping the datagram, which this protocol already
-  // tolerates via its ACKs. A blocking send would instead stall the render
-  // thread whenever the socket buffer filled.
-  auto r = ::send(fd_, p, n, MSG_NOSIGNAL | MSG_DONTWAIT);
+  // A frame is one header followed by an exact byte count split across ordered
+  // datagrams. Silently dropping a chunk leaves the receiver consuming bytes
+  // from later commands as the unfinished frame, so a header ACK is not proof
+  // that it is safe to continue. Let the socket apply backpressure (bounded by
+  // SO_SNDTIMEO) and fail explicitly if a complete datagram cannot be queued.
+  ssize_t r;
+  do {
+    r = ::send(fd_, p, n, MSG_NOSIGNAL);
+  } while (r < 0 && errno == EINTR);
   if (r < 0 || size_t(r) != n) {
     ++sendErrors_;
-    return true;
+    e = std::string("UDP send failed: ") +
+        (r < 0 ? std::strerror(errno) : "incomplete datagram");
+    return false;
   }
   return true;
 }
@@ -130,6 +134,11 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
     if (fd < 0) continue;
     int snd = 2 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+    // stop() joins the rendering thread before closing the transport, so bound
+    // backpressure to keep shutdown responsive even if an interface stalls.
+    timeval sendTimeout{0, 100000};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout,
+               sizeof(sendTimeout));
     if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
       fd_ = fd;
       break;
@@ -263,6 +272,20 @@ uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
   // ackedFrames_ never reached ten, so the sync line stayed pinned at vTotal/2
   // and the raster correction never applied for the whole session.
   if (currentFrame_ <= 10) return std::max<uint16_t>(1, vTotal_ >> 1);
+  // Field-buffer interlace has only one field period to finish and publish the
+  // next alternating buffer.  Once capture moved off this thread, the generic
+  // automatic calculation started requesting lines near vActive/vTotal (480-
+  // 516 for 640x480i).  That lets an upload race the bottom of the field; one
+  // late or dropped datagram leaves garbage there and can strand the receiver
+  // waiting for the rest of the frame.  The old synchronous capture path
+  // happened to keep the request in the first half of the raster.  Make that
+  // safety requirement explicit for alternating field buffers.  The opt-in
+  // progressive framebuffer does not alternate buffers and keeps the normal
+  // low-latency calculation.
+  const uint16_t latestSafeLine =
+      interlaceShift_ && !progressiveInterlaceBuffer_
+          ? std::max<uint16_t>(1, vTotal_ >> 1)
+          : vTotal_;
   const int64_t leadNs =
       int64_t(networkRttNs_ + kAutoMarginNs + workNs) - int64_t(lastStreamNs_);
   if (leadNs <= 0) return 1;
@@ -270,7 +293,7 @@ uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
   auto lines = uint64_t(
       std::llround(double(vTotal_) * double(leadNs) / double(frameTimeNs_)));
   return uint16_t(std::clamp<uint64_t>(
-      vTotal_ - std::min<uint64_t>(lines, vTotal_ - 1), 1, vTotal_));
+      vTotal_ - std::min<uint64_t>(lines, vTotal_ - 1), 1, latestSafeLine));
 }
 
 bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,

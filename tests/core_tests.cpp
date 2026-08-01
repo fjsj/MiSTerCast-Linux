@@ -109,9 +109,9 @@ static void checkInterlaceTransport(bool progressive, uint8_t sentField,
         receivedField == expectedField && receivedSyncLine == 2);
   close(server);
 }
-// A core reload makes the MiSTer answer ICMP port unreachable, so the next send
-// fails with ECONNREFUSED. That must cost datagrams, not the session.
-static void checkSendErrorsAreNotFatal() {
+// Once a connected UDP socket receives an ICMP port-unreachable error, the
+// next send must fail rather than silently omit part of a framed payload.
+static void checkSendErrorsAreFatal() {
   int server = socket(AF_INET, SOCK_DGRAM, 0);
   if (server < 0) return;
   sockaddr_in address{};
@@ -142,18 +142,19 @@ static void checkSendErrorsAreNotFatal() {
   endpoint.join();
   close(server);  // nothing is listening now, so sends get ECONNREFUSED
   Modeline tiny{"tiny", 1, 2, 3, 4, 5, 2, 3, 4, 5, false};
-  CHECK(transport.switchMode(tiny, false, error));
-  std::vector<uint8_t> pixels(12, 42);
-  // Two frames: the first send primes the ICMP error, the second observes it.
-  CHECK(transport.sendFrame(1, 0, pixels, error));
-  CHECK(transport.sendFrame(2, 0, pixels, error));
+  bool sendFailed = false;
+  // A successful send to the closed port triggers ICMP; a following send
+  // observes it. Allow several iterations for delivery on slower test hosts.
+  for (int attempt = 0; attempt < 10 && !sendFailed; ++attempt)
+    sendFailed = !transport.switchMode(tiny, false, error);
+  CHECK(sendFailed && !error.empty());
   CHECK(transport.stats().sendErrors > 0);
   transport.close();
 }
-// With no blit ACKs at all the warm-up gate must still open, otherwise the
-// automatic sync line stays pinned at vTotal/2 and the raster correction never
-// applies for the rest of the session.
-static void checkWarmUpGateUsesFrameNumber() {
+// With no blit ACKs at all the warm-up gate must still open for progressive
+// output. Alternating interlaced field buffers deliberately retain vTotal/2 as
+// their latest safe line even after warm-up.
+static void checkAutomaticSyncLine(bool interlaced) {
   int server = socket(AF_INET, SOCK_DGRAM, 0);
   if (server < 0) return;
   sockaddr_in address{};
@@ -186,10 +187,11 @@ static void checkWarmUpGateUsesFrameNumber() {
   std::string error;
   GroovyTransport transport;
   CHECK(transport.open("localhost", 48000, error, ntohs(address.sin_port)));
-  Modeline vga{"vga", 25.175, 640, 656, 752, 800, 480, 490, 492, 525, false};
+  Modeline vga{"vga", 25.175, 640, 656, 752, 800, 480, 490, 492, 525,
+               interlaced};
   CHECK(transport.switchMode(vga, false, error));
   transport.setSyncOptions(true, 0);
-  std::vector<uint8_t> pixels(size_t(640) * 480 * 3, 42);
+  std::vector<uint8_t> pixels(size_t(640) * (interlaced ? 240 : 480) * 3, 42);
   uint16_t warmUpLine = 0, steadyLine = 0;
   for (uint32_t frame = 1; frame <= 12; ++frame) {
     CHECK(transport.sendFrame(frame, 0, pixels, error));
@@ -203,7 +205,10 @@ static void checkWarmUpGateUsesFrameNumber() {
   close(server);
   CHECK(transport.stats().acknowledgedFrames == 0);
   CHECK(warmUpLine == 525 / 2);
-  CHECK(steadyLine != 525 / 2 && steadyLine > 0);
+  if (interlaced)
+    CHECK(steadyLine > 0 && steadyLine <= 525 / 2);
+  else
+    CHECK(steadyLine != 525 / 2 && steadyLine > 0);
 }
 namespace {
 // Synthetic capture sources, so session behaviour that depends on the monitor
@@ -566,8 +571,9 @@ int main() {
   CHECK(nf.bgra[0] == 0 && nf.bgra[1] == 0 && nf.bgra[2] == 255);
   checkInterlaceTransport(false, 1, 1, 1, 6);
   checkInterlaceTransport(true, 1, 2, 0, 12);
-  checkSendErrorsAreNotFatal();
-  checkWarmUpGateUsesFrameNumber();
+  checkSendErrorsAreFatal();
+  checkAutomaticSyncLine(false);
+  checkAutomaticSyncLine(true);
   checkCropFollowsMonitorResize();
   checkLiveModelineSwitch();
   checkAudioSkippedWhenCoreHasAudioOff();
