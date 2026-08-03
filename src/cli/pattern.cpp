@@ -169,7 +169,7 @@ bool runGeneratedPattern(const PatternOptions& options,
                          const std::atomic<bool>& stop, std::ostream& status,
                          std::string& error) {
   GroovyTransport transport;
-  if (!transport.open(options.target, kToneRate, error) ||
+  if (!transport.open(options.target, options.tone, kToneRate, error) ||
       !transport.switchMode(options.modeline,
                             options.progressiveInterlaceBuffer, error))
     return false;

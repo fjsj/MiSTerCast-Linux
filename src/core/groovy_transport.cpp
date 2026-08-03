@@ -44,6 +44,25 @@ bool compressionAvailable() noexcept {
 #endif
 }
 
+bool encodeInitCommand(bool compression, bool audioEnabled,
+                       uint32_t audioRate, std::array<uint8_t, 5>& command,
+                       std::string& error) noexcept {
+  uint8_t rateCode = 0;
+  if (audioEnabled) {
+    rateCode = audioRate == 22050   ? 1
+               : audioRate == 44100 ? 2
+               : audioRate == 48000 ? 3
+                                    : 0;
+    if (!rateCode) {
+      error = "unsupported audio sample rate";
+      return false;
+    }
+  }
+  command = {CMD_INIT, uint8_t(compression), rateCode,
+             uint8_t(audioEnabled ? 2 : 0), 0};
+  return true;
+}
+
 GroovyTransport::GroovyTransport(UdpSubmitSyscalls* syscalls)
     : udpSyscalls_(syscalls ? syscalls : &systemUdpSubmitSyscalls()) {}
 GroovyTransport::~GroovyTransport() { close(); }
@@ -144,8 +163,8 @@ bool GroovyTransport::sendChunks(const uint8_t* p, size_t n, std::string& e) {
   return true;
 }
 
-bool GroovyTransport::open(const std::string& host, uint32_t rate,
-                           std::string& e, uint16_t port) {
+bool GroovyTransport::open(const std::string& host, bool audioEnabled,
+                           uint32_t rate, std::string& e, uint16_t port) {
   close();
   ackFrame_ = fpgaFrame_ = 0;
   syncLine_ = fpgaVCount_ = 0;
@@ -211,24 +230,19 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
                  &actualSendBufferSize) == 0 &&
       actualSendBuffer > 0)
     socketSendBufferBytes_ = uint64_t(actualSendBuffer);
-  uint8_t cmd[5] = {CMD_INIT,
+  std::array<uint8_t, 5> cmd{};
+  if (!encodeInitCommand(
 #ifdef MISTERCAST_HAVE_LZ4
-                    1,
+          true,
 #else
-                    0,
+          false,
 #endif
-                    uint8_t(rate == 22050   ? 1
-                            : rate == 44100 ? 2
-                            : rate == 48000 ? 3
-                                            : 0),
-                    2, 0};
-  if (!cmd[2]) {
-    e = "unsupported audio sample rate";
+          audioEnabled, rate, cmd, e)) {
     close();
     return false;
   }
   auto pingStart = std::chrono::steady_clock::now();
-  if (!sendPacket(cmd, sizeof(cmd), e)) {
+  if (!sendPacket(cmd.data(), cmd.size(), e)) {
     close();
     return false;
   }

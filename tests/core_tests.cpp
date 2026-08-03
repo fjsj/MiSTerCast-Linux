@@ -30,6 +30,8 @@ static int failed = 0;
 
 
 
+
+
 namespace {
 // Synthetic capture sources, so session behaviour that depends on the monitor
 // changing or on the core's audio bit can be driven deterministically.
@@ -81,7 +83,11 @@ class FakeVideo final : public IVideoCapture {
 class FakeAudio final : public IAudioCapture {
  public:
   std::atomic<bool> produce{false};
-  bool start(const std::string&, ErrorCallback) override { return true; }
+  std::atomic<uint32_t> starts{0};
+  bool start(const std::string&, ErrorCallback) override {
+    ++starts;
+    return true;
+  }
   bool next(PcmBlock& b, std::chrono::milliseconds) override {
     if (!produce) return false;
     b.sampleRate = 48000;
@@ -98,6 +104,7 @@ class FakeMister {
  public:
   std::atomic<bool> running{true};
   std::atomic<uint32_t> audioPackets{0}, blits{0};
+  std::atomic<uint8_t> initRate{0xff}, initChannels{0xff};
   uint8_t statusBits;
   int fd{-1};
   uint16_t port{};
@@ -129,6 +136,8 @@ class FakeMister {
                         reinterpret_cast<sockaddr*>(&peer), &plen);
       if (n <= 0) continue;
       if (packet[0] == 2) {
+        initRate = packet[2];
+        initChannels = packet[3];
         uint8_t ack[13]{};
         ack[12] = statusBits;
         sendto(fd, ack, sizeof(ack), 0, reinterpret_cast<sockaddr*>(&peer),
@@ -215,6 +224,23 @@ static void checkTransformStats() {
   session.stop();
 }
 
+static void checkNoAudioSessionNegotiation() {
+  FakeMister mister(0x84);
+  if (mister.port == 0) return;
+  auto video = std::make_unique<FakeVideo>();
+  auto audio = std::make_unique<FakeAudio>();
+  auto* rawAudio = audio.get();
+  StreamSession session(std::move(video), std::move(audio));
+  auto config = sessionConfig();
+  config.source.audio = false;
+  std::string error;
+  CHECK(session.start(config, {}, &error));
+  CHECK(waitFor([&] { return mister.blits >= 2; }));
+  session.stop();
+  CHECK(rawAudio->starts == 0 && mister.audioPackets == 0 &&
+        mister.initRate == 0 && mister.initChannels == 0);
+}
+
 // A monitor resized mid-stream must have its crop recomputed, not keep
 // streaming a rectangle sized for the old geometry.
 static void checkCropFollowsMonitorResize() {
@@ -299,6 +325,7 @@ static void checkAudioSkippedWhenCoreHasAudioOff() {
       ++failed;
       return;
     }
+    CHECK(mister.initRate == 3 && mister.initChannels == 2);
     // Enough frames that audio would certainly have been sent if it were going
     // to be; with the core reporting audio off, none must appear.
     CHECK(waitFor([&] { return rawVideo->captured >= 30; }));
@@ -322,6 +349,16 @@ int main() {
   std::string error;
   CHECK(parseModeline("6.7 320 336 367 426 240 244 247 262 0", parsed, error));
   CHECK(!parseModeline("nonsense", parsed, error));
+  std::array<uint8_t, 5> init{};
+  CHECK(encodeInitCommand(true, false, 12345, init, error));
+  CHECK(init == (std::array<uint8_t, 5>{2, 1, 0, 0, 0}));
+  for (const auto rate : {std::pair<uint32_t, uint8_t>{22050, 1},
+                          {44100, 2}, {48000, 3}}) {
+    CHECK(encodeInitCommand(false, true, rate.first, init, error));
+    CHECK(init ==
+          (std::array<uint8_t, 5>{2, 0, rate.second, 2, 0}));
+  }
+  CHECK(!encodeInitCommand(true, true, 96000, init, error));
   AudioRing ring(4);
   int16_t a[] = {1, 2, 3};
   CHECK(ring.push(a, 3) == 0);
@@ -367,6 +404,7 @@ int main() {
   checkLiveModelineSwitch();
   checkAudioSkippedWhenCoreHasAudioOff();
   checkTransformStats();
+  checkNoAudioSessionNegotiation();
   auto dir = std::filesystem::temp_directory_path() / "mistercast-core-test";
   std::filesystem::create_directories(dir);
   auto path = dir / "config.json";

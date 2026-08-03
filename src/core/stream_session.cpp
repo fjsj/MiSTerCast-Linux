@@ -130,7 +130,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   }
   if (c.source.audio) rate = audio_->sampleRate();
   std::string e;
-  if (!transport_.open(c.target, rate, e) ||
+  if (!transport_.open(c.target, c.source.audio, rate, e) ||
       !transport_.switchMode(c.modeline, c.source.progressiveInterlaceBuffer,
                              e)) {
     audio_->stop();

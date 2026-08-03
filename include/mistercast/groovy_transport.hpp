@@ -27,14 +27,17 @@ struct GroovyTransportStats {
 // False when the build has no liblz4, in which case frames go out uncompressed
 // at roughly 3-5x the bandwidth. Windows always compressed.
 bool compressionAvailable() noexcept;
+bool encodeInitCommand(bool compression, bool audioEnabled,
+                       uint32_t audioRate, std::array<uint8_t, 5>& command,
+                       std::string& error) noexcept;
 class GroovyTransport {
  public:
   explicit GroovyTransport(UdpSubmitSyscalls* syscalls = nullptr);
   ~GroovyTransport();
   GroovyTransport(const GroovyTransport&) = delete;
   GroovyTransport& operator=(const GroovyTransport&) = delete;
-  bool open(const std::string& host, uint32_t audioRate, std::string& error,
-            uint16_t port = 32100);
+  bool open(const std::string& host, bool audioEnabled, uint32_t audioRate,
+            std::string& error, uint16_t port = 32100);
   bool switchMode(const Modeline&, bool progressiveInterlaceBuffer,
                   std::string& error);
   void setSyncOptions(bool syncRefresh, uint16_t frameDelay) noexcept;

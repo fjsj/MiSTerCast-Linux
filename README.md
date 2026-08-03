@@ -56,7 +56,7 @@ The GUI exposes every routine streaming setting except `syncRefresh`. The CLI ac
 | `target` | IPv4 address or hostname; empty by default | Groovy_MiSTer destination on UDP port 32100. Do not append a port. CLI: `--target HOST`. |
 | `monitor` | RandR monitor name; primary monitor by default | X11 capture source on the current `$DISPLAY`. CLI: `--monitor NAME`. |
 | `modeline` | Bundled 320×240 NTSC preset by default | MiSTer output timings and transformed frame dimensions. Select/edit it in the GUI, or use `--modeline 'CLOCK HACTIVE HBEGIN HEND HTOTAL VACTIVE VBEGIN VEND VTOTAL INTERLACE'`. Clock is MHz and interlace is `0` or `1`. |
-| `audio` | `true` by default | Captures stereo S16LE system playback. CLI: `--audio` or `--no-audio`. |
+| `audio` | `true` by default | Captures stereo S16LE system playback. CLI: `--audio` or `--no-audio`. Disabled sessions explicitly negotiate audio rate/channel code `0/0` and send no audio commands. |
 | `audioSink` | Default output by default | GUI audio source. Choose `MiSTerCast silent output (CRT only)` to temporarily route current and new playback away from PC speakers and into the stream, or choose a named output sink to capture its monitor without changing playback routing. |
 | `preview` | `true` by default | Shows a throttled, prescaled GUI preview. It does not affect CLI output. |
 | `crop` | `4:3` by default | `custom`, integer `1x`–`5x`, full `4:3`, or full `5:4` source crop. CLI: `--crop MODE`. |

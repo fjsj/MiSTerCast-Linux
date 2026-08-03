@@ -71,7 +71,7 @@ void checkInterlaceTransport(bool progressive, uint8_t sentField,
 
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(), progressive, error));
   transport.setSyncOptions(true, 0);
   CHECK(transport.sendFrame(1, sentField,
@@ -106,7 +106,7 @@ void checkFieldAlignment() {
 
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(), false, error));
   transport.setSyncOptions(true, 0);
   std::vector<uint8_t> pixels(6, 42);
@@ -156,7 +156,7 @@ void checkFieldAlignmentWraparound() {
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(), false, error));
   transport.setSyncOptions(true, 0);
   uint32_t frame = UINT32_MAX;
@@ -189,7 +189,7 @@ void checkFpgaHealthDiagnostics() {
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(false), false, error));
   std::vector<uint8_t> pixels(12, 42);
   CHECK(transport.sendFrame(UINT32_MAX, 0, pixels, error));
@@ -214,7 +214,7 @@ void checkFpgaHealthDiagnostics() {
   CHECK(status.fpgaStatusSamples == 0 && status.fpgaFallbackSamples == 0 &&
         status.vramUnsyncedSamples == 0 && status.vramQueueEmptySamples == 0 &&
         !status.vramQueuePresent);
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   status = transport.stats();
   CHECK(status.fpgaStatusSamples == 0 && status.fpgaFallbackSamples == 0 &&
         status.vramUnsyncedSamples == 0 && status.vramQueueEmptySamples == 0 &&
@@ -387,7 +387,7 @@ void checkFatalPayloadFailureStopsProtocol() {
   syscalls.sendResults = {-EIO};
   GroovyTransport transport(&syscalls);
   std::string error;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(false), false, error));
   CHECK(!transport.sendFrame(1, 0, std::vector<uint8_t>(12, 42), error));
   int16_t audio[2]{};
@@ -437,7 +437,7 @@ void checkPacedUdpDelivery() {
   }
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   Modeline mode{"pacing", 12.5, 640, 656, 700, 800, 245, 246, 247, 260,
                 false};
   CHECK(transport.switchMode(mode, false, error));
@@ -466,7 +466,7 @@ void checkSendErrorsAreFatal() {
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   endpoint.stop();
   bool sendFailed = false;
   for (int attempt = 0; attempt < 10 && !sendFailed; ++attempt)
@@ -483,7 +483,7 @@ void checkAutomaticSyncLine(bool interlaced) {
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   Modeline vga{"vga", 25.175, 640, 656, 752, 800, 480, 490, 492, 525,
                interlaced};
   CHECK(transport.switchMode(vga, false, error));
