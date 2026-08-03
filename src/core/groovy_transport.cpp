@@ -47,6 +47,31 @@ bool compressionAvailable() noexcept {
 GroovyTransport::GroovyTransport() = default;
 GroovyTransport::~GroovyTransport() { close(); }
 
+bool GroovyTransport::decodeStatus(const uint8_t* data, size_t size,
+                                   FpgaStatus& status) noexcept {
+  if (size != 13) return false;
+  status.frameEcho = readLe<uint32_t>(data);
+  status.vCountEcho = readLe<uint16_t>(data + 4);
+  status.frame = readLe<uint32_t>(data + 6);
+  status.vCount = readLe<uint16_t>(data + 10);
+  status.bits = data[12];
+  return true;
+}
+
+void GroovyTransport::applyStatus(const FpgaStatus& status) noexcept {
+  fpga_ = status;
+  haveFpgaStatus_ = true;
+  ackFrame_ = status.frameEcho;
+  fpgaFrame_ = status.frame;
+  fpgaVCount_ = status.vCount;
+  fpgaField_ = (status.bits >> 5) & 1;
+  vramSynced_ = (status.bits & 0x04) != 0;
+  vgaFrameskip_ = (status.bits & 0x08) != 0;
+  vgaVblank_ = (status.bits & 0x10) != 0;
+  misterAudioEnabled_ = (status.bits & 0x40) != 0;
+  vramQueuePresent_ = (status.bits & 0x80) != 0;
+}
+
 bool GroovyTransport::drainStatus(uint32_t expectedFrame) noexcept {
   if (fd_ < 0) return false;
   uint8_t ack[32];
@@ -57,32 +82,26 @@ bool GroovyTransport::drainStatus(uint32_t expectedFrame) noexcept {
       if (errno == EAGAIN || errno == EWOULDBLOCK) return matched;
       return matched;
     }
-    if (received != 13) continue;
     FpgaStatus status;
-    status.frameEcho = readLe<uint32_t>(ack);
-    status.vCountEcho = readLe<uint16_t>(ack + 4);
-    status.frame = readLe<uint32_t>(ack + 6);
-    status.vCount = readLe<uint16_t>(ack + 10);
-    status.bits = ack[12];
+    if (!decodeStatus(ack, size_t(received), status)) continue;
     if (haveFpgaStatus_ && frameAfter(fpga_.frameEcho, status.frameEcho))
       continue;
-    fpga_ = status;
-    haveFpgaStatus_ = true;
+    applyStatus(status);
     lastAckAt_ = std::chrono::steady_clock::now();
-    ackFrame_ = status.frameEcho;
-    fpgaFrame_ = status.frame;
-    fpgaVCount_ = status.vCount;
-    fpgaField_ = (status.bits >> 5) & 1;
-    vramSynced_ = (status.bits & 0x04) != 0;
-    vgaFrameskip_ = (status.bits & 0x08) != 0;
-    vgaVblank_ = (status.bits & 0x10) != 0;
-    misterAudioEnabled_ = (status.bits & 0x40) != 0;
     if (status.frameEcho == expectedFrame) {
       matched = true;
       // switchMode invalidates the old raster phase. Only an ACK echoing a
       // blit sent after that switch may establish the new mode's phase.
       phaseValid_ = true;
       fieldPhaseValid_ = true;
+      if (!haveDiagnosticFrame_ || status.frameEcho != diagnosticFrame_) {
+        haveDiagnosticFrame_ = true;
+        diagnosticFrame_ = status.frameEcho;
+        ++fpgaStatusSamples_;
+        if (vgaFrameskip_) ++fpgaFallbackSamples_;
+        if (!vramSynced_) ++vramUnsyncedSamples_;
+        if (!vramQueuePresent_) ++vramQueueEmptySamples_;
+      }
     }
   }
 }
@@ -127,12 +146,16 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
   syncLine_ = fpgaVCount_ = 0;
   ackedFrames_ = missedAcks_ = streamTimeUs_ = ackAgeMs_ = sendErrors_ = 0;
   fieldRealignments_ = 0;
+  fpgaStatusSamples_ = fpgaFallbackSamples_ = vramUnsyncedSamples_ =
+      vramQueueEmptySamples_ = 0;
   coreVersion_ = 0;
   lastSendEndAt_ = {};
   rasterCorrectionUs_ = 0;
   outgoingField_ = fpgaField_ = 0;
   interlacedFieldBuffer_ = fieldPhaseValid_ = false;
-  phaseValid_ = fallbackPhaseSet_ = lastAligned_ = false;
+  phaseValid_ = fallbackPhaseSet_ = lastAligned_ = haveDiagnosticFrame_ =
+      false;
+  diagnosticFrame_ = 0;
   fpga_ = {};
   haveFpgaStatus_ = false;
   if (host.empty()) {
@@ -216,15 +239,9 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
                       .count();
   if (received == 1) coreVersion_ = ack[0];
   if (received == 13) {
-    fpga_.frameEcho = readLe<uint32_t>(ack);
-    fpga_.vCountEcho = readLe<uint16_t>(ack + 4);
-    fpga_.frame = readLe<uint32_t>(ack + 6);
-    fpga_.vCount = readLe<uint16_t>(ack + 10);
-    fpga_.bits = ack[12];
-    haveFpgaStatus_ = true;
-    fpgaFrame_ = fpga_.frame;
-    fpgaVCount_ = fpga_.vCount;
-    misterAudioEnabled_ = (ack[12] & 0x40) != 0;
+    FpgaStatus status;
+    decodeStatus(ack, size_t(received), status);
+    applyStatus(status);
   }
   return true;
 }
@@ -507,11 +524,16 @@ GroovyTransportStats GroovyTransport::stats() const noexcept {
   s.sendErrors = sendErrors_;
   s.networkRttUs = networkRttNs_ / 1000;
   s.fieldRealignments = fieldRealignments_;
+  s.fpgaStatusSamples = fpgaStatusSamples_;
+  s.fpgaFallbackSamples = fpgaFallbackSamples_;
+  s.vramUnsyncedSamples = vramUnsyncedSamples_;
+  s.vramQueueEmptySamples = vramQueueEmptySamples_;
   s.outgoingField = outgoingField_;
   s.fpgaField = fpgaField_;
   s.vramSynced = vramSynced_;
   s.vgaFrameskip = vgaFrameskip_;
   s.vgaVblank = vgaVblank_;
+  s.vramQueuePresent = vramQueuePresent_;
   s.interlacedFieldBuffer = interlacedFieldBuffer_;
   s.fieldPhaseValid = fieldPhaseValid_;
   return s;
@@ -529,9 +551,14 @@ void GroovyTransport::close() noexcept {
   vramSynced_ = false;
   vgaFrameskip_ = false;
   vgaVblank_ = false;
+  vramQueuePresent_ = false;
   interlacedFieldBuffer_ = false;
   fieldPhaseValid_ = false;
-  phaseValid_ = fallbackPhaseSet_ = lastAligned_ = false;
+  phaseValid_ = fallbackPhaseSet_ = lastAligned_ = haveDiagnosticFrame_ =
+      false;
+  diagnosticFrame_ = 0;
+  fpgaStatusSamples_ = fpgaFallbackSamples_ = vramUnsyncedSamples_ =
+      vramQueueEmptySamples_ = 0;
   progressiveInterlaceBuffer_ = false;
   frameBytes_ = 0;
   frameTimeNs_ = lineTimeNs_ = 0;

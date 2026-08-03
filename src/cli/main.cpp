@@ -193,21 +193,30 @@ int main(int argc, char** argv) {
       auto s = session.stats();
       std::cerr << "video " << s.streamFps << " fps, capture " << s.captureFps
                 << " fps, dropped " << s.droppedFrames << ", sync line "
-                << s.syncLine << ", raster " << s.fpgaVCount << ", frames "
-                << s.acknowledgedFrame << "/" << s.fpgaFrame << ", correction "
-                << s.rasterCorrectionUs << " us, stream " << s.streamTimeUs
+                << s.transport.requestedSyncLine << ", raster "
+                << s.transport.fpgaVCount << ", frames "
+                << s.transport.acknowledgedFrame << "/" << s.transport.fpgaFrame
+                << ", correction " << s.transport.rasterCorrectionUs
+                << " us, stream " << s.transport.streamTimeUs
                 << " us, transform " << s.transformTimeUs << " us (max "
-                << s.transformMaxUs << " us), ACK " << s.acknowledgedFrames
-                << "/" << s.missedAcks
-                << ", RTT " << s.networkRttUs << " us, send errors "
-                << s.sendErrors << ", VRAM "
-                << (s.vramSynced ? "synced" : "unsynced")
-                << (s.vgaFrameskip ? "/fb" : "");
-      if (s.interlacedFieldBuffer)
-        std::cerr << ", field " << unsigned(s.outgoingField) << "/FPGA "
-                  << unsigned(s.fpgaField)
-                  << (s.fieldPhaseValid ? " locked" : " acquiring")
-                  << ", realignments " << s.fieldRealignments;
+                << s.transformMaxUs << " us), ACK "
+                << s.transport.acknowledgedFrames << "/"
+                << s.transport.missedAcks << ", RTT "
+                << s.transport.networkRttUs << " us, send errors "
+                << s.transport.sendErrors << ", VRAM "
+                << (s.transport.vramSynced ? "synced" : "unsynced")
+                << (s.transport.vgaFrameskip ? "/fallback" : "")
+                << ", queue "
+                << (s.transport.vramQueuePresent ? "ready" : "empty")
+                << ", FPGA " << s.transport.fpgaFallbackSamples << "/"
+                << s.transport.vramUnsyncedSamples << "/"
+                << s.transport.vramQueueEmptySamples << " unhealthy of "
+                << s.transport.fpgaStatusSamples;
+      if (s.transport.interlacedFieldBuffer)
+        std::cerr << ", field " << unsigned(s.transport.outgoingField)
+                  << "/FPGA " << unsigned(s.transport.fpgaField)
+                  << (s.transport.fieldPhaseValid ? " locked" : " acquiring")
+                  << ", realignments " << s.transport.fieldRealignments;
       std::cerr << ", audio buffered "
                 << s.audioBufferedSamples << " samples, level "
                 << int(s.audioPeak * 100) << "%, MiSTer audio "

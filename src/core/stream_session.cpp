@@ -44,26 +44,7 @@ SessionStats StreamSession::stats() const {
   result.misterAudioEnabled = transport_.misterAudioEnabled();
   result.transformTimeUs = transformTimeUs_;
   result.transformMaxUs = transformMaxUs_;
-  auto network = transport_.stats();
-  result.acknowledgedFrame = network.acknowledgedFrame;
-  result.fpgaFrame = network.fpgaFrame;
-  result.syncLine = network.requestedSyncLine;
-  result.fpgaVCount = network.fpgaVCount;
-  result.acknowledgedFrames = network.acknowledgedFrames;
-  result.missedAcks = network.missedAcks;
-  result.streamTimeUs = network.streamTimeUs;
-  result.ackAgeMs = network.ackAgeMs;
-  result.rasterCorrectionUs = network.rasterCorrectionUs;
-  result.sendErrors = network.sendErrors;
-  result.networkRttUs = network.networkRttUs;
-  result.fieldRealignments = network.fieldRealignments;
-  result.outgoingField = network.outgoingField;
-  result.fpgaField = network.fpgaField;
-  result.vramSynced = network.vramSynced;
-  result.vgaFrameskip = network.vgaFrameskip;
-  result.vgaVblank = network.vgaVblank;
-  result.interlacedFieldBuffer = network.interlacedFieldBuffer;
-  result.fieldPhaseValid = network.fieldPhaseValid;
+  result.transport = transport_.stats();
   auto seconds = std::chrono::duration<double>(
                      std::chrono::steady_clock::now() - startedAt_)
                      .count();

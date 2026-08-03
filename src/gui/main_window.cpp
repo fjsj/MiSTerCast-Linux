@@ -362,26 +362,30 @@ class MainWindow final : public QMainWindow {
             ? stats.audioBufferedSamples * 500.0 / stats.audioSampleRate
             : 0.0;
     QString fieldStatus;
-    if (stats.interlacedFieldBuffer)
+    if (stats.transport.interlacedFieldBuffer)
       fieldStatus = QString("  |  field %1/FPGA %2 %3")
-                        .arg(stats.outgoingField)
-                        .arg(stats.fpgaField)
-                        .arg(stats.fieldPhaseValid ? "locked" : "acquiring");
+                        .arg(stats.transport.outgoingField)
+                        .arg(stats.transport.fpgaField)
+                        .arg(stats.transport.fieldPhaseValid ? "locked"
+                                                             : "acquiring");
     status_->setText(QString("Streaming  |  %1 fps  |  capture %2 fps  |  "
                              "transform %3/%4 us  |  dropped %5  |  "
-                             "sync %6/%7 (%8 us)  |  VRAM %9  | "
-                             "audio %10 ms / %11%  |  MiSTer audio %12%13")
+                             "sync %6/%7 (%8 us)  |  VRAM %9 / queue %10  | "
+                             "audio %11 ms / %12%  |  MiSTer audio %13%14")
                          .arg(stats.streamFps, 0, 'f', 1)
                          .arg(stats.captureFps, 0, 'f', 1)
                          .arg(stats.transformTimeUs)
                          .arg(stats.transformMaxUs)
                          .arg(stats.droppedFrames)
-                         .arg(stats.syncLine)
-                         .arg(stats.fpgaVCount)
-                         .arg(stats.rasterCorrectionUs)
-                         .arg(stats.vramSynced
-                                  ? (stats.vgaFrameskip ? "fallback" : "synced")
+                         .arg(stats.transport.requestedSyncLine)
+                         .arg(stats.transport.fpgaVCount)
+                         .arg(stats.transport.rasterCorrectionUs)
+                         .arg(stats.transport.vramSynced
+                                  ? (stats.transport.vgaFrameskip ? "fallback"
+                                                                  : "synced")
                                   : "unsynced")
+                         .arg(stats.transport.vramQueuePresent ? "ready"
+                                                               : "empty")
                          .arg(audioMs, 0, 'f', 0)
                          .arg(stats.audioPeak * 100, 0, 'f', 0)
                          .arg(stats.misterAudioEnabled ? "on" : "off")
@@ -396,17 +400,17 @@ class MainWindow final : public QMainWindow {
                  .arg(stats.audioDroppedSamples));
       previousAudioDropped_ = stats.audioDroppedSamples;
     }
-    if (stats.sendErrors > previousSendErrors_) {
+    if (stats.transport.sendErrors > previousSendErrors_) {
       append(QString("Network: %1 datagrams could not be sent (stream "
                      "continues).")
-                 .arg(stats.sendErrors));
-      previousSendErrors_ = stats.sendErrors;
+                 .arg(stats.transport.sendErrors));
+      previousSendErrors_ = stats.transport.sendErrors;
     }
-    if (stats.fieldRealignments > previousFieldRealignments_) {
+    if (stats.transport.fieldRealignments > previousFieldRealignments_) {
       append(QString("Interlace: FPGA feedback corrected field phase (%1 "
                      "total).")
-                 .arg(stats.fieldRealignments));
-      previousFieldRealignments_ = stats.fieldRealignments;
+                 .arg(stats.transport.fieldRealignments));
+      previousFieldRealignments_ = stats.transport.fieldRealignments;
     }
     if (stats.audioUnderrunSamples > previousUnderrun_ + 4800) {
       append(QString("Performance: audio underrun inserted %1 silent samples.")

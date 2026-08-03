@@ -10,20 +10,14 @@
 #include "mistercast/interfaces.hpp"
 namespace mistercast {
 struct SessionStats {
+  GroovyTransportStats transport;
   uint64_t capturedFrames{}, sentFrames{}, droppedFrames{},
       audioDroppedSamples{}, audioUnderrunSamples{};
   size_t audioBufferedSamples{};
   uint32_t audioSampleRate{};
   double captureFps{}, streamFps{}, audioPeak{};
-  uint32_t acknowledgedFrame{}, fpgaFrame{};
-  uint16_t syncLine{}, fpgaVCount{};
-  uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{},
-      sendErrors{}, networkRttUs{}, fieldRealignments{}, transformTimeUs{},
-      transformMaxUs{};
-  int64_t rasterCorrectionUs{};
-  uint8_t outgoingField{}, fpgaField{};
-  bool misterAudioEnabled{}, vramSynced{}, vgaFrameskip{}, vgaVblank{},
-      interlacedFieldBuffer{}, fieldPhaseValid{};
+  uint64_t transformTimeUs{}, transformMaxUs{};
+  bool misterAudioEnabled{};
 };
 class StreamSession {
  public:

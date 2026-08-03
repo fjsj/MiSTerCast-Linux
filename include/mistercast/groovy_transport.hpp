@@ -11,11 +11,12 @@ struct GroovyTransportStats {
   uint32_t acknowledgedFrame{}, fpgaFrame{};
   uint16_t requestedSyncLine{}, fpgaVCount{};
   uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{},
-      sendErrors{}, networkRttUs{}, fieldRealignments{};
+      sendErrors{}, networkRttUs{}, fieldRealignments{}, fpgaStatusSamples{},
+      fpgaFallbackSamples{}, vramUnsyncedSamples{}, vramQueueEmptySamples{};
   int64_t rasterCorrectionUs{};
   uint8_t outgoingField{}, fpgaField{};
-  bool vramSynced{}, vgaFrameskip{}, vgaVblank{}, interlacedFieldBuffer{},
-      fieldPhaseValid{};
+  bool vramSynced{}, vgaFrameskip{}, vgaVblank{}, vramQueuePresent{},
+      interlacedFieldBuffer{}, fieldPhaseValid{};
 };
 // False when the build has no liblz4, in which case frames go out uncompressed
 // at roughly 3-5x the bandwidth. Windows always compressed.
@@ -55,26 +56,32 @@ class GroovyTransport {
   uint8_t interlaceShift_{};
   std::vector<uint8_t> compressed_;
   bool syncRefresh_{true}, progressiveInterlaceBuffer_{}, firstFrame_{true};
-  bool phaseValid_{}, fallbackPhaseSet_{}, lastAligned_{}, haveFpgaStatus_{};
+  bool phaseValid_{}, fallbackPhaseSet_{}, lastAligned_{}, haveFpgaStatus_{},
+      haveDiagnosticFrame_{};
   uint64_t frameTimeNs_{}, lineTimeNs_{}, networkRttNs_{}, lastStreamNs_{};
-  uint32_t currentFrame_{}, fallbackFrame_{}, lastAlignedFrame_{};
+  uint32_t currentFrame_{}, fallbackFrame_{}, lastAlignedFrame_{},
+      diagnosticFrame_{};
   uint8_t coreVersion_{}, lastAlignedField_{};
   FpgaStatus fpga_{};
   std::chrono::steady_clock::time_point syncEpoch_{}, lastAckAt_{},
       lastSendEndAt_{};
   bool sendPacket(const void*, size_t, std::string&);
   bool sendChunks(const uint8_t*, size_t, std::string&);
+  static bool decodeStatus(const uint8_t*, size_t, FpgaStatus&) noexcept;
+  void applyStatus(const FpgaStatus&) noexcept;
   bool drainStatus(uint32_t expectedFrame) noexcept;
   uint16_t syncLine(uint64_t workNs) const noexcept;
   int64_t rasterCorrection() const noexcept;
   std::atomic<bool> misterAudioEnabled_{false}, vramSynced_{false},
-      vgaFrameskip_{false}, vgaVblank_{false}, interlacedFieldBuffer_{false},
-      fieldPhaseValid_{false};
+      vgaFrameskip_{false}, vgaVblank_{false}, vramQueuePresent_{false},
+      interlacedFieldBuffer_{false}, fieldPhaseValid_{false};
   std::atomic<uint32_t> ackFrame_{0}, fpgaFrame_{0};
   std::atomic<uint16_t> syncLine_{0}, fpgaVCount_{0};
   std::atomic<uint8_t> outgoingField_{0}, fpgaField_{0};
   std::atomic<uint64_t> ackedFrames_{0}, missedAcks_{0}, streamTimeUs_{0},
-      ackAgeMs_{0}, sendErrors_{0}, fieldRealignments_{0};
+      ackAgeMs_{0}, sendErrors_{0}, fieldRealignments_{0},
+      fpgaStatusSamples_{0}, fpgaFallbackSamples_{0},
+      vramUnsyncedSamples_{0}, vramQueueEmptySamples_{0};
   std::atomic<int64_t> rasterCorrectionUs_{0};
 };
 }  // namespace mistercast
