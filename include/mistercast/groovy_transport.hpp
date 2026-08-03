@@ -90,7 +90,6 @@ class GroovyTransport {
   void applyStatus(const FpgaStatus&) noexcept;
   bool drainStatus(uint32_t expectedFrame) noexcept;
   uint16_t syncLine(uint64_t workNs) const noexcept;
-  bool adaptiveTimingEligible() const noexcept;
   int64_t rasterCorrection() const noexcept;
   std::atomic<bool> misterAudioEnabled_{false}, vramSynced_{false},
       vgaFrameskip_{false}, vgaVblank_{false}, vramQueuePresent_{false},

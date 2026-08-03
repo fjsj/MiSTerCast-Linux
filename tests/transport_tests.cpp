@@ -315,63 +315,152 @@ void checkFpgaHealthDiagnostics() {
 
 void checkAdaptiveDeliveryMargin() {
   AdaptiveDeliveryMargin margin;
-  margin.configure(525, true);
+  const auto healthy = [&] {
+    margin.observe(DeliveryObservation::Healthy);
+  };
+  const auto unhealthy = [&] {
+    margin.observe(DeliveryObservation::Unhealthy);
+  };
+  margin.configure(525, true, true);
   auto stats = margin.stats();
   CHECK(stats.reserveLines == 262 && stats.latestSafeLine == 263 &&
-        stats.healthyAcks == 0 && stats.reductions == 0 && stats.resets == 0);
-  for (unsigned i = 0; i < 299; ++i) margin.healthyAck();
+        stats.healthyAcks == 0 && stats.reductions == 0 && stats.resets == 0 &&
+        !stats.eligible && !margin.latestSafeLine());
+  margin.phaseLocked();
+  CHECK(margin.stats().eligible && margin.latestSafeLine() == 263);
+  for (unsigned i = 0; i < 299; ++i) healthy();
   stats = margin.stats();
   CHECK(stats.reserveLines == 262 && stats.healthyAcks == 299 &&
         stats.reductions == 0);
-  margin.healthyAck();
+  healthy();
   stats = margin.stats();
   CHECK(stats.reserveLines == 258 && stats.latestSafeLine == 267 &&
         stats.healthyAcks == 0 && stats.reductions == 1);
-  margin.unhealthyAck();
+  unhealthy();
   stats = margin.stats();
   CHECK(stats.reserveLines == 262 && stats.latestSafeLine == 263 &&
         stats.resets == 1);
-  margin.unhealthyAck();
+  unhealthy();
   CHECK(margin.stats().resets == 1);
-  for (unsigned i = 0; i < 10; ++i) margin.healthyAck();
-  margin.unhealthyAck();
+  for (unsigned i = 0; i < 10; ++i) healthy();
+  unhealthy();
   CHECK(margin.stats().resets == 2 && margin.stats().healthyAcks == 0);
-  for (unsigned i = 0; i < 300; ++i) margin.healthyAck();
-  for (unsigned i = 0; i < 10; ++i) margin.healthyAck();
-  margin.missingAck();
+  for (unsigned i = 0; i < 300; ++i) healthy();
+  for (unsigned i = 0; i < 10; ++i) healthy();
+  margin.observe(DeliveryObservation::Missing);
   stats = margin.stats();
   CHECK(stats.reserveLines == 258 && stats.healthyAcks == 0 &&
         stats.resets == 2);
   for (unsigned step = 0; step < 20; ++step)
     for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i)
-      margin.healthyAck();
+      healthy();
   stats = margin.stats();
   CHECK(stats.reserveLines == 196 && stats.latestSafeLine == 329);
   const auto reductionsAtFloor = stats.reductions;
-  for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i)
-    margin.healthyAck();
+  for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i) healthy();
   CHECK(margin.stats().reserveLines == 196 &&
         margin.stats().reductions == reductionsAtFloor);
 
-  margin.configure(625, true);
+  margin.configure(625, true, true);
+  margin.phaseLocked();
   for (unsigned step = 0; step < 20; ++step)
-    for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i)
-      margin.healthyAck();
+    for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i) healthy();
   stats = margin.stats();
   CHECK(stats.reserveLines == 234 && stats.latestSafeLine == 391 &&
         stats.reductions == 20);
-  margin.configure(525, false);
+  margin.configure(525, false, true);
   stats = margin.stats();
   CHECK(stats.reserveLines == 0 && stats.latestSafeLine == 0 &&
         stats.reductions == 0 && stats.resets == 0);
-  margin.configure(525, true);
-  margin.healthyAck();
-  margin.configure(625, true);
+  margin.configure(525, true, true);
+  margin.phaseLocked();
+  healthy();
+  margin.configure(625, true, true);
   stats = margin.stats();
   CHECK(stats.reserveLines == 312 && stats.latestSafeLine == 313 &&
         stats.healthyAcks == 0 && stats.reductions == 0 && stats.resets == 0);
-  margin.close();
+  margin.phaseLocked();
+  for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i) healthy();
+  CHECK(margin.stats().reserveLines == 308);
+  margin.setAutomatic(false);
+  CHECK(!margin.stats().eligible && margin.stats().reserveLines == 312);
+  margin.setAutomatic(true);
+  CHECK(margin.stats().eligible && margin.stats().reserveLines == 312);
+  margin.configure(0, true, true);
+  margin.phaseLocked();
+  CHECK(!margin.stats().eligible && !margin.latestSafeLine());
+  margin.reset();
   CHECK(margin.stats().reserveLines == 0);
+}
+
+void checkAdaptiveTransportTransitions() {
+  FakeGroovyEndpoint endpoint([](auto& peer, const auto& packet) {
+    if (packet.empty()) return;
+    if (packet[0] == kInit) {
+      peer.replyVersion();
+    } else if (packet[0] == kSwitchMode) {
+      peer.replyAck({0, 1, 0, 1, 0x84});
+    } else if (packet[0] == kBlit) {
+      const auto frame = packetU32(packet, 1);
+      if (frame == 611) return;
+      const uint8_t status = frame == 612 ? 0 : 0x84;
+      if (frame == 2) peer.replyAck({1, 1, 2, 1, 0x84});
+      acknowledgeBlit(peer, packet, frame + 1, 1, status);
+      if (frame == 1)
+        acknowledgeBlit(peer, packet, frame + 1, 1, status);
+    }
+  });
+  if (!endpoint.valid()) return;
+
+  std::string error;
+  GroovyTransport transport;
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.switchMode(tinyMode(), false, error));
+  transport.setSyncOptions(true, 0);
+  const std::vector<uint8_t> pixels(6, 42);
+  for (uint32_t frame = 1; frame <= 300; ++frame) {
+    CHECK(transport.sendFrame(frame, frame & 1, pixels, error));
+    transport.waitSync();
+    if (frame == 1) CHECK(transport.stats().adaptiveHealthyAcks == 1);
+    if (frame == 2) CHECK(transport.stats().adaptiveHealthyAcks == 2);
+  }
+  auto stats = transport.stats();
+  CHECK(stats.adaptiveTimingEligible && stats.deliveryReserveLines == 1 &&
+        stats.adaptiveLatestSafeLine == 4 && stats.adaptiveReductions == 1);
+
+  transport.setSyncOptions(true, 1);
+  stats = transport.stats();
+  CHECK(!stats.adaptiveTimingEligible && stats.deliveryReserveLines == 2 &&
+        stats.adaptiveHealthyAcks == 0);
+  transport.setSyncOptions(true, 0);
+  CHECK(transport.stats().adaptiveTimingEligible &&
+        transport.stats().deliveryReserveLines == 2);
+
+  for (uint32_t frame = 301; frame <= 600; ++frame) {
+    CHECK(transport.sendFrame(frame, frame & 1, pixels, error));
+    transport.waitSync();
+  }
+  CHECK(transport.stats().deliveryReserveLines == 1);
+  for (uint32_t frame = 601; frame <= 610; ++frame) {
+    CHECK(transport.sendFrame(frame, frame & 1, pixels, error));
+    transport.waitSync();
+  }
+  stats = transport.stats();
+  CHECK(stats.deliveryReserveLines == 1 && stats.adaptiveHealthyAcks == 10);
+  CHECK(transport.sendFrame(611, 1, pixels, error));
+  transport.waitSync();
+  stats = transport.stats();
+  CHECK(stats.deliveryReserveLines == 1 && stats.adaptiveHealthyAcks == 0);
+  CHECK(transport.sendFrame(612, 0, pixels, error));
+  transport.waitSync();
+  stats = transport.stats();
+  CHECK(stats.deliveryReserveLines == 2 && stats.adaptiveResets == 1);
+
+  CHECK(transport.switchMode(tinyMode(), false, error));
+  stats = transport.stats();
+  CHECK(!stats.adaptiveTimingEligible && stats.deliveryReserveLines == 2 &&
+        stats.adaptiveReductions == 0 && stats.adaptiveResets == 0);
+  transport.close();
 }
 
 class FailingVideoSyscalls final : public UdpSubmitSyscalls {
@@ -582,6 +671,7 @@ int main() {
   checkFieldAlignmentWraparound();
   checkFpgaHealthDiagnostics();
   checkAdaptiveDeliveryMargin();
+  checkAdaptiveTransportTransitions();
   checkFatalPayloadFailureStopsProtocol();
   checkSharedAudioVideoPacketization();
   checkPacedUdpDelivery();

@@ -1,7 +1,8 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 
 namespace mistercast {
 inline constexpr uint32_t AdaptiveHealthyAcksPerStep = 300;
@@ -11,21 +12,29 @@ struct AdaptiveDeliveryStats {
   uint16_t reserveLines{}, latestSafeLine{};
   uint32_t healthyAcks{};
   uint64_t reductions{}, resets{};
+  bool eligible{};
 };
+
+enum class DeliveryObservation { Healthy, Unhealthy, Missing };
 
 class AdaptiveDeliveryMargin {
  public:
-  void configure(uint16_t vTotal, bool fieldBuffer) noexcept;
-  void healthyAck() noexcept;
-  void unhealthyAck() noexcept;
-  void missingAck() noexcept;
-  void close() noexcept;
+  void configure(uint16_t vTotal, bool fieldBuffer, bool automatic) noexcept;
+  void setAutomatic(bool automatic) noexcept;
+  void phaseLocked() noexcept;
+  void observe(DeliveryObservation observation) noexcept;
+  void reset() noexcept;
+  std::optional<uint16_t> latestSafeLine() const noexcept;
   AdaptiveDeliveryStats stats() const noexcept;
 
  private:
-  std::atomic<uint16_t> vTotal_{0}, conservativeReserve_{0},
-      minimumReserve_{0}, reserve_{0}, latestSafeLine_{0};
-  std::atomic<uint32_t> healthyAcks_{0};
-  std::atomic<uint64_t> reductions_{0}, resets_{0};
+  bool eligible() const noexcept;
+  void restoreConservative() noexcept;
+
+  mutable std::mutex mutex_;
+  uint16_t vTotal_{}, conservativeReserve_{}, minimumReserve_{}, reserve_{};
+  uint32_t healthyAcks_{};
+  uint64_t reductions_{}, resets_{};
+  bool fieldBuffer_{}, automatic_{}, phaseLocked_{};
 };
 }  // namespace mistercast
