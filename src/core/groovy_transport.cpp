@@ -30,6 +30,15 @@ UdpVideoConfig groovyVideoConfig() noexcept {
           GroovyUdpWireOverheadBytes, 950000000, 32, 100000};
 }
 
+bool configureStrictPathMtu(int fd, std::string& error) noexcept {
+  const int mode = IP_PMTUDISC_DO;
+  if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, sizeof(mode)) == 0)
+    return true;
+  error = std::string("cannot enforce IPv4 path MTU: ") +
+          std::strerror(errno);
+  return false;
+}
+
 template <class T>
 T readLe(const uint8_t* p) {
   T value{};

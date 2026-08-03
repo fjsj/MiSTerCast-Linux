@@ -1,3 +1,6 @@
+#include <netinet/ip.h>
+#include <sys/socket.h>
+
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -25,6 +28,15 @@ class GroovyTransportTestPeer {
     UdpVideoConfig config{GroovyUdpPayloadBytes, GroovyFramebufferBytes,
                           GroovyUdpWireOverheadBytes, 950000000, 32, 100000};
     return withVideoConfig(config, &syscalls);
+  }
+  static std::optional<int> pathMtuDiscoveryMode(
+      const GroovyTransport& transport) {
+    int mode = 0;
+    socklen_t size = sizeof(mode);
+    if (getsockopt(transport.fd_, IPPROTO_IP, IP_MTU_DISCOVER, &mode, &size) !=
+        0)
+      return std::nullopt;
+    return mode;
   }
 };
 }  // namespace mistercast
@@ -71,6 +83,9 @@ void checkInitNegotiation() {
     std::string error;
     GroovyTransport transport;
     CHECK(transport.open("localhost", test.audioRate, error, endpoint.port()));
+    const auto pathMtuMode =
+        GroovyTransportTestPeer::pathMtuDiscoveryMode(transport);
+    CHECK(pathMtuMode && *pathMtuMode == IP_PMTUDISC_DO);
     const FakeGroovyEndpoint::Packet expected{
         kInit, uint8_t(compressionAvailable()), test.rateCode,
         uint8_t(test.audioRate ? 2 : 0), 0};

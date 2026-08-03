@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "fake_groovy_endpoint.hpp"
+#include "mistercast/groovy_transport.hpp"
 #include "mistercast/pattern.hpp"
 
 using namespace mistercast;
@@ -140,12 +141,21 @@ void checkRunnerProtocol() {
 
   PatternOptions options;
   options.target = "localhost";
-  options.port = endpoint.port();
   options.tone = true;
   options.modeline = {"runner", 1, 8, 10, 12, 100, 8, 10, 12, 100, true};
   std::ostringstream status;
   std::string error;
-  CHECK(runGeneratedPattern(options, stop, status, error));
+  GroovyTransport transport;
+  const bool opened =
+      transport.open(options.target, 48000, error, endpoint.port());
+  CHECK(opened);
+  if (!opened) {
+    endpoint.stop();
+    return;
+  }
+  CHECK(streamGeneratedPattern(options, transport, stop, status, error));
+  CHECK(transport.connected());
+  transport.close();
   CHECK(endpoint.waitForCommand(kClose));
   endpoint.stop();
   CHECK(sawInit && sawMode && sawClose && fields.size() >= 4);

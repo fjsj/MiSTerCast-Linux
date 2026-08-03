@@ -1,6 +1,5 @@
 #include "mistercast/udp_pacing.hpp"
 
-#include <netinet/ip.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 
@@ -92,8 +91,9 @@ void sampleQueue(int fd, UdpSubmitSyscalls& syscalls,
 
 size_t videoDatagramCount(size_t payloadBytes,
                           const UdpVideoConfig& config) noexcept {
-  return config.payloadBytes
-             ? (payloadBytes + config.payloadBytes - 1) / config.payloadBytes
+  const size_t packetBytes = config.payloadBytes;
+  return packetBytes
+             ? (payloadBytes + packetBytes - 1) / packetBytes
              : 0;
 }
 
@@ -114,18 +114,9 @@ uint64_t videoCompletionGraceNs(uint64_t framePeriodNs) noexcept {
   return std::clamp(framePeriodNs / 2, kMinimumGraceNs, kMaximumGraceNs);
 }
 
-bool configureStrictPathMtu(int fd, std::string& error) noexcept {
-  const int mode = IP_PMTUDISC_DO;
-  if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, sizeof(mode)) == 0)
-    return true;
-  error = std::string("cannot enforce IPv4 path MTU: ") +
-          std::strerror(errno);
-  return false;
-}
-
 bool validatePathMtu(uint32_t pathMtu, const UdpVideoConfig& config,
                      std::string& error) noexcept {
-  const size_t requiredMtu = config.payloadBytes + 28;
+  const size_t requiredMtu = config.ipv4MtuBytes();
   if (pathMtu >= requiredMtu) return true;
   error = "detected path MTU " + std::to_string(pathMtu) +
           ", but MiSTerCast requires MTU " + std::to_string(requiredMtu) +
@@ -140,7 +131,7 @@ std::string udpSendError(int errorNumber, const char* operation,
     return std::string(operation) + " failed: path MTU cannot carry a " +
            std::to_string(config.payloadBytes) +
            "-byte UDP payload without IPv4 fragmentation (MTU " +
-           std::to_string(config.payloadBytes + 28) + " required)";
+           std::to_string(config.ipv4MtuBytes()) + " required)";
   return std::string(operation) + " failed: " + std::strerror(errorNumber);
 }
 

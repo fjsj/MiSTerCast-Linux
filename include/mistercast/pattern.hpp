@@ -10,6 +10,7 @@
 #include "mistercast/types.hpp"
 
 namespace mistercast {
+class GroovyTransport;
 enum class PatternContent : uint8_t { Bars, Noise };
 
 struct PatternOptions {
@@ -17,7 +18,7 @@ struct PatternOptions {
   Modeline modeline{Modeline::safeDefault()};
   PatternContent content{PatternContent::Bars};
   bool tone{}, progressiveInterlaceBuffer{};
-  uint16_t frameDelay{}, port{32100};
+  uint16_t frameDelay{};
 };
 
 bool parsePatternOptions(const std::vector<std::string>& arguments,
@@ -40,4 +41,9 @@ class PatternTone {
 bool runGeneratedPattern(const PatternOptions& options,
                          const std::atomic<bool>& stop, std::ostream& status,
                          std::string& error);
+// Uses an already-open transport; the caller retains lifecycle ownership.
+bool streamGeneratedPattern(const PatternOptions& options,
+                            GroovyTransport& transport,
+                            const std::atomic<bool>& stop,
+                            std::ostream& status, std::string& error);
 }  // namespace mistercast

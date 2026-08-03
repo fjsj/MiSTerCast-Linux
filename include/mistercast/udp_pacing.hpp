@@ -18,6 +18,10 @@ struct UdpVideoConfig {
   uint64_t pacingBitsPerSecond{950000000};
   size_t batchDatagrams{32};
   uint64_t lateToleranceNs{100000};
+
+  constexpr size_t ipv4MtuBytes() const noexcept {
+    return payloadBytes + 20 + 8;
+  }
 };
 
 size_t videoDatagramCount(size_t payloadBytes,
@@ -27,7 +31,6 @@ uint64_t videoWireBytes(size_t payloadBytes,
 uint64_t pacingDurationNs(size_t payloadBytes,
                           const UdpVideoConfig& config) noexcept;
 uint64_t videoCompletionGraceNs(uint64_t framePeriodNs) noexcept;
-bool configureStrictPathMtu(int fd, std::string& error) noexcept;
 bool validatePathMtu(uint32_t pathMtu, const UdpVideoConfig& config,
                      std::string& error) noexcept;
 std::string udpSendError(int errorNumber, const char* operation,

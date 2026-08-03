@@ -181,8 +181,18 @@ bool runGeneratedPattern(const PatternOptions& options,
   GroovyTransport transport;
   const auto audioRate = options.tone ? std::optional<uint32_t>{kToneRate}
                                       : std::nullopt;
-  if (!transport.open(options.target, audioRate, error, options.port) ||
-      !transport.switchMode(options.modeline,
+  if (!transport.open(options.target, audioRate, error)) return false;
+  const bool streamed =
+      streamGeneratedPattern(options, transport, stop, status, error);
+  transport.close();
+  return streamed;
+}
+
+bool streamGeneratedPattern(const PatternOptions& options,
+                            GroovyTransport& transport,
+                            const std::atomic<bool>& stop,
+                            std::ostream& status, std::string& error) {
+  if (!transport.switchMode(options.modeline,
                             options.progressiveInterlaceBuffer, error))
     return false;
   transport.setSyncOptions(true, options.frameDelay);
@@ -221,7 +231,6 @@ bool runGeneratedPattern(const PatternOptions& options,
       nextStats += std::chrono::seconds(5);
     }
   }
-  transport.close();
   return true;
 }
 }  // namespace mistercast

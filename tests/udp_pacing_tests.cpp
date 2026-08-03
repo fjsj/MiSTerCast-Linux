@@ -1,7 +1,3 @@
-#include <netinet/ip.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -91,10 +87,11 @@ void checkCalculationsAndMtu() {
   auto zeroRate = config;
   zeroRate.pacingBitsPerSecond = 0;
   CHECK(pacingDurationNs(1000, zeroRate) == 0);
-  CHECK(videoDatagramCount(config.payloadBytes * 32, config) == 32);
-  CHECK(videoDatagramCount(config.payloadBytes * 32 + 1, config) == 33);
-  CHECK(videoWireBytes(config.payloadBytes + 1, config) ==
-        config.payloadBytes + 1 + 2 * config.wireOverheadBytes);
+  const size_t packetBytes = config.payloadBytes;
+  CHECK(videoDatagramCount(packetBytes * 32, config) == 32);
+  CHECK(videoDatagramCount(packetBytes * 32 + 1, config) == 33);
+  CHECK(videoWireBytes(packetBytes + 1, config) ==
+        packetBytes + 1 + 2 * config.wireOverheadBytes);
   CHECK(videoDatagramCount(config.maximumFrameBytes, config) == 846);
   const auto duration = pacingDurationNs(470 * 1024, config);
   CHECK(duration > 4200000 && duration < 4300000);
@@ -106,26 +103,21 @@ void checkCalculationsAndMtu() {
   CHECK(videoDatagramCount(2401, smallerPackets) == 3);
   CHECK(videoWireBytes(2401, smallerPackets) ==
         2401 + 3 * smallerPackets.wireOverheadBytes);
+  CHECK(smallerPackets.ipv4MtuBytes() == 1228);
 
   std::string error;
-  int fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd >= 0) {
-    CHECK(configureStrictPathMtu(fd, error));
-    int mode = 0;
-    socklen_t modeSize = sizeof(mode);
-    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, &modeSize) == 0 &&
-          mode == IP_PMTUDISC_DO);
-    close(fd);
-  } else {
-    CHECK(errno == EPERM);
-  }
-  CHECK(!configureStrictPathMtu(-1, error) && !error.empty());
+  CHECK(config.ipv4MtuBytes() == 1500);
   CHECK(validatePathMtu(1500, config, error));
   CHECK(!validatePathMtu(1499, config, error) &&
         error.find("detected path MTU 1499") != std::string::npos &&
         error.find("VPN") != std::string::npos);
   CHECK(udpSendError(EMSGSIZE, "audio send", config)
             .find("MTU 1500 required") != std::string::npos);
+  CHECK(!validatePathMtu(1227, smallerPackets, error) &&
+        error.find("MTU 1228") != std::string::npos &&
+        error.find("1200-byte UDP payloads") != std::string::npos);
+  CHECK(udpSendError(EMSGSIZE, "video send", smallerPackets)
+            .find("MTU 1228 required") != std::string::npos);
 }
 
 void checkSubmissionState() {
@@ -133,7 +125,8 @@ void checkSubmissionState() {
   std::string error;
   VideoSubmissionStats stats;
 
-  TestMessages boundary32(config.payloadBytes * 32, config);
+  const size_t packetBytes = config.payloadBytes;
+  TestMessages boundary32(packetBytes * 32, config);
   FakeUdpSyscalls full32;
   CHECK(submitVideoDatagrams(-1, boundary32.messages.data(),
                              boundary32.messages.size(), 16666666, config,
@@ -141,7 +134,7 @@ void checkSubmissionState() {
   CHECK(!stats.paced && full32.releaseDeadlines.empty() &&
         stats.submittedDatagrams == 32);
 
-  TestMessages boundary33(config.payloadBytes * 32 + 17, config);
+  TestMessages boundary33(packetBytes * 32 + 17, config);
   FakeUdpSyscalls full33;
   full33.sleepLateness = 150000;
   full33.queueSamples = {100, 250};
@@ -156,7 +149,7 @@ void checkSubmissionState() {
         stats.maxReleaseLatenessNs == 150000 &&
         stats.observedQueueHighWater == 250);
 
-  TestMessages seventy(config.payloadBytes * 69 + 5, config);
+  TestMessages seventy(packetBytes * 69 + 5, config);
   FakeUdpSyscalls monotonic;
   CHECK(submitVideoDatagrams(-1, seventy.messages.data(),
                              seventy.messages.size(), 16666666, config,
@@ -164,9 +157,9 @@ void checkSubmissionState() {
   CHECK(monotonic.releaseDeadlines.size() == 2 &&
         monotonic.releaseDeadlines[1] > monotonic.releaseDeadlines[0] &&
         stats.estimatedWireNs ==
-            pacingDurationNs(config.payloadBytes * 69 + 5, config));
+            pacingDurationNs(packetBytes * 69 + 5, config));
 
-  TestMessages ten(config.payloadBytes * 9 + 7, config);
+  TestMessages ten(packetBytes * 9 + 7, config);
   FakeUdpSyscalls partial;
   partial.sendResults = {3, 7};
   CHECK(submitVideoDatagrams(-1, ten.messages.data(), ten.messages.size(),
