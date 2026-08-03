@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
     usage();
     return 2;
   }
-  AppConfig c = loadConfig(configPath());
+  AppConfig c = loadGroovyConfig(configPath());
   // Window selection is deliberately GUI-only and its transient X11 ID is not
   // persisted. Every CLI stream therefore starts from the saved monitor.
   c.source.captureMode = CaptureMode::Monitor;
@@ -192,7 +192,7 @@ int main(int argc, char** argv) {
   if (save) {
     if (c.modeline.name == "Custom") c.customModelines.push_back(c.modeline);
     std::string e;
-    if (!saveConfig(c, configPath(), e)) {
+    if (!saveGroovyConfig(c, configPath(), e)) {
       std::cerr << "Cannot save settings: " << e << "\n";
       return 1;
     }

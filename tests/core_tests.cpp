@@ -457,7 +457,7 @@ int main() {
   auto custom = Modeline::safeDefault();
   custom.name = "My preset";
   cfg.customModelines.push_back(custom);
-  CHECK(saveConfig(cfg, path, error));
+  CHECK(saveGroovyConfig(cfg, path, error));
   {
     std::ifstream saved(path);
     const std::string json((std::istreambuf_iterator<char>(saved)),
@@ -466,7 +466,7 @@ int main() {
     CHECK(json.find("windowTitle") == std::string::npos);
   }
   std::string warning;
-  auto loaded = loadConfig(path, &warning);
+  auto loaded = loadGroovyConfig(path, &warning);
   CHECK(loaded.target == cfg.target &&
         loaded.source.progressiveInterlaceBuffer &&
         loaded.source.sampling == SamplingMode::LineBlend &&
@@ -474,11 +474,34 @@ int main() {
         !loaded.source.window && warning.empty());
   CHECK(loaded.customModelines.size() == 1 &&
         loaded.customModelines[0].name == "My preset");
+  auto groovyInvalid = cfg;
+  groovyInvalid.modeline = Modeline{"1024x768", 65.0, 1024, 1048, 1184,
+                                    1344, 768, 771, 777, 806, false};
+  CHECK(!groovyInvalid.validate());
+  CHECK(!saveGroovyConfig(groovyInvalid, path, error));
+  CHECK(error == "active image exceeds Groovy_MiSTer frame buffer");
+  loaded = loadGroovyConfig(path, &warning);
+  CHECK(loaded.target == cfg.target && warning.empty());
+  {
+    std::ofstream groovyInvalidFile(path);
+    groovyInvalidFile << R"({
+  "version": 1,
+  "target": "must-not-load.local",
+  "pixelClockMHz": 65.0,
+  "hActive": 1024, "hBegin": 1048, "hEnd": 1184, "hTotal": 1344,
+  "vActive": 768, "vBegin": 771, "vEnd": 777, "vTotal": 806,
+  "interlaced": false
+})";
+  }
+  loaded = loadGroovyConfig(path, &warning);
+  CHECK(loaded.target.empty());
+  CHECK(warning.find("active image exceeds Groovy_MiSTer frame buffer") !=
+        std::string::npos);
   {
     std::ofstream f2(path);
     f2 << "broken";
   }
-  loaded = loadConfig(path, &warning);
+  loaded = loadGroovyConfig(path, &warning);
   CHECK(loaded.target.empty() && !warning.empty());
   // Top-level keys must not be shadowed by same-named keys inside
   // customModelines, whatever order the keys appear in.
@@ -498,7 +521,7 @@ int main() {
   "interlaced": false
 })";
   }
-  loaded = loadConfig(path, &warning);
+  loaded = loadGroovyConfig(path, &warning);
   CHECK(loaded.target == "real.local" && warning.empty());
   CHECK(loaded.modeline.hActive == 640 && loaded.modeline.vTotal == 525);
   CHECK(!loaded.modeline.interlaced);
@@ -509,15 +532,15 @@ int main() {
     std::ofstream invalidSampling(path);
     invalidSampling << R"({"version":1,"sampling":"area"})";
   }
-  loaded = loadConfig(path, &warning);
+  loaded = loadGroovyConfig(path, &warning);
   CHECK(loaded.source.sampling == SamplingMode::Point && !warning.empty());
   std::filesystem::remove_all(dir);
   auto audioConfigPath = std::filesystem::temp_directory_path() /
                          "mistercast-audio-config-test.json";
   AppConfig audioConfig;
   audioConfig.source.audioSink = SilentAudioSink;
-  CHECK(saveConfig(audioConfig, audioConfigPath, error));
-  auto loadedAudioConfig = loadConfig(audioConfigPath);
+  CHECK(saveGroovyConfig(audioConfig, audioConfigPath, error));
+  auto loadedAudioConfig = loadGroovyConfig(audioConfigPath);
   CHECK(loadedAudioConfig.source.audioSink == SilentAudioSink);
   std::filesystem::remove(audioConfigPath);
   if (failed) std::cerr << failed << " test(s) failed\n";

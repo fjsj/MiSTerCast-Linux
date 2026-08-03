@@ -49,7 +49,7 @@ QString stateName(SessionState state) {
 }  // namespace
 
 class MainWindow final : public QMainWindow {
-  AppConfig config_{loadConfig(configPath())};
+  AppConfig config_{loadGroovyConfig(configPath())};
   StreamSession session_;
   std::vector<Modeline> presets_;
   std::optional<CaptureWindow> selectedWindow_;
@@ -305,7 +305,7 @@ class MainWindow final : public QMainWindow {
   void saveSettings(bool announce = true) {
     configFromControls();
     std::string error;
-    if (!saveConfig(config_, configPath(), error)) {
+    if (!saveGroovyConfig(config_, configPath(), error)) {
       append("Settings: " + error);
       return;
     }
@@ -314,7 +314,7 @@ class MainWindow final : public QMainWindow {
 
   void loadSettings() {
     std::string warning;
-    config_ = loadConfig(configPath(), &warning);
+    config_ = loadGroovyConfig(configPath(), &warning);
     controlsFromConfig();
     append(warning.empty() ? "Settings loaded." : warning);
   }

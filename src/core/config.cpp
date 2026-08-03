@@ -1,4 +1,5 @@
 #include "mistercast/config.hpp"
+#include "mistercast/groovy_protocol.hpp"
 
 #include <unistd.h>
 
@@ -112,7 +113,8 @@ static bool modelineObject(const std::string& json, Modeline& modeline) {
   return !modeline.validate();
 }
 
-AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
+AppConfig loadGroovyConfig(const std::filesystem::path& path,
+                           std::string* warning) {
   AppConfig config;
   // Cleared up front so a successful load cannot leave a caller looking at the
   // warning from a previous one.
@@ -200,7 +202,7 @@ AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
       }
     }
   }
-  if (auto error = config.validate()) {
+  if (auto error = validateGroovyConfig(config)) {
     if (warning)
       *warning = "invalid config (" + *error + "); safe defaults loaded";
     return AppConfig{};
@@ -208,9 +210,9 @@ AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
   return config;
 }
 
-bool saveConfig(const AppConfig& config, const std::filesystem::path& path,
-                std::string& error) {
-  if (auto validation = config.validate()) {
+bool saveGroovyConfig(const AppConfig& config,
+                      const std::filesystem::path& path, std::string& error) {
+  if (auto validation = validateGroovyConfig(config)) {
     error = *validation;
     return false;
   }
