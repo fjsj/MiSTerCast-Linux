@@ -51,6 +51,7 @@ class MainWindow final : public QMainWindow {
   AppConfig config_{loadConfig(configPath())};
   StreamSession session_;
   std::vector<Modeline> presets_;
+  std::optional<CaptureWindow> selectedWindow_;
 
   QPushButton *streamButton_{}, *saveButton_{}, *loadButton_{},
       *applyModelineButton_{}, *chooseWindowButton_{};
@@ -82,8 +83,7 @@ class MainWindow final : public QMainWindow {
         state == SessionState::Starting || state == SessionState::Stopping;
     const bool valid = !target_->text().trimmed().isEmpty() &&
                        modelineFromControls().validate() == std::nullopt &&
-                       (captureMode_->currentIndex() == 0 ||
-                        windowSelection_->property("windowId").toUInt() != 0);
+                       (captureMode_->currentIndex() == 0 || selectedWindow_);
     streamButton_->setEnabled(!busy &&
                               (state == SessionState::Streaming || valid));
   }
@@ -116,17 +116,17 @@ class MainWindow final : public QMainWindow {
     layout->addWidget(new QLabel(
         "Select one visible X11 window. Minimized windows are unavailable."));
     auto* list = new QListWidget;
-    const auto selectedId = windowSelection_->property("windowId").toUInt();
-    for (const auto& window : windows) {
+    for (size_t index = 0; index < windows.size(); ++index) {
+      const auto& window = windows[index];
       auto* item = new QListWidgetItem(
           QString("%1  —  %2×%3")
               .arg(QString::fromStdString(window.title))
               .arg(window.width)
               .arg(window.height),
           list);
-      item->setData(Qt::UserRole, window.id);
-      item->setData(Qt::UserRole + 1, QString::fromStdString(window.title));
-      if (window.id == selectedId) list->setCurrentItem(item);
+      item->setData(Qt::UserRole, qulonglong(index));
+      if (selectedWindow_ && window.id == selectedWindow_->id)
+        list->setCurrentItem(item);
     }
     layout->addWidget(list);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
@@ -143,8 +143,8 @@ class MainWindow final : public QMainWindow {
     layout->addWidget(buttons);
     if (dialog.exec() != QDialog::Accepted || !list->currentItem()) return;
     const auto* item = list->currentItem();
-    windowSelection_->setProperty("windowId", item->data(Qt::UserRole));
-    windowSelection_->setText(item->data(Qt::UserRole + 1).toString());
+    selectedWindow_ = windows.at(item->data(Qt::UserRole).toULongLong());
+    windowSelection_->setText(QString::fromStdString(selectedWindow_->title));
     windowSelection_->setToolTip(item->text());
     captureMode_->setCurrentIndex(1);
     refreshStartEnabled();
@@ -233,9 +233,7 @@ class MainWindow final : public QMainWindow {
     config_.source.captureMode = captureMode_->currentIndex() == 1
                                      ? CaptureMode::Window
                                      : CaptureMode::Monitor;
-    config_.source.windowId =
-        windowSelection_->property("windowId").toUInt();
-    config_.source.windowTitle = windowSelection_->text().toStdString();
+    config_.source.window = selectedWindow_;
     config_.source.audioSink =
         audioSink_->currentData().toString().toStdString();
     config_.source.audio = audio_->isChecked();
@@ -263,11 +261,11 @@ class MainWindow final : public QMainWindow {
                                           CaptureMode::Window
                                       ? 1
                                       : 0);
-    windowSelection_->setProperty("windowId", config_.source.windowId);
-    windowSelection_->setText(
-        config_.source.windowTitle.empty()
-            ? QStringLiteral("No window selected")
-            : QString::fromStdString(config_.source.windowTitle));
+    selectedWindow_ = config_.source.window;
+    windowSelection_->setText(selectedWindow_
+                                  ? QString::fromStdString(selectedWindow_->title)
+                                  : QStringLiteral("No window selected"));
+    windowSelection_->setToolTip({});
     auto audioSinkIndex =
         audioSink_->findData(QString::fromStdString(config_.source.audioSink));
     if (audioSinkIndex < 0 && !config_.source.audioSink.empty()) {

@@ -101,6 +101,11 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     if (err) *err = "target address is required";
     return false;
   }
+  if (c.source.captureMode == CaptureMode::Window &&
+      (!c.source.window || !c.source.window->id)) {
+    if (err) *err = "a window must be selected for window capture";
+    return false;
+  }
   stop_ = false;
   dropped_ = captured_ = sent_ = audioDropped_ = audioUnderrun_ = audioPeak_ =
       0;
@@ -121,7 +126,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   }
   // Restrict capture to the crop up front so only the pixels that will be sent
   // are ever transferred out of the X server.
-  const auto monitor = video_->selected();
+  const auto monitor = video_->selectedGeometry();
   CropRect crop;
   std::string cropError;
   if (!calculateCrop(monitor.width, monitor.height, c.source, c.modeline, crop,
@@ -134,7 +139,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     return false;
   }
   video_->setRegion(crop);
-  cropMonitor_ = monitor;
+  cropGeometry_ = monitor;
   uint32_t rate = 48000;
   if (c.source.audio && !audio_->start(c.source.audioSink, onError)) {
     video_->stop();
@@ -233,10 +238,10 @@ void StreamSession::captureLoop() {
     // The monitor can be resized or replugged mid-stream and the modeline can
     // be switched live, either of which changes what the crop should be.
     // Recompute it rather than streaming a stale rectangle.
-    const auto monitor = video_->selected();
+    const auto monitor = video_->selectedGeometry();
     const auto generation = modelineGeneration_.load();
-    if (monitor.width != cropMonitor_.width ||
-        monitor.height != cropMonitor_.height || generation != cropGeneration) {
+    if (monitor.width != cropGeometry_.width ||
+        monitor.height != cropGeometry_.height || generation != cropGeneration) {
       {
         std::lock_guard<std::mutex> l(configMutex_);
         cropModeline = activeModeline_;
@@ -246,7 +251,7 @@ void StreamSession::captureLoop() {
       if (calculateCrop(monitor.width, monitor.height, config_.source,
                         cropModeline, crop, cropError)) {
         video_->setRegion(crop);
-        cropMonitor_ = monitor;
+        cropGeometry_ = monitor;
         cropGeneration = generation;
       }
     }

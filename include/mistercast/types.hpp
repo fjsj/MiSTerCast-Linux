@@ -28,6 +28,16 @@ enum class SessionState : uint8_t {
   Error
 };
 
+struct CaptureWindow {
+  uint32_t id{};
+  std::string title;
+  uint16_t width{}, height{};
+};
+
+struct SourceGeometry {
+  uint16_t width{}, height{};
+};
+
 struct Modeline {
   std::string name;
   double pixelClockMHz{6.7};
@@ -42,8 +52,9 @@ struct Modeline {
 struct SourceOptions {
   std::string monitor;
   CaptureMode captureMode{CaptureMode::Monitor};
-  uint32_t windowId{};
-  std::string windowTitle;
+  // X11 window IDs are runtime-only, server-scoped resources. Persist the
+  // preferred mode, but require a fresh selection after settings are loaded.
+  std::optional<CaptureWindow> window;
   std::string audioSink;
   bool syncRefresh{true}, progressiveInterlaceBuffer{false}, audio{true},
       preview{true};
@@ -78,11 +89,6 @@ struct Monitor {
   int16_t x{}, y{};
   uint16_t width{}, height{};
   bool primary{};
-};
-struct CaptureWindow {
-  uint32_t id{};
-  std::string title;
-  uint16_t width{}, height{};
 };
 struct AudioSink {
   std::string name, description;

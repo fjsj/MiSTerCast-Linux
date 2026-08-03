@@ -135,13 +135,16 @@ AppConfig loadConfig(const std::filesystem::path& path, std::string* warning) {
   stringValue(json, "target", config.target);
   stringValue(json, "monitor", config.source.monitor);
   std::string captureMode;
-  if (stringValue(json, "captureMode", captureMode))
-    config.source.captureMode = captureMode == "window" ? CaptureMode::Window
-                                                        : CaptureMode::Monitor;
-  double windowId = 0;
-  if (numberValue(json, "windowId", windowId))
-    config.source.windowId = static_cast<uint32_t>(windowId);
-  stringValue(json, "windowTitle", config.source.windowTitle);
+  if (stringValue(json, "captureMode", captureMode)) {
+    if (captureMode == "window")
+      config.source.captureMode = CaptureMode::Window;
+    else if (captureMode == "monitor")
+      config.source.captureMode = CaptureMode::Monitor;
+    else {
+      if (warning) *warning = "invalid capture mode; safe defaults loaded";
+      return AppConfig{};
+    }
+  }
   stringValue(json, "audioSink", config.source.audioSink);
   stringValue(json, "modelineName", config.modeline.name);
   auto number = [&](const char* key, auto& value) {
@@ -230,9 +233,6 @@ bool saveConfig(const AppConfig& config, const std::filesystem::path& path,
        << "  \"captureMode\": \""
        << (config.source.captureMode == CaptureMode::Window ? "window"
                                                             : "monitor")
-       << "\",\n"
-       << "  \"windowId\": " << config.source.windowId << ",\n"
-       << "  \"windowTitle\": \"" << escape(config.source.windowTitle)
        << "\",\n"
        << "  \"audioSink\": \"" << escape(config.source.audioSink) << "\",\n"
        << "  \"syncRefresh\": "

@@ -34,8 +34,11 @@ mistercast stream --target mister.local --monitor HDMI-1 --no-audio \
 Use `mistercast stream --help` for all overrides. Overrides last for that run unless `--save` is supplied. Settings are written atomically to `$XDG_CONFIG_HOME/mistercast/config.json`, or `~/.config/mistercast/config.json`. Invalid/corrupt settings fall back to the bundled 320×240 ~60 Hz preset.
 
 In the GUI, set **Source** to **Single window**, click **Choose Window…**, and
-select a visible X11 application window. The choice remains selected until it
-is changed, so streaming still begins only when **Start Stream** is pressed.
+select a visible X11 application window. The choice remains selected for the
+current run, so streaming still begins only when **Start Stream** is pressed.
+Because X11 window IDs are transient and can be reused by another application,
+the window must be selected again after restarting MiSTerCast or loading saved
+settings.
 Minimized or closed windows cannot be captured. Monitor selection is disabled
 in window mode; the normal crop, rotation, sampling, audio, and preview controls
 remain available because they operate on captured window pixels too.

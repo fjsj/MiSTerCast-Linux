@@ -69,7 +69,7 @@ class StreamSession {
   std::chrono::steady_clock::time_point startedAt_{};
   // Monitor geometry the active crop was computed for. Set before the threads
   // start, then owned by the capture thread.
-  Monitor cropMonitor_{};
+  SourceGeometry cropGeometry_{};
   // Live modeline switching. config_ stays immutable once streaming, so the
   // timings both worker threads use live here instead. The rendering thread is
   // the only writer; the capture thread notices via the generation counter and

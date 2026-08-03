@@ -25,6 +25,8 @@ class X11Capture final : public IVideoCapture {
   xcb_window_t selectedWindow_{};
   xcb_pixmap_t windowPixmap_{};
   bool windowMode_{};
+  bool windowViewable_{};
+  bool compositePixmapAvailable_{};
   Monitor selected_;
   CropRect region_{};
   ErrorCallback error_;
@@ -36,6 +38,7 @@ class X11Capture final : public IVideoCapture {
   xcb_shm_seg_t shmSeg_{};
   size_t shmSize_{};
   bool useShm_{};
+  bool shmAttempted_{};
   // Pixel layout of the root visual, resolved once at start() instead of
   // rescanning every visual and pixmap format on every captured frame.
   uint32_t redMask_{0xff0000}, greenMask_{0xff00}, blueMask_{0xff};
@@ -87,6 +90,11 @@ class X11Capture final : public IVideoCapture {
       xcb_free_pixmap(connection_, windowPixmap_);
     windowPixmap_ = 0;
   }
+  void invalidateWindowDrawable() {
+    closeWindowPixmap();
+    drawable_ = 0;
+    windowViewable_ = false;
+  }
   void close() {
     closeShm();
     closeWindowPixmap();
@@ -95,6 +103,10 @@ class X11Capture final : public IVideoCapture {
       connection_ = nullptr;
       screen_ = nullptr;
     }
+    drawable_ = 0;
+    windowViewable_ = false;
+    compositePixmapAvailable_ = false;
+    shmAttempted_ = false;
   }
   bool connect(std::string& error) {
     if (connection_) return true;
@@ -120,10 +132,20 @@ class X11Capture final : public IVideoCapture {
       error = "X11 display has no screen";
       return false;
     }
+    const auto* composite =
+        xcb_get_extension_data(connection_, &xcb_composite_id);
+    if (composite && composite->present) {
+      auto* version = xcb_composite_query_version_reply(
+          connection_, xcb_composite_query_version(connection_, 0, 4), nullptr);
+      compositePixmapAvailable_ =
+          version && (version->major_version > 0 || version->minor_version >= 2);
+      free(version);
+    }
     return true;
   }
 
   bool setupShm() {
+    shmAttempted_ = true;
     auto version = xcb_shm_query_version_reply(
         connection_, xcb_shm_query_version(connection_), nullptr);
     if (!version) return false;
@@ -144,12 +166,13 @@ class X11Capture final : public IVideoCapture {
     if (!useShm_) closeShm();
     return useShm_;
   }
-  // Re-resolves the display and the selected monitor after a failed capture. A
-  // monitor can be resized, rotated, or replugged mid-stream, which invalidates
-  // the cached geometry and the shared segment; recovering here keeps the
-  // stream alive instead of ending the session on a transient fault.
+  // Re-resolves the selected source after a failed capture or periodic window
+  // check. Geometry changes invalidate the drawable and shared segment;
+  // recovering here keeps transient changes from ending the session.
   bool recoverLocked() {
-    if (connection_ && xcb_connection_has_error(connection_)) close();
+    const bool connectionLost =
+        connection_ && xcb_connection_has_error(connection_);
+    if (connectionLost) close();
     if (windowMode_) {
       std::string ignored;
       if (!connect(ignored)) return false;
@@ -162,14 +185,17 @@ class X11Capture final : public IVideoCapture {
           attributes->map_state != XCB_MAP_STATE_VIEWABLE) {
         free(geometry);
         free(attributes);
+        invalidateWindowDrawable();
         return false;
       }
       const bool resized = geometry->width != selected_.width ||
                            geometry->height != selected_.height;
+      const bool remapped = !windowViewable_;
+      windowViewable_ = true;
       selected_.width = geometry->width;
       selected_.height = geometry->height;
       selected_.x = selected_.y = 0;
-      if (resized || !windowPixmap_) {
+      if (compositePixmapAvailable_ && (resized || remapped)) {
         closeWindowPixmap();
         const auto pixmap = xcb_generate_id(connection_);
         auto* pixmapError = xcb_request_check(
@@ -183,10 +209,11 @@ class X11Capture final : public IVideoCapture {
       // where the window is not redirected (for example, no compositor).
       drawable_ = windowPixmap_ ? windowPixmap_ : selectedWindow_;
       region_ = clampRegion(region_);
-      if (resized || !useShm_ || !shmData_) {
+      if (resized) {
         closeShm();
         setupShm();
-      }
+      } else if (!shmAttempted_)
+        setupShm();
       resolvePixelFormat(geometry->depth, attributes->visual);
       free(geometry);
       free(attributes);
@@ -204,11 +231,12 @@ class X11Capture final : public IVideoCapture {
     selected_ = *it;
     drawable_ = screen_->root;
     region_ = clampRegion(region_);
-    if (moved || !useShm_ || !shmData_) {
+    if (moved || connectionLost) {
       closeShm();
       setupShm();
       resolvePixelFormat(screen_ ? screen_->root_depth : depth_);
-    }
+    } else if (!shmAttempted_)
+      setupShm();
     return true;
   }
   std::vector<Monitor> monitorsLocked(std::string& error) {
@@ -247,23 +275,10 @@ class X11Capture final : public IVideoCapture {
     return result;
   }
 
-  std::string windowTitle(xcb_window_t window, xcb_atom_t netName,
-                          xcb_atom_t utf8) {
-    auto read = [&](xcb_atom_t property, xcb_atom_t type) {
-      auto* reply = xcb_get_property_reply(
-          connection_, xcb_get_property(connection_, 0, window, property, type,
-                                        0, 1024),
-          nullptr);
-      std::string result;
-      if (reply && xcb_get_property_value_length(reply) > 0)
-        result.assign(static_cast<const char*>(xcb_get_property_value(reply)),
-                      xcb_get_property_value_length(reply));
-      free(reply);
-      return result;
-    };
-    auto title = netName ? read(netName, utf8) : std::string{};
-    if (title.empty()) title = read(XCB_ATOM_WM_NAME, XCB_ATOM_STRING);
-    return title;
+  static std::string propertyString(const xcb_get_property_reply_t* reply) {
+    if (!reply || xcb_get_property_value_length(reply) <= 0) return {};
+    return {static_cast<const char*>(xcb_get_property_value(reply)),
+            size_t(xcb_get_property_value_length(reply))};
   }
 
   std::vector<CaptureWindow> windowsLocked(std::string& error) {
@@ -294,31 +309,63 @@ class X11Capture final : public IVideoCapture {
         free(tree);
       }
     }
-    std::vector<CaptureWindow> result;
+    // XCB requests are asynchronous. Issue every per-window query first so
+    // discovery costs one server round trip instead of four or five per window;
+    // this function is called synchronously by the Qt window chooser.
+    struct WindowQueries {
+      xcb_window_t id;
+      xcb_get_window_attributes_cookie_t attributes;
+      xcb_get_geometry_cookie_t geometry;
+      xcb_get_property_cookie_t pid;
+      xcb_get_property_cookie_t netName;
+      xcb_get_property_cookie_t wmName;
+    };
+    std::vector<WindowQueries> queries;
+    queries.reserve(ids.size());
     for (const auto id : ids) {
+      queries.push_back(
+          {id,
+           xcb_get_window_attributes(connection_, id),
+           xcb_get_geometry(connection_, id),
+           pidAtom ? xcb_get_property(connection_, 0, id, pidAtom,
+                                      XCB_ATOM_CARDINAL, 0, 1)
+                   : xcb_get_property_cookie_t{},
+           netName ? xcb_get_property(connection_, 0, id, netName, utf8, 0, 1024)
+                   : xcb_get_property_cookie_t{},
+           xcb_get_property(connection_, 0, id, XCB_ATOM_WM_NAME,
+                            XCB_ATOM_STRING, 0, 1024)});
+    }
+    std::vector<CaptureWindow> result;
+    result.reserve(queries.size());
+    for (const auto& query : queries) {
       auto* attributes = xcb_get_window_attributes_reply(
-          connection_, xcb_get_window_attributes(connection_, id), nullptr);
-      auto* geometry = xcb_get_geometry_reply(
-          connection_, xcb_get_geometry(connection_, id), nullptr);
+          connection_, query.attributes, nullptr);
+      auto* geometry =
+          xcb_get_geometry_reply(connection_, query.geometry, nullptr);
+      auto* pid = pidAtom
+                      ? xcb_get_property_reply(connection_, query.pid, nullptr)
+                      : nullptr;
+      auto* netTitle = netName ? xcb_get_property_reply(connection_, query.netName,
+                                                        nullptr)
+                               : nullptr;
+      auto* wmTitle =
+          xcb_get_property_reply(connection_, query.wmName, nullptr);
       bool ownWindow = false;
-      if (pidAtom) {
-        auto* pid = xcb_get_property_reply(
-            connection_, xcb_get_property(connection_, 0, id, pidAtom,
-                                          XCB_ATOM_CARDINAL, 0, 1),
-            nullptr);
-        if (pid && xcb_get_property_value_length(pid) == sizeof(uint32_t))
-          ownWindow = *static_cast<uint32_t*>(xcb_get_property_value(pid)) ==
-                      static_cast<uint32_t>(getpid());
-        free(pid);
-      }
-      auto title = windowTitle(id, netName, utf8);
+      if (pid && xcb_get_property_value_length(pid) == sizeof(uint32_t))
+        ownWindow = *static_cast<uint32_t*>(xcb_get_property_value(pid)) ==
+                    static_cast<uint32_t>(getpid());
+      auto title = propertyString(netTitle);
+      if (title.empty()) title = propertyString(wmTitle);
       if (attributes && geometry && !ownWindow && !title.empty() &&
           attributes->map_state == XCB_MAP_STATE_VIEWABLE && geometry->width &&
           geometry->height)
-        result.push_back({id, std::move(title), geometry->width,
+        result.push_back({query.id, std::move(title), geometry->width,
                           geometry->height});
       free(attributes);
       free(geometry);
+      free(pid);
+      free(netTitle);
+      free(wmTitle);
     }
     std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
       return a.title < b.title;
@@ -344,9 +391,16 @@ class X11Capture final : public IVideoCapture {
         if (cb) cb({"video", e, "Log into an Xorg session and set DISPLAY."});
         return false;
       }
-      selectedWindow_ = source.windowId;
-      selected_.name = source.windowTitle;
+      if (!source.window || !source.window->id) {
+        if (cb)
+          cb({"video", "no window was selected",
+              "Choose an open, visible window and try again."});
+        return false;
+      }
+      selectedWindow_ = source.window->id;
+      selected_.name = source.window->title;
       windowMode_ = true;
+      windowViewable_ = false;
       error_ = std::move(cb);
       if (!recoverLocked()) {
         if (error_)
@@ -382,6 +436,7 @@ class X11Capture final : public IVideoCapture {
     drawable_ = screen_->root;
     selectedWindow_ = 0;
     windowMode_ = false;
+    windowViewable_ = false;
     region_ = {0, 0, selected_.width, selected_.height};
     error_ = std::move(cb);
     resolvePixelFormat(screen_->root_depth);
@@ -390,9 +445,9 @@ class X11Capture final : public IVideoCapture {
     running_ = true;
     return true;
   }
-  Monitor selected() const override {
+  SourceGeometry selectedGeometry() const override {
     std::lock_guard<std::mutex> l(mutex_);
-    return selected_;
+    return {selected_.width, selected_.height};
   }
   void setRegion(const CropRect& region) override {
     std::lock_guard<std::mutex> l(mutex_);
@@ -407,7 +462,7 @@ class X11Capture final : public IVideoCapture {
     // synchronous X11 round-trip to every captured frame.
     if (windowMode_ && ++windowGeometryPoll_ >= 30) {
       windowGeometryPoll_ = 0;
-      recoverLocked();
+      if (!recoverLocked()) return captureFailedLocked();
     }
     if (captureLocked(out)) {
       consecutiveFailures_ = 0;
@@ -419,6 +474,9 @@ class X11Capture final : public IVideoCapture {
     // transient fault costs frames instead of the whole session; only a fault
     // that persists for roughly two seconds is reported as fatal.
     recoverLocked();
+    return captureFailedLocked();
+  }
+  bool captureFailedLocked() {
     if (++consecutiveFailures_ >= kMaxConsecutiveFailures) {
       running_ = false;
       if (error_)
