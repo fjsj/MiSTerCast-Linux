@@ -1,6 +1,6 @@
 # MiSTerCast for Linux
 
-MiSTerCast captures an X11 monitor, converts it to a selected low-resolution modeline, and streams video and system audio to the unmodified Groovy_MiSTer core over UDP port 32100.
+MiSTerCast captures an X11 monitor or individual application window, converts it to a selected low-resolution modeline, and streams video and system audio to the unmodified Groovy_MiSTer core over UDP port 32100.
 
 The first Linux release supports Ubuntu 22.04 x86-64 under **X11/Xorg only**. Native Wayland capture is intentionally unsupported. An XWayland display is usable only when it exposes the desktop content; otherwise log into an “Ubuntu on Xorg” session. The application does not discover a MiSTer: enter its IPv4 address or hostname explicitly.
 
@@ -10,7 +10,7 @@ Install Ninja, CMake, a C++17 compiler, Qt 6, XCB/RandR/SHM, PulseAudio, and LZ4
 
 ```sh
 sudo apt install build-essential cmake ninja-build qt6-base-dev \
-  libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev
+  libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -32,6 +32,13 @@ mistercast stream --target mister.local --monitor HDMI-1 --no-audio \
 ```
 
 Use `mistercast stream --help` for all overrides. Overrides last for that run unless `--save` is supplied. Settings are written atomically to `$XDG_CONFIG_HOME/mistercast/config.json`, or `~/.config/mistercast/config.json`. Invalid/corrupt settings fall back to the bundled 320×240 ~60 Hz preset.
+
+In the GUI, set **Source** to **Single window**, click **Choose Window…**, and
+select a visible X11 application window. The choice remains selected until it
+is changed, so streaming still begins only when **Start Stream** is pressed.
+Minimized or closed windows cannot be captured. Monitor selection is disabled
+in window mode; the normal crop, rotation, sampling, audio, and preview controls
+remain available because they operate on captured window pixels too.
 
 ### Settings reference
 
@@ -107,10 +114,10 @@ This repository is a Linux replacement, not a cross-platform continuation of the
 
 | Area | Linux implementation | Legacy Windows implementation in repository history |
 | --- | --- | --- |
-| Desktop capture | X11/Xorg through XCB, preferring MIT-SHM with `xcb_get_image` fallback | DXGI Desktop Duplication/D3D11 |
+| Desktop/window capture | X11/Xorg through XCB and XComposite, preferring MIT-SHM with `xcb_get_image` fallback | DXGI Desktop Duplication/D3D11 |
 | User interface | Optional Qt 6 GUI plus a headless CLI | WPF frontend calling a native DLL |
 | Audio | PulseAudio or `pipewire-pulse` default-sink monitor | WASAPI shared-mode loopback of the default render endpoint |
-| Monitor selection | RandR monitor name within the selected `$DISPLAY`/screen | Numeric DXGI output index |
+| Source selection | RandR monitor name or visible X11 application window within the selected `$DISPLAY`/screen | Numeric DXGI output index |
 | Platform support | Ubuntu 22.04 x86-64 under Xorg; no native Wayland path | Windows only |
 | `syncRefresh` | Defaults to `true`, is persisted, and controls ACK/raster deadline correction; currently editable only in JSON | Hard-coded `true` and not exposed by the WPF/native interop API; it mainly guarded first-frame timing initialization |
 | `frameDelay` | Defaults to automatic `0`; GUI, CLI, and JSON configurable | Initialized to automatic `0` and not exposed by the legacy frontend interop |

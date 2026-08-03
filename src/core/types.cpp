@@ -36,6 +36,8 @@ Modeline Modeline::safeDefault() {
           false};
 }
 std::optional<std::string> SourceOptions::validate() const {
+  if (captureMode == CaptureMode::Window && !windowId)
+    return "a window must be selected for window capture";
   if (!width || !height || width > 8192 || height > 8192)
     return "source size must be between 1 and 8192 pixels";
   if (frameDelay > 10) return "frame delay must be automatic (0) or 1-10";

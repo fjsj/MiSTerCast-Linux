@@ -19,6 +19,7 @@ enum class Alignment : uint8_t {
 enum class CropMode : uint8_t { Custom, X1, X2, X3, X4, X5, Full43, Full54 };
 enum class Rotation : uint8_t { None, CW90, CCW90, Flip180 };
 enum class SamplingMode : uint8_t { Point, Bilinear, LineBlend };
+enum class CaptureMode : uint8_t { Monitor, Window };
 enum class SessionState : uint8_t {
   Idle,
   Starting,
@@ -40,6 +41,9 @@ struct Modeline {
 
 struct SourceOptions {
   std::string monitor;
+  CaptureMode captureMode{CaptureMode::Monitor};
+  uint32_t windowId{};
+  std::string windowTitle;
   std::string audioSink;
   bool syncRefresh{true}, progressiveInterlaceBuffer{false}, audio{true},
       preview{true};
@@ -74,6 +78,11 @@ struct Monitor {
   int16_t x{}, y{};
   uint16_t width{}, height{};
   bool primary{};
+};
+struct CaptureWindow {
+  uint32_t id{};
+  std::string title;
+  uint16_t width{}, height{};
 };
 struct AudioSink {
   std::string name, description;

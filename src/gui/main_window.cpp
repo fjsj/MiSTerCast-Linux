@@ -2,6 +2,8 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -11,6 +13,7 @@
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QMessageBox>
+#include <QListWidget>
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -50,17 +53,17 @@ class MainWindow final : public QMainWindow {
   std::vector<Modeline> presets_;
 
   QPushButton *streamButton_{}, *saveButton_{}, *loadButton_{},
-      *applyModelineButton_{};
+      *applyModelineButton_{}, *chooseWindowButton_{};
   QLineEdit* target_{};
-  QComboBox *monitor_{}, *audioSink_{}, *preset_{}, *crop_{}, *alignment_{},
-      *rotation_{}, *sampling_{};
+  QComboBox *captureMode_{}, *monitor_{}, *audioSink_{}, *preset_{}, *crop_{},
+      *alignment_{}, *rotation_{}, *sampling_{};
   QDoubleSpinBox* pixelClock_{};
   QSpinBox *hActive_{}, *hBegin_{}, *hEnd_{}, *hTotal_{};
   QSpinBox *vActive_{}, *vBegin_{}, *vEnd_{}, *vTotal_{};
   QSpinBox *width_{}, *height_{}, *xOffset_{}, *yOffset_{}, *frameDelay_{};
   QCheckBox *interlaced_{}, *progressiveInterlaceBuffer_{}, *audio_{},
       *preview_{};
-  QLabel *previewImage_{}, *status_{};
+  QLabel *windowSelection_{}, *previewImage_{}, *status_{};
   QPlainTextEdit* log_{};
   std::vector<QWidget*> streamLockedControls_;
   QTimer statsTimer_, modelineApplyTimer_;
@@ -78,7 +81,9 @@ class MainWindow final : public QMainWindow {
     const bool busy =
         state == SessionState::Starting || state == SessionState::Stopping;
     const bool valid = !target_->text().trimmed().isEmpty() &&
-                       modelineFromControls().validate() == std::nullopt;
+                       modelineFromControls().validate() == std::nullopt &&
+                       (captureMode_->currentIndex() == 0 ||
+                        windowSelection_->property("windowId").toUInt() != 0);
     streamButton_->setEnabled(!busy &&
                               (state == SessionState::Streaming || valid));
   }
@@ -87,10 +92,62 @@ class MainWindow final : public QMainWindow {
     const bool enabled =
         state == SessionState::Idle || state == SessionState::Error;
     for (auto* control : streamLockedControls_) control->setEnabled(enabled);
+    const bool windowMode = captureMode_->currentIndex() == 1;
+    monitor_->setEnabled(enabled && !windowMode);
+    chooseWindowButton_->setEnabled(enabled && windowMode);
     if (enabled) audioSink_->setEnabled(audio_->isChecked());
     // Interlace buffering tracks the interlaced flag whether or not a stream is
     // running, because timings are now switched live.
     progressiveInterlaceBuffer_->setEnabled(interlaced_->isChecked());
+  }
+
+  void chooseWindow() {
+    std::string error;
+    auto capture = makeX11Capture();
+    const auto windows = capture->windows(error);
+    if (!error.empty()) {
+      append("Windows: " + error);
+      return;
+    }
+    QDialog dialog(this);
+    dialog.setWindowTitle("Choose a window to share");
+    dialog.resize(560, 420);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(
+        "Select one visible X11 window. Minimized windows are unavailable."));
+    auto* list = new QListWidget;
+    const auto selectedId = windowSelection_->property("windowId").toUInt();
+    for (const auto& window : windows) {
+      auto* item = new QListWidgetItem(
+          QString("%1  —  %2×%3")
+              .arg(QString::fromStdString(window.title))
+              .arg(window.width)
+              .arg(window.height),
+          list);
+      item->setData(Qt::UserRole, window.id);
+      item->setData(Qt::UserRole + 1, QString::fromStdString(window.title));
+      if (window.id == selectedId) list->setCurrentItem(item);
+    }
+    layout->addWidget(list);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
+                                         QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(list->currentItem());
+    connect(list, &QListWidget::currentItemChanged, &dialog,
+            [buttons](QListWidgetItem* current) {
+              buttons->button(QDialogButtonBox::Ok)->setEnabled(current);
+            });
+    connect(list, &QListWidget::itemDoubleClicked, &dialog,
+            [&dialog](QListWidgetItem*) { dialog.accept(); });
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted || !list->currentItem()) return;
+    const auto* item = list->currentItem();
+    windowSelection_->setProperty("windowId", item->data(Qt::UserRole));
+    windowSelection_->setText(item->data(Qt::UserRole + 1).toString());
+    windowSelection_->setToolTip(item->text());
+    captureMode_->setCurrentIndex(1);
+    refreshStartEnabled();
   }
 
   // Editing timings fires a change per field, so the live switch is debounced
@@ -173,6 +230,12 @@ class MainWindow final : public QMainWindow {
   void configFromControls() {
     config_.target = target_->text().trimmed().toStdString();
     config_.source.monitor = monitor_->currentText().toStdString();
+    config_.source.captureMode = captureMode_->currentIndex() == 1
+                                     ? CaptureMode::Window
+                                     : CaptureMode::Monitor;
+    config_.source.windowId =
+        windowSelection_->property("windowId").toUInt();
+    config_.source.windowTitle = windowSelection_->text().toStdString();
     config_.source.audioSink =
         audioSink_->currentData().toString().toStdString();
     config_.source.audio = audio_->isChecked();
@@ -196,6 +259,15 @@ class MainWindow final : public QMainWindow {
     auto monitorIndex =
         monitor_->findText(QString::fromStdString(config_.source.monitor));
     if (monitorIndex >= 0) monitor_->setCurrentIndex(monitorIndex);
+    captureMode_->setCurrentIndex(config_.source.captureMode ==
+                                          CaptureMode::Window
+                                      ? 1
+                                      : 0);
+    windowSelection_->setProperty("windowId", config_.source.windowId);
+    windowSelection_->setText(
+        config_.source.windowTitle.empty()
+            ? QStringLiteral("No window selected")
+            : QString::fromStdString(config_.source.windowTitle));
     auto audioSinkIndex =
         audioSink_->findData(QString::fromStdString(config_.source.audioSink));
     if (audioSinkIndex < 0 && !config_.source.audioSink.empty()) {
@@ -221,6 +293,7 @@ class MainWindow final : public QMainWindow {
         preset_->findText(QString::fromStdString(config_.modeline.name));
     if (presetIndex >= 0) preset_->setCurrentIndex(presetIndex);
     setModelineControls(config_.modeline);
+    refreshConfigurationEnabled(session_.state());
   }
 
   void saveSettings(bool announce = true) {
@@ -418,7 +491,12 @@ class MainWindow final : public QMainWindow {
     auto* sourceLayout = new QHBoxLayout(sourceBox);
     auto* sourceControls = new QWidget;
     auto* sourceGrid = new QGridLayout(sourceControls);
+    captureMode_ = new QComboBox;
+    captureMode_->addItems({"Entire monitor", "Single window"});
     monitor_ = new QComboBox;
+    chooseWindowButton_ = new QPushButton("Choose Window…");
+    windowSelection_ = new QLabel("No window selected");
+    windowSelection_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     audioSink_ = new QComboBox;
     crop_ = new QComboBox;
     alignment_ = new QComboBox;
@@ -450,29 +528,33 @@ class MainWindow final : public QMainWindow {
         "payload and may add latency.");
     audio_ = new QCheckBox("Enable Audio");
     preview_ = new QCheckBox("Enable Preview");
-    sourceGrid->addWidget(new QLabel("Monitor"), 0, 0);
-    sourceGrid->addWidget(monitor_, 0, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Audio output"), 1, 0);
-    sourceGrid->addWidget(audioSink_, 1, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Crop"), 2, 0);
-    sourceGrid->addWidget(crop_, 2, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Alignment"), 3, 0);
-    sourceGrid->addWidget(alignment_, 3, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Rotation"), 4, 0);
-    sourceGrid->addWidget(rotation_, 4, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Sampling"), 5, 0);
-    sourceGrid->addWidget(sampling_, 5, 1, 1, 2);
-    sourceGrid->addWidget(new QLabel("Size"), 6, 0);
-    sourceGrid->addWidget(width_, 6, 1);
-    sourceGrid->addWidget(height_, 6, 2);
-    sourceGrid->addWidget(new QLabel("Offset"), 7, 0);
-    sourceGrid->addWidget(xOffset_, 7, 1);
-    sourceGrid->addWidget(yOffset_, 7, 2);
-    sourceGrid->addWidget(new QLabel("Frame delay"), 8, 0);
-    sourceGrid->addWidget(frameDelay_, 8, 1, 1, 2);
-    sourceGrid->addWidget(progressiveInterlaceBuffer_, 9, 0, 1, 3);
-    sourceGrid->addWidget(audio_, 10, 0, 1, 3);
-    sourceGrid->addWidget(preview_, 11, 0, 1, 3);
+    sourceGrid->addWidget(new QLabel("Source"), 0, 0);
+    sourceGrid->addWidget(captureMode_, 0, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Monitor"), 1, 0);
+    sourceGrid->addWidget(monitor_, 1, 1, 1, 2);
+    sourceGrid->addWidget(chooseWindowButton_, 2, 0);
+    sourceGrid->addWidget(windowSelection_, 2, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Audio output"), 3, 0);
+    sourceGrid->addWidget(audioSink_, 3, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Crop"), 4, 0);
+    sourceGrid->addWidget(crop_, 4, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Alignment"), 5, 0);
+    sourceGrid->addWidget(alignment_, 5, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Rotation"), 6, 0);
+    sourceGrid->addWidget(rotation_, 6, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Sampling"), 7, 0);
+    sourceGrid->addWidget(sampling_, 7, 1, 1, 2);
+    sourceGrid->addWidget(new QLabel("Size"), 8, 0);
+    sourceGrid->addWidget(width_, 8, 1);
+    sourceGrid->addWidget(height_, 8, 2);
+    sourceGrid->addWidget(new QLabel("Offset"), 9, 0);
+    sourceGrid->addWidget(xOffset_, 9, 1);
+    sourceGrid->addWidget(yOffset_, 9, 2);
+    sourceGrid->addWidget(new QLabel("Frame delay"), 10, 0);
+    sourceGrid->addWidget(frameDelay_, 10, 1, 1, 2);
+    sourceGrid->addWidget(progressiveInterlaceBuffer_, 11, 0, 1, 3);
+    sourceGrid->addWidget(audio_, 12, 0, 1, 3);
+    sourceGrid->addWidget(preview_, 13, 0, 1, 3);
     sourceGrid->setColumnStretch(1, 1);
     sourceGrid->setColumnStretch(2, 1);
     sourceLayout->addWidget(sourceControls, 1);
@@ -527,7 +609,8 @@ class MainWindow final : public QMainWindow {
 
     // Timings stay editable while streaming: they are switched live, as the
     // Windows GUI did, which locked only the capture source and audio.
-    streamLockedControls_ = {loadButton_, target_,    monitor_,  audioSink_,
+    streamLockedControls_ = {loadButton_, target_, captureMode_, monitor_,
+                             chooseWindowButton_, audioSink_,
                              crop_,       alignment_, rotation_, sampling_,
                              width_,
                              height_,     xOffset_,   yOffset_,  frameDelay_,
@@ -566,6 +649,12 @@ class MainWindow final : public QMainWindow {
     });
     connect(target_, &QLineEdit::textChanged, this,
             [this] { refreshStartEnabled(); });
+    connect(captureMode_, &QComboBox::currentIndexChanged, this, [this] {
+      refreshConfigurationEnabled(session_.state());
+      refreshStartEnabled();
+    });
+    connect(chooseWindowButton_, &QPushButton::clicked, this,
+            [this] { chooseWindow(); });
     connect(preview_, &QCheckBox::toggled, this, [this](bool enabled) {
       if (!enabled) {
         previewImage_->setPixmap({});

@@ -7,7 +7,7 @@ jobs:
       matrix: {build_type: [Debug, Release]}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build qt6-base-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev xvfb
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build qt6-base-dev libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev xvfb
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
@@ -20,6 +20,6 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
       - run: cmake --build build && ctest --test-dir build --output-on-failure

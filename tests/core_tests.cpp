@@ -397,7 +397,7 @@ class FakeVideo final : public IVideoCapture {
     return m;
   }
   std::vector<Monitor> monitors(std::string&) override { return {geometry()}; }
-  bool start(const std::string&, ErrorCallback) override { return true; }
+  bool start(const SourceOptions&, ErrorCallback) override { return true; }
   Monitor selected() const override { return geometry(); }
   void setRegion(const CropRect& r) override {
     std::lock_guard<std::mutex> l(mutex);
@@ -716,6 +716,9 @@ int main() {
   cfg.target = "mister.local";
   cfg.source.progressiveInterlaceBuffer = true;
   cfg.source.sampling = SamplingMode::LineBlend;
+  cfg.source.captureMode = CaptureMode::Window;
+  cfg.source.windowId = 12345;
+  cfg.source.windowTitle = "Example window";
   auto custom = Modeline::safeDefault();
   custom.name = "My preset";
   cfg.customModelines.push_back(custom);
@@ -724,7 +727,10 @@ int main() {
   auto loaded = loadConfig(path, &warning);
   CHECK(loaded.target == cfg.target &&
         loaded.source.progressiveInterlaceBuffer &&
-        loaded.source.sampling == SamplingMode::LineBlend && warning.empty());
+        loaded.source.sampling == SamplingMode::LineBlend &&
+        loaded.source.captureMode == CaptureMode::Window &&
+        loaded.source.windowId == 12345 &&
+        loaded.source.windowTitle == "Example window" && warning.empty());
   CHECK(loaded.customModelines.size() == 1 &&
         loaded.customModelines[0].name == "My preset");
   {

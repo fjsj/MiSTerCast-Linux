@@ -84,6 +84,7 @@ int main(int argc, char** argv) {
       if (!value(i, argc, argv, c.target)) return 2;
     } else if (a == "--monitor") {
       if (!value(i, argc, argv, c.source.monitor)) return 2;
+      c.source.captureMode = CaptureMode::Monitor;
     } else if (a == "--modeline") {
       if (!value(i, argc, argv, x)) return 2;
       std::string e;

@@ -114,7 +114,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   }
   setState(SessionState::Starting);
   auto onError = [this](SessionError e) { fail(std::move(e)); };
-  if (!video_->start(c.source.monitor, onError)) {
+  if (!video_->start(c.source, onError)) {
     if (err) *err = "video capture initialization failed";
     setState(SessionState::Error);
     return false;
@@ -130,7 +130,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     if (err) *err = cropError;
     setState(SessionState::Error,
              SessionError{"video", cropError,
-                          "Check the crop size, offsets, and monitor."});
+                          "Check the crop size, offsets, and capture source."});
     return false;
   }
   video_->setRegion(crop);
@@ -308,7 +308,7 @@ void StreamSession::renderLoop() {
                                       [&] { return stop_ || frameReady_; })) {
         l.unlock();
         fail({"video", "no frame was captured within 5 seconds",
-              "Check the monitor selection and X11 session."});
+              "Check the selected source and X11 session."});
         break;
       }
       if (stop_) break;
