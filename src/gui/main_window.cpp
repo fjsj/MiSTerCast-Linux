@@ -418,13 +418,15 @@ class MainWindow final : public QMainWindow {
     transportStatus_->setToolTip(
         QString("Raster correction: %1 µs\nCompression/submission/wire: "
                 "%2/%3/%4 µs\nUDP queue peak: %5 of %6 bytes\n"
-                "Paced payloads/datagrams: %7/%8\nMaximum batch lateness: %9 µs")
+                "Path MTU: %7 bytes\nPaced payloads/datagrams: %8/%9\n"
+                "Maximum batch lateness: %10 µs")
             .arg(stats.transport.rasterCorrectionUs)
             .arg(stats.transport.compressionTimeUs)
             .arg(stats.transport.submissionTimeUs)
             .arg(stats.transport.estimatedWireTimeUs)
             .arg(stats.transport.observedUdpQueueHighWater)
             .arg(stats.transport.socketSendBufferBytes)
+            .arg(stats.transport.pathMtu)
             .arg(stats.transport.pacedVideoPayloads)
             .arg(stats.transport.pacedDatagrams)
             .arg(stats.transport.maxBatchReleaseLatenessNs / 1000));

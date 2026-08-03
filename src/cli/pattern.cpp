@@ -45,7 +45,8 @@ void printStats(std::ostream& output, const GroovyTransportStats& stats) {
          << (stats.vgaFrameskip ? "/fallback" : "") << ", queue "
          << (stats.vramQueuePresent ? "ready" : "empty") << ", unhealthy "
          << stats.fpgaFallbackSamples << "/" << stats.vramUnsyncedSamples
-         << "/" << stats.vramQueueEmptySamples << ", UDP peak "
+         << "/" << stats.vramQueueEmptySamples << ", MTU " << stats.pathMtu
+         << ", UDP peak "
          << stats.observedUdpQueueHighWater << " B, late "
          << stats.lateBatchReleases << " (max "
          << stats.maxBatchReleaseLatenessNs / 1000 << " us)\n";
@@ -169,7 +170,8 @@ bool runGeneratedPattern(const PatternOptions& options,
                          const std::atomic<bool>& stop, std::ostream& status,
                          std::string& error) {
   GroovyTransport transport;
-  if (!transport.open(options.target, options.tone, kToneRate, error) ||
+  if (!transport.open(options.target, options.tone, kToneRate, error,
+                      options.port) ||
       !transport.switchMode(options.modeline,
                             options.progressiveInterlaceBuffer, error))
     return false;

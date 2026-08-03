@@ -86,6 +86,8 @@ The CLI reports the requested sync line, current raster line, sender/FPGA frame 
 
 Video payloads larger than 32 UDP datagrams are released in batches of at most 32 at an average 950 Mb/s. The schedule charges each datagram's actual payload plus Ethernet/IP/UDP wire overhead, including a short final datagram. Commands and audio remain immediate. Positive partial submissions and temporary socket pressure are completed within the calculated wire duration plus a 5–100 ms modeline-derived grace period; failure after a blit command is fatal because another protocol command would otherwise be consumed as unfinished frame data. Status calls the `TIOCOUTQ` result an observed UDP queue high-water because Linux socket accounting is not exact wire-byte accounting.
 
+Every IPv4 candidate is configured with strict path-MTU enforcement (`IP_PMTUDISC_DO`) before any protocol command is sent. A known connected-route MTU below 1500 is rejected because the fixed 1472-byte UDP payload requires a 1500-byte IPv4 packet; later `EMSGSIZE` errors are reported as path-MTU failures rather than generic send errors. MiSTerCast intentionally does not introduce a second payload size or rely on IPv4 fragmentation. Tunnel, VPN, and interface MTU settings are the usual causes of a rejected route.
+
 For repeatable CPU comparisons, explicitly build and run the optional transform benchmark:
 
 ```sh

@@ -21,6 +21,9 @@ size_t videoDatagramCount(size_t payloadBytes) noexcept;
 uint64_t videoWireBytes(size_t payloadBytes) noexcept;
 uint64_t pacingDurationNs(size_t payloadBytes, uint64_t bitsPerSecond) noexcept;
 uint64_t videoCompletionGraceNs(uint64_t framePeriodNs) noexcept;
+bool configureStrictPathMtu(int fd, std::string& error) noexcept;
+bool validatePathMtu(uint32_t pathMtu, std::string& error) noexcept;
+std::string udpSendError(int errorNumber, const char* operation);
 
 class UdpSubmitSyscalls {
  public:

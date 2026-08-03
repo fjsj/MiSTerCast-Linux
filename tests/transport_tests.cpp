@@ -1,3 +1,7 @@
+#include <netinet/ip.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -292,6 +296,26 @@ void checkPacingCalculations() {
   CHECK(videoCompletionGraceNs(1000000) == 5000000);
   CHECK(videoCompletionGraceNs(16666666) == 8333333);
   CHECK(videoCompletionGraceNs(10000000000) == 100000000);
+
+  std::string error;
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd >= 0) {
+    CHECK(configureStrictPathMtu(fd, error));
+    int mode = 0;
+    socklen_t modeSize = sizeof(mode);
+    CHECK(getsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, &modeSize) == 0 &&
+          mode == IP_PMTUDISC_DO);
+    close(fd);
+  } else {
+    CHECK(errno == EPERM);
+  }
+  CHECK(!configureStrictPathMtu(-1, error) && !error.empty());
+  CHECK(validatePathMtu(1500, error));
+  CHECK(!validatePathMtu(1499, error) &&
+        error.find("detected path MTU 1499") != std::string::npos &&
+        error.find("VPN") != std::string::npos);
+  CHECK(udpSendError(EMSGSIZE, "audio send").find("MTU 1500 required") !=
+        std::string::npos);
 }
 
 void checkPacingSubmissionState() {
@@ -369,6 +393,12 @@ void checkPacingSubmissionState() {
                               16666666, hardError, stats, error));
   CHECK(error.find("video payload send failed") != std::string::npos &&
         stats.submittedDatagrams == 0);
+
+  FakeUdpSyscalls mtuError;
+  mtuError.sendResults = {-EMSGSIZE};
+  CHECK(!submitVideoDatagrams(-1, ten.messages.data(), ten.messages.size(),
+                              16666666, mtuError, stats, error));
+  CHECK(error.find("path MTU") != std::string::npos);
 }
 
 void checkFatalPayloadFailureStopsProtocol() {

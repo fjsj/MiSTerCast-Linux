@@ -245,7 +245,8 @@ int main(int argc, char** argv) {
                 << s.transport.vramUnsyncedSamples << "/"
                 << s.transport.vramQueueEmptySamples << " unhealthy of "
                 << s.transport.fpgaStatusSamples << ", paced "
-                << s.transport.pacedVideoPayloads << " payloads, UDP peak "
+                << s.transport.pacedVideoPayloads << " payloads, MTU "
+                << s.transport.pathMtu << ", UDP peak "
                 << s.transport.observedUdpQueueHighWater << " B, late "
                 << s.transport.lateBatchReleases << " (max "
                 << s.transport.maxBatchReleaseLatenessNs / 1000 << " us)";

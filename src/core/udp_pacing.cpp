@@ -1,6 +1,7 @@
 #include "mistercast/udp_pacing.hpp"
 
 #include <poll.h>
+#include <netinet/ip.h>
 #include <sys/ioctl.h>
 
 #include <algorithm>
@@ -102,6 +103,31 @@ uint64_t videoCompletionGraceNs(uint64_t framePeriodNs) noexcept {
   return std::clamp(framePeriodNs / 2, kMinimumGraceNs, kMaximumGraceNs);
 }
 
+bool configureStrictPathMtu(int fd, std::string& error) noexcept {
+  const int mode = IP_PMTUDISC_DO;
+  if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, sizeof(mode)) == 0)
+    return true;
+  error = std::string("cannot enforce IPv4 path MTU: ") +
+          std::strerror(errno);
+  return false;
+}
+
+bool validatePathMtu(uint32_t pathMtu, std::string& error) noexcept {
+  if (pathMtu >= 1500) return true;
+  error = "detected path MTU " + std::to_string(pathMtu) +
+          ", but MiSTerCast requires MTU 1500 for 1472-byte UDP payloads; "
+          "check tunnel, VPN, and interface MTU settings";
+  return false;
+}
+
+std::string udpSendError(int errorNumber, const char* operation) {
+  if (errorNumber == EMSGSIZE)
+    return std::string(operation) +
+           " failed: path MTU cannot carry a 1472-byte UDP payload "
+           "without IPv4 fragmentation (MTU 1500 required)";
+  return std::string(operation) + " failed: " + std::strerror(errorNumber);
+}
+
 bool submitVideoDatagrams(int fd, mmsghdr* messages, size_t count,
                           uint64_t framePeriodNs, UdpSubmitSyscalls& syscalls,
                           VideoSubmissionStats& stats, std::string& error) {
@@ -165,8 +191,7 @@ bool submitVideoDatagrams(int fd, mmsghdr* messages, size_t count,
                 std::strerror(-ready);
         return false;
       }
-      error = std::string("video payload send failed: ") +
-              std::strerror(result ? -result : EIO);
+      error = udpSendError(result ? -result : EIO, "video payload send");
       return false;
     }
     for (size_t i = batchStart; i < batchEnd; ++i)

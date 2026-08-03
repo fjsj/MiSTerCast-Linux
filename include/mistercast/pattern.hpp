@@ -17,7 +17,7 @@ struct PatternOptions {
   Modeline modeline{Modeline::safeDefault()};
   PatternContent content{PatternContent::Bars};
   bool tone{}, progressiveInterlaceBuffer{};
-  uint16_t frameDelay{};
+  uint16_t frameDelay{}, port{32100};
 };
 
 bool parsePatternOptions(const std::vector<std::string>& arguments,

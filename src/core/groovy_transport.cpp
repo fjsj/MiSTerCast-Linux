@@ -1,6 +1,7 @@
 #include "mistercast/groovy_transport.hpp"
 
 #include <netdb.h>
+#include <netinet/ip.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -146,8 +147,8 @@ bool GroovyTransport::sendPacket(const void* p, size_t n, std::string& e) {
   } while (r < 0 && errno == EINTR);
   if (r < 0 || size_t(r) != n) {
     ++sendErrors_;
-    e = std::string("UDP send failed: ") +
-        (r < 0 ? std::strerror(errno) : "incomplete datagram");
+    e = r < 0 ? udpSendError(errno, "UDP send")
+              : "UDP send failed: incomplete datagram";
     return false;
   }
   return true;
@@ -176,6 +177,7 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
   pacedVideoPayloads_ = pacedDatagrams_ = lateBatchReleases_ =
       maxBatchReleaseLatenessNs_ = observedUdpQueueHighWater_ = 0;
   socketSendBufferBytes_ = 0;
+  pathMtu_ = 0;
   coreVersion_ = 0;
   lastSendEndAt_ = {};
   lastWireDeliveryNs_ = 0;
@@ -202,10 +204,15 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
     e = std::string("cannot resolve IPv4 target: ") + gai_strerror(rc);
     return false;
   }
+  std::string candidateError;
   for (auto* p = list; p; p = p->ai_next) {
     int fd =
         socket(p->ai_family, p->ai_socktype | SOCK_CLOEXEC, p->ai_protocol);
     if (fd < 0) continue;
+    if (!configureStrictPathMtu(fd, candidateError)) {
+      ::close(fd);
+      continue;
+    }
     int snd = 2 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
     // stop() joins the rendering thread before closing the transport, so bound
@@ -214,14 +221,27 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout,
                sizeof(sendTimeout));
     if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
+      int routeMtu = 0;
+      socklen_t routeMtuSize = sizeof(routeMtu);
+      if (getsockopt(fd, IPPROTO_IP, IP_MTU, &routeMtu, &routeMtuSize) == 0 &&
+          routeMtu > 0) {
+        if (!validatePathMtu(uint32_t(routeMtu), candidateError)) {
+          ::close(fd);
+          continue;
+        }
+        pathMtu_ = uint32_t(routeMtu);
+      }
       fd_ = fd;
       break;
     }
+    candidateError = std::string("cannot connect UDP target: ") +
+                     std::strerror(errno);
     ::close(fd);
   }
   freeaddrinfo(list);
   if (fd_ < 0) {
-    e = "cannot create UDP connection to target";
+    e = candidateError.empty() ? "cannot create UDP connection to target"
+                               : candidateError;
     return false;
   }
   int actualSendBuffer = 0;
@@ -635,6 +655,7 @@ GroovyTransportStats GroovyTransport::stats() const noexcept {
   s.maxBatchReleaseLatenessNs = maxBatchReleaseLatenessNs_;
   s.observedUdpQueueHighWater = observedUdpQueueHighWater_;
   s.socketSendBufferBytes = socketSendBufferBytes_;
+  s.pathMtu = pathMtu_;
   s.outgoingField = outgoingField_;
   s.fpgaField = fpgaField_;
   s.vramSynced = vramSynced_;
@@ -671,6 +692,7 @@ void GroovyTransport::close() noexcept {
   pacedVideoPayloads_ = pacedDatagrams_ = lateBatchReleases_ =
       maxBatchReleaseLatenessNs_ = observedUdpQueueHighWater_ = 0;
   socketSendBufferBytes_ = 0;
+  pathMtu_ = 0;
   progressiveInterlaceBuffer_ = false;
   frameBytes_ = 0;
   frameTimeNs_ = lineTimeNs_ = 0;

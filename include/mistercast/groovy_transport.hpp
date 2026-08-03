@@ -18,7 +18,7 @@ struct GroovyTransportStats {
       compressionTimeUs{}, submissionTimeUs{}, estimatedWireTimeUs{},
       pacedVideoPayloads{}, pacedDatagrams{}, lateBatchReleases{},
       maxBatchReleaseLatenessNs{}, observedUdpQueueHighWater{},
-      socketSendBufferBytes{};
+      socketSendBufferBytes{}, pathMtu{};
   int64_t rasterCorrectionUs{};
   uint8_t outgoingField{}, fpgaField{};
   bool vramSynced{}, vgaFrameskip{}, vgaVblank{}, vramQueuePresent{},
@@ -90,6 +90,7 @@ class GroovyTransport {
       vgaFrameskip_{false}, vgaVblank_{false}, vramQueuePresent_{false},
       interlacedFieldBuffer_{false}, fieldPhaseValid_{false};
   std::atomic<uint32_t> ackFrame_{0}, fpgaFrame_{0};
+  std::atomic<uint32_t> pathMtu_{0};
   std::atomic<uint16_t> syncLine_{0}, fpgaVCount_{0};
   std::atomic<uint8_t> outgoingField_{0}, fpgaField_{0};
   std::atomic<uint64_t> ackedFrames_{0}, missedAcks_{0}, streamTimeUs_{0},
