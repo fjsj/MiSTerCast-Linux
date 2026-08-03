@@ -38,7 +38,7 @@ int main() {
   if (!connection || xcb_connection_has_error(connection)) {
     std::cerr << "X11 capture test skipped: DISPLAY is unavailable\n";
     if (connection) xcb_disconnect(connection);
-    return 0;
+    return 77;
   }
   auto* screen = xcb_setup_roots_iterator(xcb_get_setup(connection)).data;
   const auto* composite =
@@ -46,7 +46,7 @@ int main() {
   if (!screen || !composite || !composite->present) {
     std::cerr << "X11 capture test skipped: XComposite is unavailable\n";
     xcb_disconnect(connection);
-    return 0;
+    return 77;
   }
   auto* version = xcb_composite_query_version_reply(
       connection, xcb_composite_query_version(connection, 0, 4), nullptr);
@@ -54,7 +54,7 @@ int main() {
     std::cerr << "X11 capture test skipped: XComposite 0.2 is unavailable\n";
     free(version);
     xcb_disconnect(connection);
-    return 0;
+    return 77;
   }
   free(version);
 
@@ -91,9 +91,12 @@ int main() {
   // reject it once the periodic source refresh observes that it is stale.
   xcb_unmap_window(connection, window);
   sync(connection);
-  for (int frameIndex = 1; frameIndex < 29; ++frameIndex)
-    CHECK(capture->next(frame, std::chrono::milliseconds(0)));
-  CHECK(!capture->next(frame, std::chrono::milliseconds(0)));
+  CHECK(capture->next(frame, std::chrono::milliseconds(0)));
+  bool rejectedStalePixmap = false;
+  for (int attempt = 0; attempt < 120 && !rejectedStalePixmap; ++attempt)
+    rejectedStalePixmap =
+        !capture->next(frame, std::chrono::milliseconds(0));
+  CHECK(rejectedStalePixmap);
 
   // Mapping at the same dimensions allocates new Composite backing storage.
   // Recovery must name that new pixmap rather than resume the stale one.

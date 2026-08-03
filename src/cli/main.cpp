@@ -74,6 +74,10 @@ int main(int argc, char** argv) {
     return 2;
   }
   AppConfig c = loadConfig(configPath());
+  // Window selection is deliberately GUI-only and its transient X11 ID is not
+  // persisted. Every CLI stream therefore starts from the saved monitor.
+  c.source.captureMode = CaptureMode::Monitor;
+  c.source.window.reset();
   bool save = false;
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i], x;
@@ -84,8 +88,6 @@ int main(int argc, char** argv) {
       if (!value(i, argc, argv, c.target)) return 2;
     } else if (a == "--monitor") {
       if (!value(i, argc, argv, c.source.monitor)) return 2;
-      c.source.captureMode = CaptureMode::Monitor;
-      c.source.window.reset();
     } else if (a == "--modeline") {
       if (!value(i, argc, argv, x)) return 2;
       std::string e;

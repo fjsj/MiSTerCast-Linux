@@ -85,6 +85,7 @@ if(BUILD_TESTING)
   else()
     add_test(NAME x11-capture COMMAND mistercast-x11-capture-tests)
   endif()
+  set_tests_properties(x11-capture PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME cli-invalid-sampling
     COMMAND mistercast stream --target 127.0.0.1 --sampling area)
   set_tests_properties(cli-invalid-sampling PROPERTIES WILL_FAIL TRUE)

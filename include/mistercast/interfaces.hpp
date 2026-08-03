@@ -13,7 +13,7 @@ class IVideoCapture {
  public:
   virtual ~IVideoCapture() = default;
   virtual std::vector<Monitor> monitors(std::string& error) = 0;
-  virtual std::vector<CaptureWindow> windows(std::string&) { return {}; }
+  virtual std::vector<CaptureWindow> windows(std::string& error) = 0;
   virtual bool start(const SourceOptions& source, ErrorCallback) = 0;
   // Geometry of the monitor or window chosen by start(), for computing crop.
   virtual SourceGeometry selectedGeometry() const = 0;

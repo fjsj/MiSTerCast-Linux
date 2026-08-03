@@ -397,6 +397,7 @@ class FakeVideo final : public IVideoCapture {
     return m;
   }
   std::vector<Monitor> monitors(std::string&) override { return {geometry()}; }
+  std::vector<CaptureWindow> windows(std::string&) override { return {}; }
   bool start(const SourceOptions&, ErrorCallback) override { return true; }
   SourceGeometry selectedGeometry() const override {
     const auto monitor = geometry();
