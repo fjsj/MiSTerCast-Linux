@@ -55,7 +55,7 @@ class GroovyTransport {
   uint8_t interlaceShift_{};
   std::vector<uint8_t> compressed_;
   bool syncRefresh_{true}, progressiveInterlaceBuffer_{}, firstFrame_{true};
-  bool phaseValid_{}, fallbackPhaseSet_{}, lastAligned_{};
+  bool phaseValid_{}, fallbackPhaseSet_{}, lastAligned_{}, haveFpgaStatus_{};
   uint64_t frameTimeNs_{}, lineTimeNs_{}, networkRttNs_{}, lastStreamNs_{};
   uint32_t currentFrame_{}, fallbackFrame_{}, lastAlignedFrame_{};
   uint8_t coreVersion_{}, lastAlignedField_{};

@@ -64,8 +64,10 @@ bool GroovyTransport::drainStatus(uint32_t expectedFrame) noexcept {
     status.frame = readLe<uint32_t>(ack + 6);
     status.vCount = readLe<uint16_t>(ack + 10);
     status.bits = ack[12];
-    if (frameAfter(fpga_.frameEcho, status.frameEcho)) continue;
+    if (haveFpgaStatus_ && frameAfter(fpga_.frameEcho, status.frameEcho))
+      continue;
     fpga_ = status;
+    haveFpgaStatus_ = true;
     lastAckAt_ = std::chrono::steady_clock::now();
     ackFrame_ = status.frameEcho;
     fpgaFrame_ = status.frame;
@@ -132,6 +134,7 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
   interlacedFieldBuffer_ = fieldPhaseValid_ = false;
   phaseValid_ = fallbackPhaseSet_ = lastAligned_ = false;
   fpga_ = {};
+  haveFpgaStatus_ = false;
   if (host.empty()) {
     e = "target address is required";
     return false;
@@ -218,6 +221,7 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
     fpga_.frame = readLe<uint32_t>(ack + 6);
     fpga_.vCount = readLe<uint16_t>(ack + 10);
     fpga_.bits = ack[12];
+    haveFpgaStatus_ = true;
     fpgaFrame_ = fpga_.frame;
     fpgaVCount_ = fpga_.vCount;
     misterAudioEnabled_ = (ack[12] & 0x40) != 0;
