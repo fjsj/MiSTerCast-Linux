@@ -13,6 +13,7 @@ using namespace mistercast::test;
 
 namespace {
 int failed = 0;
+constexpr uint8_t kClose = 1;
 #define CHECK(x)                                                              \
   do {                                                                        \
     if (!(x)) {                                                               \
@@ -145,6 +146,7 @@ void checkRunnerProtocol() {
   std::ostringstream status;
   std::string error;
   CHECK(runGeneratedPattern(options, stop, status, error));
+  CHECK(endpoint.waitForCommand(kClose));
   endpoint.stop();
   CHECK(sawInit && sawMode && sawClose && fields.size() >= 4);
   CHECK(fields[0] != fields[1] && fields[1] != fields[2]);

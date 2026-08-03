@@ -89,6 +89,7 @@ void checkInterlaceTransport(bool progressive, uint8_t sentField,
   int16_t sound[4]{};
   CHECK(transport.sendAudio(sound, 4, error));
   transport.close();
+  CHECK(endpoint.waitForCommand(kClose));
   endpoint.stop();
   CHECK(sawMode && sawFrame && sawAudio && sawClose);
   CHECK(receivedInterlace == expectedInterlace &&

@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace mistercast::test {
@@ -13,6 +14,25 @@ T readPacket(const FakeGroovyEndpoint::Packet& packet, size_t offset) noexcept {
   if (offset + sizeof(value) <= packet.size())
     std::memcpy(&value, packet.data() + offset, sizeof(value));
   return value;
+}
+
+bool isCommand(const FakeGroovyEndpoint::Packet& packet,
+               uint8_t command) noexcept {
+  if (packet.empty() || packet[0] != command) return false;
+  switch (command) {
+    case 1:
+      return packet.size() == 1;
+    case 2:
+      return packet.size() == 5;
+    case 3:
+      return packet.size() == 26;
+    case 4:
+      return packet.size() == 3;
+    case 7:
+      return packet.size() == 8 || packet.size() == 12;
+    default:
+      return true;
+  }
 }
 }  // namespace
 
@@ -62,7 +82,13 @@ void FakeGroovyEndpoint::serve() {
     auto size = recvfrom(fd_, bytes.data(), bytes.size(), 0,
                          reinterpret_cast<sockaddr*>(&peer_), &peerSize_);
     if (size <= 0) continue;
-    handler_(*this, Packet(bytes.begin(), bytes.begin() + size));
+    Packet packet(bytes.begin(), bytes.begin() + size);
+    {
+      std::lock_guard<std::mutex> lock(packetsMutex_);
+      packets_.push_back(packet);
+    }
+    packetsChanged_.notify_all();
+    handler_(*this, packet);
   }
 }
 
@@ -78,6 +104,22 @@ void FakeGroovyEndpoint::replyVersion(uint8_t version) noexcept {
 void FakeGroovyEndpoint::replyAck(const GroovyAck& ack) noexcept {
   const auto bytes = ack.encode();
   reply(bytes.data(), bytes.size());
+}
+
+bool FakeGroovyEndpoint::waitForCommand(uint8_t command,
+                                        std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(packetsMutex_);
+  return packetsChanged_.wait_for(lock, timeout, [&] {
+    return std::any_of(packets_.begin(), packets_.end(),
+                       [command](const Packet& packet) {
+                         return isCommand(packet, command);
+                       });
+  });
+}
+
+std::vector<FakeGroovyEndpoint::Packet> FakeGroovyEndpoint::packets() const {
+  std::lock_guard<std::mutex> lock(packetsMutex_);
+  return packets_;
 }
 
 void FakeGroovyEndpoint::stop() noexcept {
