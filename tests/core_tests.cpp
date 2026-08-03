@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <thread>
 
 #include "mistercast/audio_pacer.hpp"
@@ -14,6 +15,7 @@
 #include "mistercast/config.hpp"
 #include "mistercast/groovy_transport.hpp"
 #include "mistercast/interfaces.hpp"
+#include "mistercast/pattern.hpp"
 #include "mistercast/stream_session.hpp"
 #include "mistercast/udp_pacing.hpp"
 using namespace mistercast;
@@ -25,6 +27,7 @@ static int failed = 0;
       ++failed;                                                               \
     }                                                                         \
   } while (0)
+
 
 
 namespace {

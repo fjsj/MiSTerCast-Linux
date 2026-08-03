@@ -29,9 +29,13 @@ mistercast list-modelines
 mistercast stream --target 192.168.1.50
 mistercast stream --target mister.local --monitor HDMI-1 --no-audio \
   --crop 4:3 --rotation none --sampling line-blend --frame-delay 0
+mistercast pattern --target mister.local --content noise --tone \
+  --modeline '12.336 640 662 720 784 480 488 494 525 1'
 ```
 
 Use `mistercast stream --help` for all overrides. Overrides last for that run unless `--save` is supplied. Settings are written atomically to `$XDG_CONFIG_HOME/mistercast/config.json`, or `~/.config/mistercast/config.json`. Invalid/corrupt settings fall back to the bundled 320×240 ~60 Hz preset.
+
+`mistercast pattern` is a session-only, capture-independent protocol test. It never loads or changes saved capture settings and does not initialize X11 or PulseAudio. `--content bars` (the default) shows color bars, a flashing latency square, and a frame/field marker. `--content noise` generates deterministic changing low-compressibility pixels to exercise UDP pacing. `--tone` adds a continuous modest 440 Hz stereo S16LE tone paced from elapsed monotonic time. Pattern mode accepts `--target`, `--modeline`, the two interlace-buffer switches, and `--frame-delay 0..10`, and closes cleanly on SIGINT or SIGTERM.
 
 In the GUI, set **Source** to **Single window**, click **Choose Window…**, and
 select a visible X11 application window. The choice remains selected for the

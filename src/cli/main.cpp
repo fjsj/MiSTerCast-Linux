@@ -5,6 +5,7 @@
 
 #include "mistercast/config.hpp"
 #include "mistercast/interfaces.hpp"
+#include "mistercast/pattern.hpp"
 #include "mistercast/stream_session.hpp"
 #ifdef MISTERCAST_HAVE_QT
 int launchGui(int, char**);
@@ -16,13 +17,16 @@ static void usage() {
   std::cout
       << "MiSTerCast for Linux (X11 only)\n\nUsage:\n  mistercast\n  "
          "mistercast stream --target HOST [options]\n  mistercast "
+         "pattern --target HOST [--tone] [--content bars|noise]\n  mistercast "
          "list-monitors\n  mistercast list-modelines\n  mistercast "
          "check\n\nStream options: --monitor NAME --modeline 'TIMINGS' --audio "
          "--no-audio\n  --crop custom|1x|2x|3x|4x|5x|4:3|5:4 --size WxH "
          "--offset X,Y\n  --alignment POSITION --rotation none|cw90|ccw90|180 "
          "--sampling point|bilinear|line-blend --frame-delay 0..10\n  "
          "--progressive-interlace-buffer "
-         "--interlaced-field-buffer --save\n";
+         "--interlaced-field-buffer --save\n\nPattern options: --modeline "
+         "'TIMINGS' --content bars|noise --tone --frame-delay 0..10\n  "
+         "--progressive-interlace-buffer --interlaced-field-buffer\n";
 }
 static bool value(int& i, int n, char** v, std::string& o) {
   if (++i >= n) {
@@ -67,6 +71,32 @@ int main(int argc, char** argv) {
                 << "+" << m.y << (m.primary ? " (primary)" : "") << "\n";
     if (command == "check")
       std::cout << "X11 capture: OK\nConfiguration: " << configPath() << "\n";
+    return 0;
+  }
+  if (command == "pattern") {
+    if (argc == 3 && (std::string(argv[2]) == "--help" ||
+                      std::string(argv[2]) == "-h")) {
+      usage();
+      return 0;
+    }
+    std::vector<std::string> arguments;
+    for (int i = 2; i < argc; ++i) arguments.emplace_back(argv[i]);
+    PatternOptions options;
+    std::string error;
+    if (!parsePatternOptions(arguments, options, error)) {
+      std::cerr << error << "\n";
+      return 2;
+    }
+    if (!compressionAvailable())
+      std::cerr << "Warning: built without liblz4; pattern frames are sent "
+                   "uncompressed.\n";
+    interrupted = false;
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+    if (!runGeneratedPattern(options, interrupted, std::cerr, error)) {
+      std::cerr << "Pattern failed: " << error << "\n";
+      return 1;
+    }
     return 0;
   }
   if (command != "stream") {
