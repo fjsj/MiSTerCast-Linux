@@ -4,26 +4,34 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 
-#include "mistercast/types.hpp"
-
 namespace mistercast {
-inline constexpr size_t UdpPayloadBytes = 1472;
-inline constexpr size_t UdpWireOverheadBytes = 66;
-inline constexpr uint64_t VideoPacingBitsPerSecond = 950000000;
-inline constexpr size_t VideoPacingBatchDatagrams = 32;
-inline constexpr uint64_t VideoPacingLateToleranceNs = 100000;
-inline constexpr size_t MaxVideoDatagrams =
-    (ProtocolFramebufferBytes + UdpPayloadBytes - 1) / UdpPayloadBytes;
 
-size_t videoDatagramCount(size_t payloadBytes) noexcept;
-uint64_t videoWireBytes(size_t payloadBytes) noexcept;
-uint64_t pacingDurationNs(size_t payloadBytes, uint64_t bitsPerSecond) noexcept;
+struct UdpVideoConfig {
+  // Shared datagram payload size for command-associated audio and video data.
+  size_t payloadBytes{};
+  // Largest complete video payload for which descriptors are preallocated.
+  size_t maximumFrameBytes{};
+  size_t wireOverheadBytes{};
+  uint64_t pacingBitsPerSecond{950000000};
+  size_t batchDatagrams{32};
+  uint64_t lateToleranceNs{100000};
+};
+
+size_t videoDatagramCount(size_t payloadBytes,
+                          const UdpVideoConfig& config) noexcept;
+uint64_t videoWireBytes(size_t payloadBytes,
+                        const UdpVideoConfig& config) noexcept;
+uint64_t pacingDurationNs(size_t payloadBytes,
+                          const UdpVideoConfig& config) noexcept;
 uint64_t videoCompletionGraceNs(uint64_t framePeriodNs) noexcept;
 bool configureStrictPathMtu(int fd, std::string& error) noexcept;
-bool validatePathMtu(uint32_t pathMtu, std::string& error) noexcept;
-std::string udpSendError(int errorNumber, const char* operation);
+bool validatePathMtu(uint32_t pathMtu, const UdpVideoConfig& config,
+                     std::string& error) noexcept;
+std::string udpSendError(int errorNumber, const char* operation,
+                         const UdpVideoConfig& config);
 
 class UdpSubmitSyscalls {
  public:
@@ -48,7 +56,36 @@ struct VideoSubmissionStats {
 };
 
 bool submitVideoDatagrams(int fd, mmsghdr* messages, size_t count,
-                          uint64_t framePeriodNs, UdpSubmitSyscalls& syscalls,
+                          uint64_t framePeriodNs,
+                          const UdpVideoConfig& config,
+                          UdpSubmitSyscalls& syscalls,
                           VideoSubmissionStats& stats, std::string& error);
+
+struct UdpVideoSenderStats {
+  uint64_t pacedPayloads{}, pacedDatagrams{}, lateBatchReleases{},
+      maxReleaseLatenessNs{}, observedQueueHighWater{};
+};
+
+class UdpVideoSender {
+ public:
+  explicit UdpVideoSender(UdpVideoConfig config,
+                          UdpSubmitSyscalls* syscalls = nullptr);
+  ~UdpVideoSender();
+  UdpVideoSender(const UdpVideoSender&) = delete;
+  UdpVideoSender& operator=(const UdpVideoSender&) = delete;
+
+  const UdpVideoConfig& config() const noexcept;
+  void reset() noexcept;
+  void observeQueue(int fd) noexcept;
+  bool submit(int fd, const uint8_t* payload, size_t payloadBytes,
+              uint64_t framePeriodNs, VideoSubmissionStats& submission,
+              std::string& error);
+  UdpVideoSenderStats stats() const noexcept;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 UdpSubmitSyscalls& systemUdpSubmitSyscalls() noexcept;
 }  // namespace mistercast

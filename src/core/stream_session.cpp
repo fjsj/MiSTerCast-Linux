@@ -11,6 +11,7 @@
 #include <cstdlib>
 
 #include "mistercast/audio_pacer.hpp"
+#include "mistercast/groovy_protocol.hpp"
 #include "mistercast/transform.hpp"
 namespace mistercast {
 namespace {
@@ -72,7 +73,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   stop();
   callback_ = std::move(cb);
   config_ = c;
-  if (auto e = c.validate()) {
+  if (auto e = validateGroovyConfig(c)) {
     if (err) *err = *e;
     setState(SessionState::Error,
              SessionError{"config", *e, "Correct the settings and try again."});
@@ -162,7 +163,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
 bool StreamSession::updateModeline(const Modeline& m,
                                    bool progressiveInterlaceBuffer,
                                    std::string* err) {
-  if (auto e = m.validate()) {
+  if (auto e = validateGroovyModeline(m)) {
     if (err) *err = *e;
     return false;
   }

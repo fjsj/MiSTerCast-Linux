@@ -3,13 +3,15 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "mistercast/types.hpp"
 #include "mistercast/adaptive_timing.hpp"
-#include "mistercast/udp_pacing.hpp"
 namespace mistercast {
+class GroovyTransportTestPeer;
+class UdpVideoSender;
 struct GroovyTransportStats {
   uint32_t acknowledgedFrame{}, fpgaFrame{};
   uint16_t requestedSyncLine{}, fpgaVCount{};
@@ -36,7 +38,7 @@ bool encodeInitCommand(bool compression, bool audioEnabled,
                        std::string& error) noexcept;
 class GroovyTransport {
  public:
-  explicit GroovyTransport(UdpSubmitSyscalls* syscalls = nullptr);
+  GroovyTransport();
   ~GroovyTransport();
   GroovyTransport(const GroovyTransport&) = delete;
   GroovyTransport& operator=(const GroovyTransport&) = delete;
@@ -58,6 +60,8 @@ class GroovyTransport {
   GroovyTransportStats stats() const noexcept;
 
  private:
+  explicit GroovyTransport(std::unique_ptr<UdpVideoSender> videoSender);
+  friend class GroovyTransportTestPeer;
   struct FpgaStatus {
     uint32_t frameEcho{}, frame{};
     uint16_t vCountEcho{}, vCount{};
@@ -65,11 +69,10 @@ class GroovyTransport {
   };
   int fd_{-1};
   uint32_t frameBytes_{};
-  uint16_t mtu_{1472}, vTotal_{}, frameDelay_{};
+  uint16_t vTotal_{}, frameDelay_{};
   uint8_t interlaceShift_{};
   std::vector<uint8_t> compressed_;
-  std::array<mmsghdr, MaxVideoDatagrams> messages_{};
-  std::array<iovec, MaxVideoDatagrams> iovecs_{};
+  std::unique_ptr<UdpVideoSender> videoSender_;
   bool syncRefresh_{true}, progressiveInterlaceBuffer_{}, firstFrame_{true},
       fatalPayloadError_{};
   bool phaseValid_{}, fallbackPhaseSet_{}, lastAligned_{}, haveFpgaStatus_{},
@@ -81,7 +84,6 @@ class GroovyTransport {
   uint8_t coreVersion_{}, lastAlignedField_{};
   FpgaStatus fpga_{};
   AdaptiveDeliveryMargin adaptiveMargin_;
-  UdpSubmitSyscalls* udpSyscalls_{};
   std::chrono::steady_clock::time_point syncEpoch_{}, lastAckAt_{},
       lastSendEndAt_{};
   bool sendPacket(const void*, size_t, std::string&);
@@ -104,8 +106,6 @@ class GroovyTransport {
       fpgaStatusSamples_{0}, fpgaFallbackSamples_{0},
       vramUnsyncedSamples_{0}, vramQueueEmptySamples_{0},
       compressionTimeUs_{0}, submissionTimeUs_{0}, estimatedWireTimeUs_{0},
-      pacedVideoPayloads_{0}, pacedDatagrams_{0}, lateBatchReleases_{0},
-      maxBatchReleaseLatenessNs_{0}, observedUdpQueueHighWater_{0},
       socketSendBufferBytes_{0};
   std::atomic<int64_t> rasterCorrectionUs_{0};
 };

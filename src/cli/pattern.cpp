@@ -7,6 +7,7 @@
 #include <iostream>
 
 #include "mistercast/groovy_transport.hpp"
+#include "mistercast/groovy_protocol.hpp"
 
 namespace mistercast {
 namespace {
@@ -106,7 +107,7 @@ bool parsePatternOptions(const std::vector<std::string>& arguments,
     error = "a target is required; use --target HOST";
     return false;
   }
-  if (auto validation = options.modeline.validate()) {
+  if (auto validation = validateGroovyModeline(options.modeline)) {
     error = *validation;
     return false;
   }

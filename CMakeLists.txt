@@ -15,7 +15,7 @@ find_library(LZ4_LIBRARY lz4)
 find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
 
 add_library(mistercast-core
-  src/core/types.cpp src/core/config.cpp src/core/transform.cpp
+  src/core/types.cpp src/core/groovy_protocol.cpp src/core/config.cpp src/core/transform.cpp
   src/core/audio_ring.cpp src/core/audio_pacer.cpp src/linux/x11_capture.cpp src/linux/pulse_audio.cpp
   src/core/udp_pacing.cpp src/core/adaptive_timing.cpp
   src/core/groovy_transport.cpp src/core/stream_session.cpp)
@@ -83,6 +83,9 @@ if(BUILD_TESTING)
     tests/transport_tests.cpp tests/fake_groovy_endpoint.cpp)
   target_link_libraries(mistercast-transport-tests PRIVATE mistercast-core)
   add_test(NAME transport COMMAND mistercast-transport-tests)
+  add_executable(mistercast-udp-pacing-tests tests/udp_pacing_tests.cpp)
+  target_link_libraries(mistercast-udp-pacing-tests PRIVATE mistercast-core)
+  add_test(NAME udp-pacing COMMAND mistercast-udp-pacing-tests)
   add_executable(mistercast-pattern-tests
     tests/pattern_tests.cpp tests/fake_groovy_endpoint.cpp)
   target_link_libraries(mistercast-pattern-tests PRIVATE mistercast-pattern)

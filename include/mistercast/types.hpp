@@ -6,7 +6,6 @@
 #include <vector>
 
 namespace mistercast {
-inline constexpr size_t ProtocolFramebufferBytes = 1245312;
 enum class Alignment : uint8_t {
   Center,
   TopLeft,

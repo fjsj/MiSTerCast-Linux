@@ -1,13 +1,17 @@
 #include "mistercast/udp_pacing.hpp"
 
-#include <poll.h>
 #include <netinet/ip.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstring>
+#include <mutex>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace mistercast {
 namespace {
@@ -23,11 +27,12 @@ uint64_t durationForWireBytes(uint64_t bytes, uint64_t rate) noexcept {
          (remainder * 8 * kNanosecondsPerSecond + rate - 1) / rate;
 }
 
-uint64_t messageWireBytes(const mmsghdr& message) noexcept {
+uint64_t messageWireBytes(const mmsghdr& message,
+                          const UdpVideoConfig& config) noexcept {
   uint64_t payload = 0;
   for (size_t i = 0; i < message.msg_hdr.msg_iovlen; ++i)
     payload += message.msg_hdr.msg_iov[i].iov_len;
-  return payload + UdpWireOverheadBytes;
+  return payload + config.wireOverheadBytes;
 }
 
 class SystemUdpSubmitSyscalls final : public UdpSubmitSyscalls {
@@ -85,18 +90,24 @@ void sampleQueue(int fd, UdpSubmitSyscalls& syscalls,
 }
 }  // namespace
 
-size_t videoDatagramCount(size_t payloadBytes) noexcept {
-  return (payloadBytes + UdpPayloadBytes - 1) / UdpPayloadBytes;
+size_t videoDatagramCount(size_t payloadBytes,
+                          const UdpVideoConfig& config) noexcept {
+  return config.payloadBytes
+             ? (payloadBytes + config.payloadBytes - 1) / config.payloadBytes
+             : 0;
 }
 
-uint64_t videoWireBytes(size_t payloadBytes) noexcept {
+uint64_t videoWireBytes(size_t payloadBytes,
+                        const UdpVideoConfig& config) noexcept {
   if (!payloadBytes) return 0;
-  return payloadBytes + videoDatagramCount(payloadBytes) * UdpWireOverheadBytes;
+  return payloadBytes +
+         videoDatagramCount(payloadBytes, config) * config.wireOverheadBytes;
 }
 
 uint64_t pacingDurationNs(size_t payloadBytes,
-                          uint64_t bitsPerSecond) noexcept {
-  return durationForWireBytes(videoWireBytes(payloadBytes), bitsPerSecond);
+                          const UdpVideoConfig& config) noexcept {
+  return durationForWireBytes(videoWireBytes(payloadBytes, config),
+                              config.pacingBitsPerSecond);
 }
 
 uint64_t videoCompletionGraceNs(uint64_t framePeriodNs) noexcept {
@@ -112,32 +123,44 @@ bool configureStrictPathMtu(int fd, std::string& error) noexcept {
   return false;
 }
 
-bool validatePathMtu(uint32_t pathMtu, std::string& error) noexcept {
-  if (pathMtu >= 1500) return true;
+bool validatePathMtu(uint32_t pathMtu, const UdpVideoConfig& config,
+                     std::string& error) noexcept {
+  const size_t requiredMtu = config.payloadBytes + 28;
+  if (pathMtu >= requiredMtu) return true;
   error = "detected path MTU " + std::to_string(pathMtu) +
-          ", but MiSTerCast requires MTU 1500 for 1472-byte UDP payloads; "
-          "check tunnel, VPN, and interface MTU settings";
+          ", but MiSTerCast requires MTU " + std::to_string(requiredMtu) +
+          " for " + std::to_string(config.payloadBytes) +
+          "-byte UDP payloads; check tunnel, VPN, and interface MTU settings";
   return false;
 }
 
-std::string udpSendError(int errorNumber, const char* operation) {
+std::string udpSendError(int errorNumber, const char* operation,
+                         const UdpVideoConfig& config) {
   if (errorNumber == EMSGSIZE)
-    return std::string(operation) +
-           " failed: path MTU cannot carry a 1472-byte UDP payload "
-           "without IPv4 fragmentation (MTU 1500 required)";
+    return std::string(operation) + " failed: path MTU cannot carry a " +
+           std::to_string(config.payloadBytes) +
+           "-byte UDP payload without IPv4 fragmentation (MTU " +
+           std::to_string(config.payloadBytes + 28) + " required)";
   return std::string(operation) + " failed: " + std::strerror(errorNumber);
 }
 
 bool submitVideoDatagrams(int fd, mmsghdr* messages, size_t count,
-                          uint64_t framePeriodNs, UdpSubmitSyscalls& syscalls,
+                          uint64_t framePeriodNs,
+                          const UdpVideoConfig& config,
+                          UdpSubmitSyscalls& syscalls,
                           VideoSubmissionStats& stats, std::string& error) {
   stats = {};
   if (!count) return true;
-  stats.paced = count > VideoPacingBatchDatagrams;
+  if (!config.batchDatagrams || !config.pacingBitsPerSecond) {
+    error = "invalid UDP video pacing configuration";
+    return false;
+  }
+  stats.paced = count > config.batchDatagrams;
   uint64_t totalWireBytes = 0;
-  for (size_t i = 0; i < count; ++i) totalWireBytes += messageWireBytes(messages[i]);
+  for (size_t i = 0; i < count; ++i)
+    totalWireBytes += messageWireBytes(messages[i], config);
   stats.estimatedWireNs =
-      durationForWireBytes(totalWireBytes, VideoPacingBitsPerSecond);
+      durationForWireBytes(totalWireBytes, config.pacingBitsPerSecond);
   const int64_t started = syscalls.monotonicNowNs();
   const int64_t completionDeadline =
       started + int64_t(stats.estimatedWireNs +
@@ -146,11 +169,12 @@ bool submitVideoDatagrams(int fd, mmsghdr* messages, size_t count,
   size_t cursor = 0;
   while (cursor < count) {
     const size_t batchStart = cursor;
-    const size_t batchEnd = std::min(count, cursor + VideoPacingBatchDatagrams);
+    const size_t batchEnd =
+        std::min(count, cursor + config.batchDatagrams);
     if (stats.paced && batchStart) {
       const int64_t releaseDeadline =
-          started + int64_t(durationForWireBytes(releasedWireBytes,
-                                                 VideoPacingBitsPerSecond));
+          started + int64_t(durationForWireBytes(
+                        releasedWireBytes, config.pacingBitsPerSecond));
       const int sleepError = syscalls.sleepUntil(releaseDeadline);
       if (sleepError) {
         error = std::string("video pacing sleep failed: ") +
@@ -162,7 +186,7 @@ bool submitVideoDatagrams(int fd, mmsghdr* messages, size_t count,
         const uint64_t late = uint64_t(releasedAt - releaseDeadline);
         stats.maxReleaseLatenessNs =
             std::max(stats.maxReleaseLatenessNs, late);
-        if (late > VideoPacingLateToleranceNs) ++stats.lateBatchReleases;
+        if (late > config.lateToleranceNs) ++stats.lateBatchReleases;
       }
     }
 
@@ -191,16 +215,109 @@ bool submitVideoDatagrams(int fd, mmsghdr* messages, size_t count,
                 std::strerror(-ready);
         return false;
       }
-      error = udpSendError(result ? -result : EIO, "video payload send");
+      error = udpSendError(result ? -result : EIO, "video payload send",
+                           config);
       return false;
     }
     for (size_t i = batchStart; i < batchEnd; ++i)
-      releasedWireBytes += messageWireBytes(messages[i]);
+      releasedWireBytes += messageWireBytes(messages[i], config);
     sampleQueue(fd, syscalls, stats);
   }
   const int64_t finished = syscalls.monotonicNowNs();
   if (finished > started) stats.wallSubmissionNs = uint64_t(finished - started);
   return true;
+}
+
+class UdpVideoSender::Impl {
+ public:
+  Impl(UdpVideoConfig value, UdpSubmitSyscalls* seam)
+      : config(std::move(value)),
+        syscalls(seam ? seam : &systemUdpSubmitSyscalls()),
+        messages(videoDatagramCount(config.maximumFrameBytes, config)),
+        iovecs(messages.size()) {}
+
+  UdpVideoConfig config;
+  UdpSubmitSyscalls* syscalls;
+  std::vector<mmsghdr> messages;
+  std::vector<iovec> iovecs;
+  mutable std::mutex statsMutex;
+  UdpVideoSenderStats cumulative;
+};
+
+UdpVideoSender::UdpVideoSender(UdpVideoConfig config,
+                               UdpSubmitSyscalls* syscalls)
+    : impl_(nullptr) {
+  if (!config.payloadBytes || !config.maximumFrameBytes ||
+      !config.batchDatagrams || !config.pacingBitsPerSecond)
+    throw std::invalid_argument("invalid UDP video sender configuration");
+  impl_ = std::make_unique<Impl>(std::move(config), syscalls);
+}
+
+UdpVideoSender::~UdpVideoSender() = default;
+
+const UdpVideoConfig& UdpVideoSender::config() const noexcept {
+  return impl_->config;
+}
+
+void UdpVideoSender::reset() noexcept {
+  std::lock_guard<std::mutex> lock(impl_->statsMutex);
+  impl_->cumulative = {};
+}
+
+void UdpVideoSender::observeQueue(int fd) noexcept {
+  uint64_t queued = 0;
+  if (!impl_->syscalls->outputQueueBytes(fd, queued)) return;
+  std::lock_guard<std::mutex> lock(impl_->statsMutex);
+  impl_->cumulative.observedQueueHighWater =
+      std::max(impl_->cumulative.observedQueueHighWater, queued);
+}
+
+bool UdpVideoSender::submit(int fd, const uint8_t* payload,
+                            size_t payloadBytes, uint64_t framePeriodNs,
+                            VideoSubmissionStats& submission,
+                            std::string& error) {
+  submission = {};
+  const auto& config = impl_->config;
+  if (!config.payloadBytes || payloadBytes > config.maximumFrameBytes) {
+    error = "video payload exceeds configured UDP sender capacity";
+    return false;
+  }
+  const size_t count = videoDatagramCount(payloadBytes, config);
+  if (count > impl_->messages.size()) {
+    error = "video payload exceeds descriptor capacity";
+    return false;
+  }
+  for (size_t i = 0, offset = 0; i < count; ++i) {
+    const size_t bytes =
+        std::min(config.payloadBytes, payloadBytes - offset);
+    impl_->iovecs[i].iov_base = const_cast<uint8_t*>(payload + offset);
+    impl_->iovecs[i].iov_len = bytes;
+    impl_->messages[i] = {};
+    impl_->messages[i].msg_hdr.msg_iov = &impl_->iovecs[i];
+    impl_->messages[i].msg_hdr.msg_iovlen = 1;
+    offset += bytes;
+  }
+  const bool result = submitVideoDatagrams(
+      fd, impl_->messages.data(), count, framePeriodNs, config,
+      *impl_->syscalls, submission, error);
+  std::lock_guard<std::mutex> lock(impl_->statsMutex);
+  if (submission.paced) {
+    ++impl_->cumulative.pacedPayloads;
+    impl_->cumulative.pacedDatagrams += submission.submittedDatagrams;
+  }
+  impl_->cumulative.lateBatchReleases += submission.lateBatchReleases;
+  impl_->cumulative.maxReleaseLatenessNs =
+      std::max(impl_->cumulative.maxReleaseLatenessNs,
+               submission.maxReleaseLatenessNs);
+  impl_->cumulative.observedQueueHighWater =
+      std::max(impl_->cumulative.observedQueueHighWater,
+               submission.observedQueueHighWater);
+  return result;
+}
+
+UdpVideoSenderStats UdpVideoSender::stats() const noexcept {
+  std::lock_guard<std::mutex> lock(impl_->statsMutex);
+  return impl_->cumulative;
 }
 
 UdpSubmitSyscalls& systemUdpSubmitSyscalls() noexcept {

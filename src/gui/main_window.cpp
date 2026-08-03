@@ -24,6 +24,7 @@
 #include <algorithm>
 
 #include "mistercast/config.hpp"
+#include "mistercast/groovy_protocol.hpp"
 #include "mistercast/interfaces.hpp"
 #include "mistercast/stream_session.hpp"
 
@@ -83,7 +84,8 @@ class MainWindow final : public QMainWindow {
     const bool busy =
         state == SessionState::Starting || state == SessionState::Stopping;
     const bool valid = !target_->text().trimmed().isEmpty() &&
-                       modelineFromControls().validate() == std::nullopt &&
+                       validateGroovyModeline(modelineFromControls()) ==
+                           std::nullopt &&
                        (captureMode_->currentIndex() == 0 || selectedWindow_);
     streamButton_->setEnabled(!busy &&
                               (state == SessionState::Streaming || valid));
@@ -161,7 +163,7 @@ class MainWindow final : public QMainWindow {
   void applyModelineLive() {
     if (session_.state() != SessionState::Streaming) return;
     const auto modeline = modelineFromControls();
-    if (modeline.validate()) return;
+    if (validateGroovyModeline(modeline)) return;
     const bool progressive = progressiveInterlaceBuffer_->isChecked();
     std::string error;
     if (!session_.updateModeline(modeline, progressive, &error)) {
@@ -327,7 +329,7 @@ class MainWindow final : public QMainWindow {
     }
 
     configFromControls();
-    if (auto validation = config_.validate()) {
+    if (auto validation = validateGroovyConfig(config_)) {
       append("Configuration: " + *validation);
       return;
     }

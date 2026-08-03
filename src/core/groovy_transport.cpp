@@ -1,5 +1,8 @@
 #include "mistercast/groovy_transport.hpp"
 
+#include "mistercast/groovy_protocol.hpp"
+#include "mistercast/udp_pacing.hpp"
+
 #include <netdb.h>
 #include <netinet/ip.h>
 #include <poll.h>
@@ -21,6 +24,11 @@ constexpr uint8_t CMD_CLOSE = 1, CMD_INIT = 2, CMD_SWITCHRES = 3, CMD_AUDIO = 4,
                   CMD_BLIT_FIELD_VSYNC = 7;
 constexpr uint8_t INTERLACE_FIELD_BUFFER = 1, INTERLACE_PROGRESSIVE_BUFFER = 2;
 constexpr uint64_t kAutoMarginNs = 1500000;
+
+UdpVideoConfig groovyVideoConfig() noexcept {
+  return {GroovyUdpPayloadBytes, GroovyFramebufferBytes,
+          GroovyUdpWireOverheadBytes, 950000000, 32, 100000};
+}
 
 template <class T>
 T readLe(const uint8_t* p) {
@@ -64,8 +72,10 @@ bool encodeInitCommand(bool compression, bool audioEnabled,
   return true;
 }
 
-GroovyTransport::GroovyTransport(UdpSubmitSyscalls* syscalls)
-    : udpSyscalls_(syscalls ? syscalls : &systemUdpSubmitSyscalls()) {}
+GroovyTransport::GroovyTransport()
+    : videoSender_(std::make_unique<UdpVideoSender>(groovyVideoConfig())) {}
+GroovyTransport::GroovyTransport(std::unique_ptr<UdpVideoSender> videoSender)
+    : videoSender_(std::move(videoSender)) {}
 GroovyTransport::~GroovyTransport() { close(); }
 
 bool GroovyTransport::decodeStatus(const uint8_t* data, size_t size,
@@ -153,7 +163,7 @@ bool GroovyTransport::sendPacket(const void* p, size_t n, std::string& e) {
   } while (r < 0 && errno == EINTR);
   if (r < 0 || size_t(r) != n) {
     ++sendErrors_;
-    e = r < 0 ? udpSendError(errno, "UDP send")
+    e = r < 0 ? udpSendError(errno, "UDP send", videoSender_->config())
               : "UDP send failed: incomplete datagram";
     return false;
   }
@@ -162,7 +172,7 @@ bool GroovyTransport::sendPacket(const void* p, size_t n, std::string& e) {
 
 bool GroovyTransport::sendChunks(const uint8_t* p, size_t n, std::string& e) {
   while (n) {
-    size_t z = std::min<size_t>(mtu_, n);
+    size_t z = std::min(videoSender_->config().payloadBytes, n);
     if (!sendPacket(p, z, e)) return false;
     p += z;
     n -= z;
@@ -180,8 +190,7 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
   fpgaStatusSamples_ = fpgaFallbackSamples_ = vramUnsyncedSamples_ =
       vramQueueEmptySamples_ = 0;
   compressionTimeUs_ = submissionTimeUs_ = estimatedWireTimeUs_ = 0;
-  pacedVideoPayloads_ = pacedDatagrams_ = lateBatchReleases_ =
-      maxBatchReleaseLatenessNs_ = observedUdpQueueHighWater_ = 0;
+  videoSender_->reset();
   socketSendBufferBytes_ = 0;
   pathMtu_ = 0;
   coreVersion_ = 0;
@@ -232,7 +241,8 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
       socklen_t routeMtuSize = sizeof(routeMtu);
       if (getsockopt(fd, IPPROTO_IP, IP_MTU, &routeMtu, &routeMtuSize) == 0 &&
           routeMtu > 0) {
-        if (!validatePathMtu(uint32_t(routeMtu), candidateError)) {
+        if (!validatePathMtu(uint32_t(routeMtu), videoSender_->config(),
+                             candidateError)) {
           ::close(fd);
           continue;
         }
@@ -307,7 +317,7 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
 bool GroovyTransport::switchMode(const Modeline& m,
                                  bool progressiveInterlaceBuffer,
                                  std::string& e) {
-  if (auto x = m.validate()) {
+  if (auto x = validateGroovyModeline(m)) {
     e = *x;
     return false;
   }
@@ -433,8 +443,8 @@ uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
 }
 
 bool GroovyTransport::adaptiveTimingEligible() const noexcept {
-  // Every video payload uses submitVideoDatagrams, which applies pacing when
-  // its packet count requires it; there is no unpaced large-payload mode.
+  // Every video payload uses UdpVideoSender, which applies pacing when its
+  // packet count requires it; there is no unpaced large-payload mode.
   return interlacedFieldBuffer_.load() && fieldPhaseValid_.load() &&
          syncRefresh_ && frameDelay_ == 0;
 }
@@ -491,28 +501,7 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
   std::memcpy(h + 6, &vsync, 2);
   if (csize) std::memcpy(h + 8, &csize, 4);
   size_t hs = csize ? 12 : 8;
-  const size_t packetCount = videoDatagramCount(bytes);
-  if (packetCount > messages_.size()) {
-    e = "video payload exceeds descriptor capacity";
-    return false;
-  }
-  for (size_t i = 0, offset = 0; i < packetCount; ++i) {
-    const size_t packetBytes = std::min<size_t>(UdpPayloadBytes, bytes - offset);
-    iovecs_[i].iov_base = const_cast<uint8_t*>(payload + offset);
-    iovecs_[i].iov_len = packetBytes;
-    messages_[i].msg_hdr.msg_iov = &iovecs_[i];
-    messages_[i].msg_hdr.msg_iovlen = 1;
-    messages_[i].msg_len = 0;
-    offset += packetBytes;
-  }
-  auto& syscalls = *udpSyscalls_;
-  uint64_t queueBefore = 0;
-  if (syscalls.outputQueueBytes(fd_, queueBefore)) {
-    auto peak = observedUdpQueueHighWater_.load();
-    while (peak < queueBefore &&
-           !observedUdpQueueHighWater_.compare_exchange_weak(peak,
-                                                             queueBefore)) {}
-  }
+  videoSender_->observeQueue(fd_);
   const auto submissionStarted = std::chrono::steady_clock::now();
   const auto headerStarted = submissionStarted;
   if (!sendPacket(h, hs, e)) return false;
@@ -521,27 +510,14 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
           std::chrono::steady_clock::now() - headerStarted)
           .count();
   VideoSubmissionStats submission;
-  const bool submitted = submitVideoDatagrams(
-      fd_, messages_.data(), packetCount, frameTimeNs_, syscalls, submission, e);
+  const bool submitted = videoSender_->submit(
+      fd_, payload, bytes, frameTimeNs_, submission, e);
   submissionTimeUs_ =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - submissionStarted)
           .count();
   estimatedWireTimeUs_ = submission.estimatedWireNs / 1000;
   lastWireDeliveryNs_ = submission.estimatedWireNs;
-  if (submission.paced) {
-    ++pacedVideoPayloads_;
-    pacedDatagrams_ += submission.submittedDatagrams;
-  }
-  lateBatchReleases_ += submission.lateBatchReleases;
-  auto maxLate = maxBatchReleaseLatenessNs_.load();
-  while (maxLate < submission.maxReleaseLatenessNs &&
-         !maxBatchReleaseLatenessNs_.compare_exchange_weak(
-             maxLate, submission.maxReleaseLatenessNs)) {}
-  auto queuePeak = observedUdpQueueHighWater_.load();
-  while (queuePeak < submission.observedQueueHighWater &&
-         !observedUdpQueueHighWater_.compare_exchange_weak(
-             queuePeak, submission.observedQueueHighWater)) {}
   if (!submitted) {
     ++sendErrors_;
     fatalPayloadError_ = true;
@@ -670,11 +646,12 @@ GroovyTransportStats GroovyTransport::stats() const noexcept {
   s.compressionTimeUs = compressionTimeUs_;
   s.submissionTimeUs = submissionTimeUs_;
   s.estimatedWireTimeUs = estimatedWireTimeUs_;
-  s.pacedVideoPayloads = pacedVideoPayloads_;
-  s.pacedDatagrams = pacedDatagrams_;
-  s.lateBatchReleases = lateBatchReleases_;
-  s.maxBatchReleaseLatenessNs = maxBatchReleaseLatenessNs_;
-  s.observedUdpQueueHighWater = observedUdpQueueHighWater_;
+  const auto video = videoSender_->stats();
+  s.pacedVideoPayloads = video.pacedPayloads;
+  s.pacedDatagrams = video.pacedDatagrams;
+  s.lateBatchReleases = video.lateBatchReleases;
+  s.maxBatchReleaseLatenessNs = video.maxReleaseLatenessNs;
+  s.observedUdpQueueHighWater = video.observedQueueHighWater;
   s.socketSendBufferBytes = socketSendBufferBytes_;
   s.pathMtu = pathMtu_;
   const auto adaptive = adaptiveMargin_.stats();
@@ -718,8 +695,7 @@ void GroovyTransport::close() noexcept {
   fpgaStatusSamples_ = fpgaFallbackSamples_ = vramUnsyncedSamples_ =
       vramQueueEmptySamples_ = 0;
   compressionTimeUs_ = submissionTimeUs_ = estimatedWireTimeUs_ = 0;
-  pacedVideoPayloads_ = pacedDatagrams_ = lateBatchReleases_ =
-      maxBatchReleaseLatenessNs_ = observedUdpQueueHighWater_ = 0;
+  videoSender_->reset();
   socketSendBufferBytes_ = 0;
   pathMtu_ = 0;
   progressiveInterlaceBuffer_ = false;

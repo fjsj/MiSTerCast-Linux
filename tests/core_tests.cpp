@@ -17,6 +17,7 @@
 #include "mistercast/adaptive_timing.hpp"
 #include "mistercast/config.hpp"
 #include "mistercast/groovy_transport.hpp"
+#include "mistercast/groovy_protocol.hpp"
 #include "mistercast/interfaces.hpp"
 #include "mistercast/pattern.hpp"
 #include "mistercast/stream_session.hpp"
@@ -373,6 +374,16 @@ int main() {
   auto bad = safe;
   bad.hTotal = 300;
   CHECK(bool(bad.validate()));
+  Modeline protocolOversize{"large", 100, 1024, 1030, 1040, 1100,
+                             600, 601, 602, 625, false};
+  CHECK(!protocolOversize.validate());
+  CHECK(validateGroovyModeline(protocolOversize) ==
+        "active image exceeds Groovy_MiSTer frame buffer");
+  AppConfig protocolConfig;
+  protocolConfig.modeline = protocolOversize;
+  CHECK(!protocolConfig.validate());
+  CHECK(validateGroovyConfig(protocolConfig) ==
+        "active image exceeds Groovy_MiSTer frame buffer");
   Modeline parsed;
   std::string error;
   CHECK(parseModeline("6.7 320 336 367 426 240 244 247 262 0", parsed, error));
