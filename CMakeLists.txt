@@ -17,12 +17,12 @@ find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
 add_library(mistercast-core
   src/core/types.cpp src/core/config.cpp src/core/transform.cpp
   src/core/audio_ring.cpp src/core/audio_pacer.cpp src/linux/x11_capture.cpp src/linux/pulse_audio.cpp
-  src/core/groovy_transport.cpp src/core/stream_session.cpp)
+  src/core/udp_pacing.cpp src/core/groovy_transport.cpp src/core/stream_session.cpp)
 add_library(MiSTerCast::core ALIAS mistercast-core)
 target_include_directories(mistercast-core PUBLIC include)
 target_link_libraries(mistercast-core PUBLIC Threads::Threads PkgConfig::XCB)
 target_compile_options(mistercast-core PRIVATE -Wall -Wextra -Wpedantic)
-target_compile_definitions(mistercast-core PRIVATE MISTERCAST_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(mistercast-core PRIVATE _GNU_SOURCE MISTERCAST_VERSION="${PROJECT_VERSION}")
 if(XCB_RANDR_FOUND)
   target_link_libraries(mistercast-core PRIVATE PkgConfig::XCB_RANDR)
   target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_RANDR=1)

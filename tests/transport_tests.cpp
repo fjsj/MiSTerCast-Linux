@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <iostream>
@@ -219,6 +222,243 @@ void checkFpgaHealthDiagnostics() {
   transport.close();
 }
 
+class FakeUdpSyscalls final : public UdpSubmitSyscalls {
+ public:
+  int64_t now{}, sleepLateness{};
+  std::vector<int> sendResults, waitResults;
+  std::vector<unsigned> requestedCounts;
+  std::vector<int64_t> releaseDeadlines;
+  std::vector<uint64_t> queueSamples;
+  size_t sendIndex{}, waitIndex{}, queueIndex{};
+
+  int64_t monotonicNowNs() noexcept override { return now; }
+  int sleepUntil(int64_t deadlineNs) noexcept override {
+    releaseDeadlines.push_back(deadlineNs);
+    now = std::max(now, deadlineNs) + sleepLateness;
+    return 0;
+  }
+  int sendMessages(int, mmsghdr*, unsigned count, int) noexcept override {
+    requestedCounts.push_back(count);
+    now += 1000;
+    if (sendIndex >= sendResults.size()) return int(count);
+    const int result = sendResults[sendIndex++];
+    return result > int(count) ? int(count) : result;
+  }
+  int waitWritable(int, int64_t deadlineNs) noexcept override {
+    if (waitIndex >= waitResults.size()) return 1;
+    const int result = waitResults[waitIndex++];
+    if (!result) now = deadlineNs;
+    return result;
+  }
+  bool outputQueueBytes(int, uint64_t& bytes) noexcept override {
+    if (queueIndex >= queueSamples.size()) return false;
+    bytes = queueSamples[queueIndex++];
+    return true;
+  }
+};
+
+struct TestMessages {
+  std::vector<uint8_t> bytes;
+  std::vector<iovec> vectors;
+  std::vector<mmsghdr> messages;
+
+  explicit TestMessages(size_t payloadBytes) : bytes(payloadBytes) {
+    const auto count = videoDatagramCount(payloadBytes);
+    vectors.resize(count);
+    messages.resize(count);
+    for (size_t i = 0, offset = 0; i < count; ++i) {
+      const size_t length =
+          std::min<size_t>(UdpPayloadBytes, payloadBytes - offset);
+      vectors[i].iov_base = bytes.data() + offset;
+      vectors[i].iov_len = length;
+      messages[i].msg_hdr.msg_iov = &vectors[i];
+      messages[i].msg_hdr.msg_iovlen = 1;
+      offset += length;
+    }
+  }
+};
+
+void checkPacingCalculations() {
+  CHECK(pacingDurationNs(1000, 0) == 0);
+  CHECK(videoDatagramCount(UdpPayloadBytes * 32) == 32);
+  CHECK(videoDatagramCount(UdpPayloadBytes * 32 + 1) == 33);
+  CHECK(videoWireBytes(UdpPayloadBytes + 1) ==
+        UdpPayloadBytes + 1 + 2 * UdpWireOverheadBytes);
+  CHECK(videoDatagramCount(ProtocolFramebufferBytes) == MaxVideoDatagrams);
+  CHECK(MaxVideoDatagrams == 846);
+  const auto duration = pacingDurationNs(470 * 1024,
+                                         VideoPacingBitsPerSecond);
+  CHECK(duration > 4200000 && duration < 4300000);
+  CHECK(videoCompletionGraceNs(1000000) == 5000000);
+  CHECK(videoCompletionGraceNs(16666666) == 8333333);
+  CHECK(videoCompletionGraceNs(10000000000) == 100000000);
+}
+
+void checkPacingSubmissionState() {
+  std::string error;
+  VideoSubmissionStats stats;
+
+  TestMessages boundary32(UdpPayloadBytes * 32);
+  FakeUdpSyscalls full32;
+  CHECK(submitVideoDatagrams(-1, boundary32.messages.data(),
+                             boundary32.messages.size(), 16666666, full32,
+                             stats, error));
+  CHECK(!stats.paced && full32.releaseDeadlines.empty() &&
+        stats.submittedDatagrams == 32);
+
+  TestMessages boundary33(UdpPayloadBytes * 32 + 17);
+  FakeUdpSyscalls full33;
+  full33.sleepLateness = 150000;
+  full33.queueSamples = {100, 250};
+  CHECK(submitVideoDatagrams(-1, boundary33.messages.data(),
+                             boundary33.messages.size(), 16666666, full33,
+                             stats, error));
+  CHECK(stats.paced && stats.submittedDatagrams == 33 &&
+        full33.requestedCounts.size() == 2 &&
+        full33.requestedCounts[0] == 32 && full33.requestedCounts[1] == 1);
+  CHECK(full33.releaseDeadlines.size() == 1 &&
+        full33.releaseDeadlines[0] > 0 && stats.lateBatchReleases == 1 &&
+        stats.maxReleaseLatenessNs == 150000 &&
+        stats.observedQueueHighWater == 250);
+
+  TestMessages seventy(UdpPayloadBytes * 69 + 5);
+  FakeUdpSyscalls monotonic;
+  CHECK(submitVideoDatagrams(-1, seventy.messages.data(),
+                             seventy.messages.size(), 16666666, monotonic,
+                             stats, error));
+  CHECK(monotonic.releaseDeadlines.size() == 2 &&
+        monotonic.releaseDeadlines[1] > monotonic.releaseDeadlines[0] &&
+        stats.estimatedWireNs ==
+            pacingDurationNs(UdpPayloadBytes * 69 + 5,
+                             VideoPacingBitsPerSecond));
+
+  TestMessages ten(UdpPayloadBytes * 9 + 7);
+  FakeUdpSyscalls partial;
+  partial.sendResults = {3, 7};
+  CHECK(submitVideoDatagrams(-1, ten.messages.data(), ten.messages.size(),
+                             16666666, partial, stats, error));
+  CHECK(partial.requestedCounts.size() == 2 &&
+        partial.requestedCounts[0] == 10 && partial.requestedCounts[1] == 7 &&
+        stats.submittedDatagrams == 10);
+
+  FakeUdpSyscalls interruptedSend;
+  interruptedSend.sendResults = {-EINTR, 100};
+  CHECK(submitVideoDatagrams(-1, ten.messages.data(), ten.messages.size(),
+                             16666666, interruptedSend, stats, error));
+  CHECK(interruptedSend.requestedCounts.size() == 2 &&
+        stats.submittedDatagrams == 10);
+
+  FakeUdpSyscalls recovers;
+  recovers.sendResults = {-EAGAIN, 100};
+  recovers.waitResults = {1};
+  CHECK(submitVideoDatagrams(-1, ten.messages.data(), ten.messages.size(),
+                             16666666, recovers, stats, error));
+  CHECK(stats.submittedDatagrams == 10);
+
+  FakeUdpSyscalls timesOut;
+  timesOut.sendResults = {-EAGAIN};
+  timesOut.waitResults = {0};
+  CHECK(!submitVideoDatagrams(-1, ten.messages.data(), ten.messages.size(),
+                              10000000000, timesOut, stats, error));
+  CHECK(error.find("deadline") != std::string::npos &&
+        timesOut.now <= 100000000 + stats.estimatedWireNs);
+
+  FakeUdpSyscalls hardError;
+  hardError.sendResults = {-EIO};
+  CHECK(!submitVideoDatagrams(-1, ten.messages.data(), ten.messages.size(),
+                              16666666, hardError, stats, error));
+  CHECK(error.find("video payload send failed") != std::string::npos &&
+        stats.submittedDatagrams == 0);
+}
+
+void checkFatalPayloadFailureStopsProtocol() {
+  unsigned blits = 0, laterCommands = 0;
+  FakeGroovyEndpoint endpoint([&](auto& peer, const auto& packet) {
+    if (packet.empty()) return;
+    if (packet[0] == kInit)
+      peer.replyVersion();
+    else if (packet[0] == kBlit)
+      ++blits;
+    else if (blits)
+      ++laterCommands;
+  });
+  if (!endpoint.valid()) return;
+  FakeUdpSyscalls syscalls;
+  syscalls.sendResults = {-EIO};
+  GroovyTransport transport(&syscalls);
+  std::string error;
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  CHECK(transport.switchMode(tinyMode(false), false, error));
+  CHECK(!transport.sendFrame(1, 0, std::vector<uint8_t>(12, 42), error));
+  int16_t audio[2]{};
+  CHECK(!transport.sendAudio(audio, 2, error));
+  transport.close();
+  endpoint.stop();
+  CHECK(blits == 1 && laterCommands == 0);
+}
+
+void checkPacedUdpDelivery() {
+  constexpr size_t payloadBytes = size_t(640) * 245 * 3;
+  bool commandBeforePayload = false, sizesValid = true, receivingFrame = false;
+  size_t expectedBytes = 0, receivedPayload = 0, datagrams = 0, finalSize = 0;
+  std::chrono::steady_clock::time_point firstPayload;
+  std::chrono::steady_clock::duration deliveryDuration{};
+  FakeGroovyEndpoint endpoint([&](auto& peer, const auto& packet) {
+    if (receivingFrame) {
+      if (!receivedPayload) firstPayload = std::chrono::steady_clock::now();
+      if (packet.size() > UdpPayloadBytes) sizesValid = false;
+      receivedPayload += packet.size();
+      ++datagrams;
+      finalSize = packet.size();
+      if (receivedPayload >= expectedBytes) {
+        deliveryDuration = std::chrono::steady_clock::now() - firstPayload;
+        receivingFrame = false;
+      }
+      return;
+    }
+    if (packet.empty()) return;
+    if (packet[0] == kInit) {
+      peer.replyVersion();
+    } else if (packet[0] == kBlit) {
+      commandBeforePayload = true;
+      const uint32_t compressedBytes =
+          packet.size() == 12 ? packetU32(packet, 8) : 0;
+      expectedBytes = compressedBytes ? compressedBytes : payloadBytes;
+      receivingFrame = true;
+    }
+  });
+  if (!endpoint.valid()) return;
+
+  std::vector<uint8_t> pixels(payloadBytes);
+  uint32_t random = 0x12345678;
+  for (auto& value : pixels) {
+    random = random * 1664525u + 1013904223u;
+    value = uint8_t(random >> 24);
+  }
+  std::string error;
+  GroovyTransport transport;
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
+  Modeline mode{"pacing", 12.5, 640, 656, 700, 800, 245, 246, 247, 260,
+                false};
+  CHECK(transport.switchMode(mode, false, error));
+  CHECK(transport.sendFrame(1, 0, pixels, error));
+  const auto stats = transport.stats();
+  transport.close();
+  endpoint.stop();
+
+  CHECK(commandBeforePayload && sizesValid && receivedPayload == payloadBytes);
+  CHECK(datagrams == videoDatagramCount(payloadBytes));
+  CHECK(finalSize == payloadBytes % UdpPayloadBytes);
+  CHECK(stats.pacedVideoPayloads == 1 &&
+        stats.pacedDatagrams == videoDatagramCount(payloadBytes));
+  const auto elapsedUs =
+      std::chrono::duration_cast<std::chrono::microseconds>(deliveryDuration)
+          .count();
+  const auto expectedUs =
+      pacingDurationNs(payloadBytes, VideoPacingBitsPerSecond) / 1000;
+  CHECK(elapsedUs + 1000 >= int64_t(expectedUs));
+}
+
 void checkSendErrorsAreFatal() {
   FakeGroovyEndpoint endpoint([](auto& peer, const auto& packet) {
     if (!packet.empty() && packet[0] == kInit) peer.replyAck({});
@@ -272,6 +512,10 @@ int main() {
   checkFieldAlignment();
   checkFieldAlignmentWraparound();
   checkFpgaHealthDiagnostics();
+  checkPacingCalculations();
+  checkPacingSubmissionState();
+  checkFatalPayloadFailureStopsProtocol();
+  checkPacedUdpDelivery();
   checkSendErrorsAreFatal();
   checkAutomaticSyncLine(false);
   checkAutomaticSyncLine(true);

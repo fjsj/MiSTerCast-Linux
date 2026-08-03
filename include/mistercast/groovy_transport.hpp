@@ -1,18 +1,24 @@
 #pragma once
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include "mistercast/types.hpp"
+#include "mistercast/udp_pacing.hpp"
 namespace mistercast {
 struct GroovyTransportStats {
   uint32_t acknowledgedFrame{}, fpgaFrame{};
   uint16_t requestedSyncLine{}, fpgaVCount{};
   uint64_t acknowledgedFrames{}, missedAcks{}, streamTimeUs{}, ackAgeMs{},
       sendErrors{}, networkRttUs{}, fieldRealignments{}, fpgaStatusSamples{},
-      fpgaFallbackSamples{}, vramUnsyncedSamples{}, vramQueueEmptySamples{};
+      fpgaFallbackSamples{}, vramUnsyncedSamples{}, vramQueueEmptySamples{},
+      compressionTimeUs{}, submissionTimeUs{}, estimatedWireTimeUs{},
+      pacedVideoPayloads{}, pacedDatagrams{}, lateBatchReleases{},
+      maxBatchReleaseLatenessNs{}, observedUdpQueueHighWater{},
+      socketSendBufferBytes{};
   int64_t rasterCorrectionUs{};
   uint8_t outgoingField{}, fpgaField{};
   bool vramSynced{}, vgaFrameskip{}, vgaVblank{}, vramQueuePresent{},
@@ -23,7 +29,7 @@ struct GroovyTransportStats {
 bool compressionAvailable() noexcept;
 class GroovyTransport {
  public:
-  GroovyTransport();
+  explicit GroovyTransport(UdpSubmitSyscalls* syscalls = nullptr);
   ~GroovyTransport();
   GroovyTransport(const GroovyTransport&) = delete;
   GroovyTransport& operator=(const GroovyTransport&) = delete;
@@ -55,14 +61,19 @@ class GroovyTransport {
   uint16_t mtu_{1472}, vTotal_{}, frameDelay_{};
   uint8_t interlaceShift_{};
   std::vector<uint8_t> compressed_;
-  bool syncRefresh_{true}, progressiveInterlaceBuffer_{}, firstFrame_{true};
+  std::array<mmsghdr, MaxVideoDatagrams> messages_{};
+  std::array<iovec, MaxVideoDatagrams> iovecs_{};
+  bool syncRefresh_{true}, progressiveInterlaceBuffer_{}, firstFrame_{true},
+      fatalPayloadError_{};
   bool phaseValid_{}, fallbackPhaseSet_{}, lastAligned_{}, haveFpgaStatus_{},
       haveDiagnosticFrame_{};
-  uint64_t frameTimeNs_{}, lineTimeNs_{}, networkRttNs_{}, lastStreamNs_{};
+  uint64_t frameTimeNs_{}, lineTimeNs_{}, networkRttNs_{}, lastStreamNs_{},
+      lastWireDeliveryNs_{};
   uint32_t currentFrame_{}, fallbackFrame_{}, lastAlignedFrame_{},
       diagnosticFrame_{};
   uint8_t coreVersion_{}, lastAlignedField_{};
   FpgaStatus fpga_{};
+  UdpSubmitSyscalls* udpSyscalls_{};
   std::chrono::steady_clock::time_point syncEpoch_{}, lastAckAt_{},
       lastSendEndAt_{};
   bool sendPacket(const void*, size_t, std::string&);
@@ -81,7 +92,11 @@ class GroovyTransport {
   std::atomic<uint64_t> ackedFrames_{0}, missedAcks_{0}, streamTimeUs_{0},
       ackAgeMs_{0}, sendErrors_{0}, fieldRealignments_{0},
       fpgaStatusSamples_{0}, fpgaFallbackSamples_{0},
-      vramUnsyncedSamples_{0}, vramQueueEmptySamples_{0};
+      vramUnsyncedSamples_{0}, vramQueueEmptySamples_{0},
+      compressionTimeUs_{0}, submissionTimeUs_{0}, estimatedWireTimeUs_{0},
+      pacedVideoPayloads_{0}, pacedDatagrams_{0}, lateBatchReleases_{0},
+      maxBatchReleaseLatenessNs_{0}, observedUdpQueueHighWater_{0},
+      socketSendBufferBytes_{0};
   std::atomic<int64_t> rasterCorrectionUs_{0};
 };
 }  // namespace mistercast

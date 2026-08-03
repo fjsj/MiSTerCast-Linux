@@ -197,8 +197,11 @@ int main(int argc, char** argv) {
                 << s.transport.fpgaVCount << ", frames "
                 << s.transport.acknowledgedFrame << "/" << s.transport.fpgaFrame
                 << ", correction " << s.transport.rasterCorrectionUs
-                << " us, stream " << s.transport.streamTimeUs
-                << " us, transform " << s.transformTimeUs << " us (max "
+                << " us, compress/submit/wire "
+                << s.transport.compressionTimeUs << "/"
+                << s.transport.submissionTimeUs << "/"
+                << s.transport.estimatedWireTimeUs << " us, transform "
+                << s.transformTimeUs << " us (max "
                 << s.transformMaxUs << " us), ACK "
                 << s.transport.acknowledgedFrames << "/"
                 << s.transport.missedAcks << ", RTT "
@@ -211,7 +214,11 @@ int main(int argc, char** argv) {
                 << ", FPGA " << s.transport.fpgaFallbackSamples << "/"
                 << s.transport.vramUnsyncedSamples << "/"
                 << s.transport.vramQueueEmptySamples << " unhealthy of "
-                << s.transport.fpgaStatusSamples;
+                << s.transport.fpgaStatusSamples << ", paced "
+                << s.transport.pacedVideoPayloads << " payloads, UDP peak "
+                << s.transport.observedUdpQueueHighWater << " B, late "
+                << s.transport.lateBatchReleases << " (max "
+                << s.transport.maxBatchReleaseLatenessNs / 1000 << " us)";
       if (s.transport.interlacedFieldBuffer)
         std::cerr << ", field " << unsigned(s.transport.outgoingField)
                   << "/FPGA " << unsigned(s.transport.fpgaField)

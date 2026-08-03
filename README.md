@@ -72,13 +72,15 @@ The GUI exposes every routine streaming setting except `syncRefresh`. The CLI ac
 
 With `syncRefresh` enabled, MiSTerCast implements the Groovy_MiSTer client timing loop rather than free-running the PC and MiSTer clocks independently:
 
-1. It decodes the 13-byte ACK containing the echoed frame/scanline, current FPGA frame/scanline, VRAM state, field, vblank, framebuffer fallback, and audio bit.
+1. It decodes the 13-byte ACK containing the echoed frame/scanline, current FPGA frame/scanline, VRAM synchronization and queue state, field, vblank, framebuffer fallback, and audio bit.
 2. Automatic frame delay converts measured capture/transform/network time plus a 1.5 ms safety margin into a nonzero target scanline.
 3. The ACK raster error corrects the next frame deadline without adding a queued frame.
 4. Interlaced streams rebase their frame number and choose the field from FPGA status before transforming pixels. A modeline switch invalidates the old field phase; fields alternate from the core's deterministic reset phase until a matching post-switch ACK locks the sender back to FPGA feedback.
 5. The capture worker takes one frame when requested by the corrected raster cycle; it does not free-run on a second independent refresh clock or flood full-resolution captures.
 
-The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction, stream, and transform times, matched/missed ACKs, and VRAM state every five seconds. Transform timing is shown as a 1/8 EWMA plus the since-start maximum. Field-buffer interlace also reports the outgoing/FPGA field, whether phase is locked, and the number of feedback-driven realignments. The GUI shows a compact subset in its status line and logs each realignment once. A small number of startup ACK misses or audio underrun samples can occur while buffers start; counters that continue increasing indicate a real timing or transport problem.
+The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction, compression/submission/wire times, matched/missed ACKs, current VRAM/queue state, and unique unhealthy FPGA samples every five seconds. Transform timing is shown as a 1/8 EWMA plus the since-start maximum. Field-buffer interlace also reports the outgoing/FPGA field, whether phase is locked, and the number of feedback-driven realignments. The GUI splits its compact diagnostics across wrapping video, transport, and audio rows; percentages keep the layout bounded and tooltips expose raw counters. A small number of startup ACK misses, queue-empty samples, or audio underrun samples can occur while buffers start; counters that continue increasing indicate timing or transport pressure.
+
+Video payloads larger than 32 UDP datagrams are released in batches of at most 32 at an average 950 Mb/s. The schedule charges each datagram's actual payload plus Ethernet/IP/UDP wire overhead, including a short final datagram. Commands and audio remain immediate. Positive partial submissions and temporary socket pressure are completed within the calculated wire duration plus a 5–100 ms modeline-derived grace period; failure after a blit command is fatal because another protocol command would otherwise be consumed as unfinished frame data. Status calls the `TIOCOUTQ` result an observed UDP queue high-water because Linux socket accounting is not exact wire-byte accounting.
 
 For repeatable CPU comparisons, explicitly build and run the optional transform benchmark:
 

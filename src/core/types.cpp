@@ -15,7 +15,8 @@ std::optional<std::string> Modeline::validate() const {
   if (!vActive || vActive > 2160 ||
       !(vActive < vBegin && vBegin <= vEnd && vEnd < vTotal))
     return "vertical timings must be ordered active < begin <= end < total";
-  if (static_cast<uint64_t>(hActive) * vActive * 3 > 1245312)
+  if (static_cast<uint64_t>(hActive) * vActive * 3 >
+      ProtocolFramebufferBytes)
     return "active image exceeds Groovy_MiSTer frame buffer";
   return {};
 }

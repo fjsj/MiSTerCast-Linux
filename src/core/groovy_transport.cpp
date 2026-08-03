@@ -44,7 +44,8 @@ bool compressionAvailable() noexcept {
 #endif
 }
 
-GroovyTransport::GroovyTransport() = default;
+GroovyTransport::GroovyTransport(UdpSubmitSyscalls* syscalls)
+    : udpSyscalls_(syscalls ? syscalls : &systemUdpSubmitSyscalls()) {}
 GroovyTransport::~GroovyTransport() { close(); }
 
 bool GroovyTransport::decodeStatus(const uint8_t* data, size_t size,
@@ -111,6 +112,10 @@ bool GroovyTransport::sendPacket(const void* p, size_t n, std::string& e) {
     e = "transport is closed";
     return false;
   }
+  if (fatalPayloadError_) {
+    e = "transport requires reconnect after video payload failure";
+    return false;
+  }
   // A frame is one header followed by an exact byte count split across ordered
   // datagrams. Silently dropping a chunk leaves the receiver consuming bytes
   // from later commands as the unfinished frame, so a header ACK is not proof
@@ -148,14 +153,20 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
   fieldRealignments_ = 0;
   fpgaStatusSamples_ = fpgaFallbackSamples_ = vramUnsyncedSamples_ =
       vramQueueEmptySamples_ = 0;
+  compressionTimeUs_ = submissionTimeUs_ = estimatedWireTimeUs_ = 0;
+  pacedVideoPayloads_ = pacedDatagrams_ = lateBatchReleases_ =
+      maxBatchReleaseLatenessNs_ = observedUdpQueueHighWater_ = 0;
+  socketSendBufferBytes_ = 0;
   coreVersion_ = 0;
   lastSendEndAt_ = {};
+  lastWireDeliveryNs_ = 0;
   rasterCorrectionUs_ = 0;
   outgoingField_ = fpgaField_ = 0;
   interlacedFieldBuffer_ = fieldPhaseValid_ = false;
   phaseValid_ = fallbackPhaseSet_ = lastAligned_ = haveDiagnosticFrame_ =
       false;
   diagnosticFrame_ = 0;
+  fatalPayloadError_ = false;
   fpga_ = {};
   haveFpgaStatus_ = false;
   if (host.empty()) {
@@ -194,6 +205,12 @@ bool GroovyTransport::open(const std::string& host, uint32_t rate,
     e = "cannot create UDP connection to target";
     return false;
   }
+  int actualSendBuffer = 0;
+  socklen_t actualSendBufferSize = sizeof(actualSendBuffer);
+  if (getsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &actualSendBuffer,
+                 &actualSendBufferSize) == 0 &&
+      actualSendBuffer > 0)
+    socketSendBufferBytes_ = uint64_t(actualSendBuffer);
   uint8_t cmd[5] = {CMD_INIT,
 #ifdef MISTERCAST_HAVE_LZ4
                     1,
@@ -279,6 +296,7 @@ bool GroovyTransport::switchMode(const Modeline& m,
               : 0;
   frameBytes_ = uint32_t(m.hActive) * m.vActive * 3 /
                 ((m.interlaced && !progressiveInterlaceBuffer_) ? 2 : 1);
+  compressed_.resize(frameBytes_);
   vTotal_ = m.vTotal;
   interlaceShift_ = m.interlaced ? 1 : 0;
   lineTimeNs_ =
@@ -287,6 +305,7 @@ bool GroovyTransport::switchMode(const Modeline& m,
   syncEpoch_ = std::chrono::steady_clock::now();
   lastAckAt_ = {};
   lastStreamNs_ = 0;
+  lastWireDeliveryNs_ = 0;
   currentFrame_ = 0;
   firstFrame_ = true;
   return sendPacket(b, sizeof(b), e);
@@ -353,8 +372,12 @@ uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
       interlaceShift_ && !progressiveInterlaceBuffer_
           ? std::max<uint16_t>(1, vTotal_ >> 1)
           : vTotal_;
+  // lastStreamNs_ contains only active compression/syscall work because the
+  // historical formula subtracts it. Paced wire delivery is future work for
+  // the next field, so account for its estimate with the opposite sign.
   const int64_t leadNs =
-      int64_t(networkRttNs_ + kAutoMarginNs + workNs) - int64_t(lastStreamNs_);
+      int64_t(networkRttNs_ + kAutoMarginNs + workNs + lastWireDeliveryNs_) -
+      int64_t(lastStreamNs_);
   if (leadNs <= 0) return 1;
   if (uint64_t(leadNs) >= frameTimeNs_) return 1;
   auto lines = uint64_t(
@@ -392,8 +415,8 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
   const uint8_t* payload = rgb.data();
   size_t bytes = rgb.size();
   uint32_t csize = 0;
+  const auto compressionStarted = std::chrono::steady_clock::now();
 #ifdef MISTERCAST_HAVE_LZ4
-  compressed_.resize(rgb.size());
   int z = LZ4_compress_default(reinterpret_cast<const char*>(rgb.data()),
                                reinterpret_cast<char*>(compressed_.data()),
                                int(rgb.size()), int(compressed_.size()));
@@ -403,6 +426,11 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
     payload = compressed_.data();
   }
 #endif
+  const uint64_t compressionNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - compressionStarted)
+          .count();
+  compressionTimeUs_ = compressionNs / 1000;
   uint8_t h[12]{};
   h[0] = CMD_BLIT_FIELD_VSYNC;
   std::memcpy(h + 1, &frame, 4);
@@ -410,11 +438,67 @@ bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
   std::memcpy(h + 6, &vsync, 2);
   if (csize) std::memcpy(h + 8, &csize, 4);
   size_t hs = csize ? 12 : 8;
-  if (!sendPacket(h, hs, e) || !sendChunks(payload, bytes, e)) return false;
+  const size_t packetCount = videoDatagramCount(bytes);
+  if (packetCount > messages_.size()) {
+    e = "video payload exceeds descriptor capacity";
+    return false;
+  }
+  for (size_t i = 0, offset = 0; i < packetCount; ++i) {
+    const size_t packetBytes = std::min<size_t>(UdpPayloadBytes, bytes - offset);
+    iovecs_[i].iov_base = const_cast<uint8_t*>(payload + offset);
+    iovecs_[i].iov_len = packetBytes;
+    messages_[i].msg_hdr.msg_iov = &iovecs_[i];
+    messages_[i].msg_hdr.msg_iovlen = 1;
+    messages_[i].msg_len = 0;
+    offset += packetBytes;
+  }
+  auto& syscalls = *udpSyscalls_;
+  uint64_t queueBefore = 0;
+  if (syscalls.outputQueueBytes(fd_, queueBefore)) {
+    auto peak = observedUdpQueueHighWater_.load();
+    while (peak < queueBefore &&
+           !observedUdpQueueHighWater_.compare_exchange_weak(peak,
+                                                             queueBefore)) {}
+  }
+  const auto submissionStarted = std::chrono::steady_clock::now();
+  const auto headerStarted = submissionStarted;
+  if (!sendPacket(h, hs, e)) return false;
+  const uint64_t headerNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - headerStarted)
+          .count();
+  VideoSubmissionStats submission;
+  const bool submitted = submitVideoDatagrams(
+      fd_, messages_.data(), packetCount, frameTimeNs_, syscalls, submission, e);
+  submissionTimeUs_ =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - submissionStarted)
+          .count();
+  estimatedWireTimeUs_ = submission.estimatedWireNs / 1000;
+  lastWireDeliveryNs_ = submission.estimatedWireNs;
+  if (submission.paced) {
+    ++pacedVideoPayloads_;
+    pacedDatagrams_ += submission.submittedDatagrams;
+  }
+  lateBatchReleases_ += submission.lateBatchReleases;
+  auto maxLate = maxBatchReleaseLatenessNs_.load();
+  while (maxLate < submission.maxReleaseLatenessNs &&
+         !maxBatchReleaseLatenessNs_.compare_exchange_weak(
+             maxLate, submission.maxReleaseLatenessNs)) {}
+  auto queuePeak = observedUdpQueueHighWater_.load();
+  while (queuePeak < submission.observedQueueHighWater &&
+         !observedUdpQueueHighWater_.compare_exchange_weak(
+             queuePeak, submission.observedQueueHighWater)) {}
+  if (!submitted) {
+    ++sendErrors_;
+    fatalPayloadError_ = true;
+    return false;
+  }
   lastSendEndAt_ = std::chrono::steady_clock::now();
-  lastStreamNs_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      lastSendEndAt_ - sendStart)
-                      .count();
+  // Intentional release sleeps are delivery scheduling, not evidence that the
+  // sender began its work late. Keep syncLine's historical active-work input
+  // separate from the paced wall-clock submission duration.
+  lastStreamNs_ = compressionNs + headerNs + submission.activeSubmissionNs;
   streamTimeUs_ = lastStreamNs_ / 1000;
   drainStatus(frame);
   return true;
@@ -528,6 +612,15 @@ GroovyTransportStats GroovyTransport::stats() const noexcept {
   s.fpgaFallbackSamples = fpgaFallbackSamples_;
   s.vramUnsyncedSamples = vramUnsyncedSamples_;
   s.vramQueueEmptySamples = vramQueueEmptySamples_;
+  s.compressionTimeUs = compressionTimeUs_;
+  s.submissionTimeUs = submissionTimeUs_;
+  s.estimatedWireTimeUs = estimatedWireTimeUs_;
+  s.pacedVideoPayloads = pacedVideoPayloads_;
+  s.pacedDatagrams = pacedDatagrams_;
+  s.lateBatchReleases = lateBatchReleases_;
+  s.maxBatchReleaseLatenessNs = maxBatchReleaseLatenessNs_;
+  s.observedUdpQueueHighWater = observedUdpQueueHighWater_;
+  s.socketSendBufferBytes = socketSendBufferBytes_;
   s.outgoingField = outgoingField_;
   s.fpgaField = fpgaField_;
   s.vramSynced = vramSynced_;
@@ -543,7 +636,7 @@ void GroovyTransport::close() noexcept {
   if (fd_ >= 0) {
     uint8_t c = CMD_CLOSE;
     std::string ignored;
-    sendPacket(&c, 1, ignored);
+    if (!fatalPayloadError_) sendPacket(&c, 1, ignored);
     ::close(fd_);
     fd_ = -1;
   }
@@ -557,11 +650,17 @@ void GroovyTransport::close() noexcept {
   phaseValid_ = fallbackPhaseSet_ = lastAligned_ = haveDiagnosticFrame_ =
       false;
   diagnosticFrame_ = 0;
+  fatalPayloadError_ = false;
   fpgaStatusSamples_ = fpgaFallbackSamples_ = vramUnsyncedSamples_ =
       vramQueueEmptySamples_ = 0;
+  compressionTimeUs_ = submissionTimeUs_ = estimatedWireTimeUs_ = 0;
+  pacedVideoPayloads_ = pacedDatagrams_ = lateBatchReleases_ =
+      maxBatchReleaseLatenessNs_ = observedUdpQueueHighWater_ = 0;
+  socketSendBufferBytes_ = 0;
   progressiveInterlaceBuffer_ = false;
   frameBytes_ = 0;
   frameTimeNs_ = lineTimeNs_ = 0;
+  lastWireDeliveryNs_ = 0;
   compressed_.clear();
 }
 }  // namespace mistercast

@@ -15,6 +15,7 @@
 #include "mistercast/groovy_transport.hpp"
 #include "mistercast/interfaces.hpp"
 #include "mistercast/stream_session.hpp"
+#include "mistercast/udp_pacing.hpp"
 using namespace mistercast;
 static int failed = 0;
 #define CHECK(x)                                                              \
@@ -24,6 +25,7 @@ static int failed = 0;
       ++failed;                                                               \
     }                                                                         \
   } while (0)
+
 
 namespace {
 // Synthetic capture sources, so session behaviour that depends on the monitor
@@ -357,6 +359,7 @@ int main() {
   AudioPacer::conformStereo(servoSource, 6, servoOutput, 8);
   CHECK(servoOutput.size() == 8 && servoOutput[0] == 0 && servoOutput[4] == 4 &&
         servoOutput[6] == 4);
+
   checkCropFollowsMonitorResize();
   checkLiveModelineSwitch();
   checkAudioSkippedWhenCoreHasAudioOff();

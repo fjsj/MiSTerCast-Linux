@@ -64,7 +64,8 @@ class MainWindow final : public QMainWindow {
   QSpinBox *width_{}, *height_{}, *xOffset_{}, *yOffset_{}, *frameDelay_{};
   QCheckBox *interlaced_{}, *progressiveInterlaceBuffer_{}, *audio_{},
       *preview_{};
-  QLabel *windowSelection_{}, *previewImage_{}, *status_{};
+  QLabel *windowSelection_{}, *previewImage_{}, *status_{}, *videoStatus_{},
+      *transportStatus_{}, *audioStatus_{};
   QPlainTextEdit* log_{};
   std::vector<QWidget*> streamLockedControls_;
   QTimer statsTimer_, modelineApplyTimer_;
@@ -192,6 +193,11 @@ class MainWindow final : public QMainWindow {
         break;
     }
     status_->setText(stateName(state));
+    if (state != SessionState::Streaming) {
+      videoStatus_->clear();
+      transportStatus_->clear();
+      audioStatus_->clear();
+    }
     refreshConfigurationEnabled(state);
     refreshStartEnabled();
   }
@@ -361,35 +367,82 @@ class MainWindow final : public QMainWindow {
         stats.audioSampleRate
             ? stats.audioBufferedSamples * 500.0 / stats.audioSampleRate
             : 0.0;
+    const double refresh = modelineFromControls().refreshHz();
+    const double streamPercent = refresh > 0 ? stats.streamFps * 100 / refresh : 0;
+    const double capturePercent =
+        refresh > 0 ? stats.captureFps * 100 / refresh : 0;
+    const double droppedPercent = stats.capturedFrames
+                                      ? stats.droppedFrames * 100.0 /
+                                            stats.capturedFrames
+                                      : 0;
+    const double queuePercent = stats.transport.socketSendBufferBytes
+                                    ? stats.transport.observedUdpQueueHighWater *
+                                          100.0 /
+                                          stats.transport.socketSendBufferBytes
+                                    : 0;
     QString fieldStatus;
     if (stats.transport.interlacedFieldBuffer)
-      fieldStatus = QString("  |  field %1/FPGA %2 %3")
+      fieldStatus = QString(" · field %1/FPGA %2 %3")
                         .arg(stats.transport.outgoingField)
                         .arg(stats.transport.fpgaField)
                         .arg(stats.transport.fieldPhaseValid ? "locked"
                                                              : "acquiring");
-    status_->setText(QString("Streaming  |  %1 fps  |  capture %2 fps  |  "
-                             "transform %3/%4 us  |  dropped %5  |  "
-                             "sync %6/%7 (%8 us)  |  VRAM %9 / queue %10  | "
-                             "audio %11 ms / %12%  |  MiSTer audio %13%14")
-                         .arg(stats.streamFps, 0, 'f', 1)
-                         .arg(stats.captureFps, 0, 'f', 1)
-                         .arg(stats.transformTimeUs)
-                         .arg(stats.transformMaxUs)
-                         .arg(stats.droppedFrames)
-                         .arg(stats.transport.requestedSyncLine)
-                         .arg(stats.transport.fpgaVCount)
-                         .arg(stats.transport.rasterCorrectionUs)
-                         .arg(stats.transport.vramSynced
-                                  ? (stats.transport.vgaFrameskip ? "fallback"
-                                                                  : "synced")
-                                  : "unsynced")
-                         .arg(stats.transport.vramQueuePresent ? "ready"
-                                                               : "empty")
-                         .arg(audioMs, 0, 'f', 0)
-                         .arg(stats.audioPeak * 100, 0, 'f', 0)
-                         .arg(stats.misterAudioEnabled ? "on" : "off")
-                         .arg(fieldStatus));
+    status_->setText("Streaming");
+    videoStatus_->setText(
+        QString("Video %1% · capture %2% · dropped %3% · transform %4 µs")
+            .arg(streamPercent, 0, 'f', 0)
+            .arg(capturePercent, 0, 'f', 0)
+            .arg(droppedPercent, 0, 'f', 1)
+            .arg(stats.transformTimeUs));
+    videoStatus_->setToolTip(
+        QString("Video: %1 fps (%2 frames)\nCapture: %3 fps (%4 frames)\n"
+                "Dropped: %5 frames\nTransform: %6 µs EWMA, %7 µs maximum")
+            .arg(stats.streamFps, 0, 'f', 2)
+            .arg(stats.sentFrames)
+            .arg(stats.captureFps, 0, 'f', 2)
+            .arg(stats.capturedFrames)
+            .arg(stats.droppedFrames)
+            .arg(stats.transformTimeUs)
+            .arg(stats.transformMaxUs));
+    transportStatus_->setText(
+        QString("Sync %1/%2 · FPGA %3 · queue %4 · UDP peak %5% · late %6%7")
+            .arg(stats.transport.requestedSyncLine)
+            .arg(stats.transport.fpgaVCount)
+            .arg(stats.transport.vramSynced
+                     ? (stats.transport.vgaFrameskip ? "fallback" : "synced")
+                     : "unsynced")
+            .arg(stats.transport.vramQueuePresent ? "ready" : "empty")
+            .arg(queuePercent, 0, 'f', 1)
+            .arg(stats.transport.lateBatchReleases)
+            .arg(fieldStatus));
+    transportStatus_->setToolTip(
+        QString("Raster correction: %1 µs\nCompression/submission/wire: "
+                "%2/%3/%4 µs\nUDP queue peak: %5 of %6 bytes\n"
+                "Paced payloads/datagrams: %7/%8\nMaximum batch lateness: %9 µs")
+            .arg(stats.transport.rasterCorrectionUs)
+            .arg(stats.transport.compressionTimeUs)
+            .arg(stats.transport.submissionTimeUs)
+            .arg(stats.transport.estimatedWireTimeUs)
+            .arg(stats.transport.observedUdpQueueHighWater)
+            .arg(stats.transport.socketSendBufferBytes)
+            .arg(stats.transport.pacedVideoPayloads)
+            .arg(stats.transport.pacedDatagrams)
+            .arg(stats.transport.maxBatchReleaseLatenessNs / 1000));
+    const bool audioHealthy =
+        stats.audioDroppedSamples == 0 && stats.audioUnderrunSamples == 0;
+    audioStatus_->setText(
+        QString("Audio %1 ms · level %2% · MiSTer %3 · %4")
+            .arg(audioMs, 0, 'f', 0)
+            .arg(stats.audioPeak * 100, 0, 'f', 0)
+            .arg(stats.misterAudioEnabled ? "on" : "off")
+            .arg(audioHealthy ? "healthy" : "pressure detected"));
+    audioStatus_->setToolTip(
+        QString("Buffered: %1 samples at %2 Hz\nOverrun drops: %3 samples\n"
+                "Underrun silence: %4 samples")
+            .arg(stats.audioBufferedSamples)
+            .arg(stats.audioSampleRate)
+            .arg(stats.audioDroppedSamples)
+            .arg(stats.audioUnderrunSamples));
     if (stats.droppedFrames > previousDropped_ + 30) {
       append(QString("Performance: %1 video frames dropped.")
                  .arg(stats.droppedFrames));
@@ -573,10 +626,22 @@ class MainWindow final : public QMainWindow {
     auto* logsBox = new QGroupBox("Logs");
     auto* logsLayout = new QVBoxLayout(logsBox);
     status_ = new QLabel("Idle");
+    status_->setStyleSheet("font-weight: bold");
+    videoStatus_ = new QLabel;
+    transportStatus_ = new QLabel;
+    audioStatus_ = new QLabel;
+    for (auto* diagnostic : {videoStatus_, transportStatus_, audioStatus_}) {
+      diagnostic->setWordWrap(true);
+      diagnostic->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+      diagnostic->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    }
     log_ = new QPlainTextEdit;
     log_->setReadOnly(true);
     log_->document()->setMaximumBlockCount(300);
     logsLayout->addWidget(status_);
+    logsLayout->addWidget(videoStatus_);
+    logsLayout->addWidget(transportStatus_);
+    logsLayout->addWidget(audioStatus_);
     logsLayout->addWidget(log_);
     root->addWidget(logsBox, 2);
     setCentralWidget(central);
