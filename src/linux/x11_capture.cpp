@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <unistd.h>
 
 #include "mistercast/interfaces.hpp"
@@ -44,10 +46,11 @@ class X11Capture final : public IVideoCapture {
   uint32_t redMask_{0xff0000}, greenMask_{0xff00}, blueMask_{0xff};
   uint8_t depth_{}, bitsPerPixel_{32};
   bool lsbFirst_{true};
-  uint32_t consecutiveFailures_{}, shmFailures_{};
+  uint32_t shmFailures_{};
   uint32_t windowGeometryPoll_{};
-  // Roughly two seconds of retries at the capture rate before giving up.
-  static constexpr uint32_t kMaxConsecutiveFailures = 120, kMaxShmFailures = 5;
+  std::optional<std::chrono::steady_clock::time_point> captureFailureSince_;
+  static constexpr auto kCaptureFailureTimeout = std::chrono::seconds(2);
+  static constexpr uint32_t kMaxShmFailures = 5;
   void resolvePixelFormat(uint8_t depth, xcb_visualid_t visual = 0) {
     auto* setup = xcb_get_setup(connection_);
     lsbFirst_ = setup->image_byte_order == XCB_IMAGE_ORDER_LSB_FIRST;
@@ -176,11 +179,14 @@ class X11Capture final : public IVideoCapture {
     if (windowMode_) {
       std::string ignored;
       if (!connect(ignored)) return false;
-      auto geometry = xcb_get_geometry_reply(
-          connection_, xcb_get_geometry(connection_, selectedWindow_), nullptr);
-      auto attributes = xcb_get_window_attributes_reply(
-          connection_, xcb_get_window_attributes(connection_, selectedWindow_),
-          nullptr);
+      const auto geometryCookie =
+          xcb_get_geometry(connection_, selectedWindow_);
+      const auto attributesCookie =
+          xcb_get_window_attributes(connection_, selectedWindow_);
+      auto* geometry =
+          xcb_get_geometry_reply(connection_, geometryCookie, nullptr);
+      auto* attributes = xcb_get_window_attributes_reply(
+          connection_, attributesCookie, nullptr);
       if (!geometry || !attributes ||
           attributes->map_state != XCB_MAP_STATE_VIEWABLE) {
         free(geometry);
@@ -409,7 +415,7 @@ class X11Capture final : public IVideoCapture {
         return false;
       }
       region_ = {0, 0, selected_.width, selected_.height};
-      consecutiveFailures_ = 0;
+      captureFailureSince_.reset();
       windowGeometryPoll_ = 0;
       running_ = true;
       return true;
@@ -441,7 +447,7 @@ class X11Capture final : public IVideoCapture {
     error_ = std::move(cb);
     resolvePixelFormat(screen_->root_depth);
     setupShm();
-    consecutiveFailures_ = 0;
+    captureFailureSince_.reset();
     running_ = true;
     return true;
   }
@@ -465,7 +471,7 @@ class X11Capture final : public IVideoCapture {
       if (!recoverLocked()) return captureFailedLocked();
     }
     if (captureLocked(out)) {
-      consecutiveFailures_ = 0;
+      captureFailureSince_.reset();
       out.sequence = ++sequence_;
       return true;
     }
@@ -477,7 +483,9 @@ class X11Capture final : public IVideoCapture {
     return captureFailedLocked();
   }
   bool captureFailedLocked() {
-    if (++consecutiveFailures_ >= kMaxConsecutiveFailures) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!captureFailureSince_) captureFailureSince_ = now;
+    if (now - *captureFailureSince_ >= kCaptureFailureTimeout) {
       running_ = false;
       if (error_)
         error_({"video", "X11 capture kept failing",
