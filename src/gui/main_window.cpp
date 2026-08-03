@@ -380,13 +380,18 @@ class MainWindow final : public QMainWindow {
                                           100.0 /
                                           stats.transport.socketSendBufferBytes
                                     : 0;
+    const double reservePercent = vTotal_->value()
+                                      ? stats.transport.deliveryReserveLines *
+                                            100.0 / vTotal_->value()
+                                      : 0;
     QString fieldStatus;
     if (stats.transport.interlacedFieldBuffer)
-      fieldStatus = QString(" · field %1/FPGA %2 %3")
+      fieldStatus = QString(" · field %1/FPGA %2 %3 · reserve %4%")
                         .arg(stats.transport.outgoingField)
                         .arg(stats.transport.fpgaField)
                         .arg(stats.transport.fieldPhaseValid ? "locked"
-                                                             : "acquiring");
+                                                             : "acquiring")
+                        .arg(reservePercent, 0, 'f', 1);
     status_->setText("Streaming");
     videoStatus_->setText(
         QString("Video %1% · capture %2% · dropped %3% · transform %4 µs")
@@ -419,7 +424,8 @@ class MainWindow final : public QMainWindow {
         QString("Raster correction: %1 µs\nCompression/submission/wire: "
                 "%2/%3/%4 µs\nUDP queue peak: %5 of %6 bytes\n"
                 "Path MTU: %7 bytes\nPaced payloads/datagrams: %8/%9\n"
-                "Maximum batch lateness: %10 µs")
+                "Maximum batch lateness: %10 µs\nAdaptive reserve/latest: "
+                "%11/%12 lines\nHealthy ACKs/steps/resets: %13/%14/%15")
             .arg(stats.transport.rasterCorrectionUs)
             .arg(stats.transport.compressionTimeUs)
             .arg(stats.transport.submissionTimeUs)
@@ -429,7 +435,12 @@ class MainWindow final : public QMainWindow {
             .arg(stats.transport.pathMtu)
             .arg(stats.transport.pacedVideoPayloads)
             .arg(stats.transport.pacedDatagrams)
-            .arg(stats.transport.maxBatchReleaseLatenessNs / 1000));
+            .arg(stats.transport.maxBatchReleaseLatenessNs / 1000)
+            .arg(stats.transport.deliveryReserveLines)
+            .arg(stats.transport.adaptiveLatestSafeLine)
+            .arg(stats.transport.adaptiveHealthyAcks)
+            .arg(stats.transport.adaptiveReductions)
+            .arg(stats.transport.adaptiveResets));
     const bool audioHealthy =
         stats.audioDroppedSamples == 0 && stats.audioUnderrunSamples == 0;
     audioStatus_->setText(

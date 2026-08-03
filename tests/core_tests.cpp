@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,7 @@
 
 #include "mistercast/audio_pacer.hpp"
 #include "mistercast/audio_ring.hpp"
+#include "mistercast/adaptive_timing.hpp"
 #include "mistercast/config.hpp"
 #include "mistercast/groovy_transport.hpp"
 #include "mistercast/interfaces.hpp"
@@ -28,6 +30,8 @@ static int failed = 0;
       ++failed;                                                               \
     }                                                                         \
   } while (0)
+
+
 
 
 
@@ -244,6 +248,27 @@ static void checkNoAudioSessionNegotiation() {
         mister.initRate == 0 && mister.initChannels == 0);
 }
 
+static void checkAdaptiveSessionStats() {
+  FakeMister mister(0xc4);
+  if (mister.port == 0) return;
+  auto video = std::make_unique<FakeVideo>();
+  StreamSession session(std::move(video), std::make_unique<FakeAudio>());
+  auto config = sessionConfig();
+  config.modeline = {"480i", 12.336, 640, 662, 720, 784, 480, 488, 494,
+                     525, true};
+  std::string error;
+  CHECK(session.start(config, {}, &error));
+  CHECK(waitFor([&] { return session.stats().sentFrames >= 3; }));
+  const auto stats = session.stats();
+  session.stop();
+  CHECK(stats.transport.adaptiveTimingEligible &&
+        stats.transport.deliveryReserveLines == 262 &&
+        stats.transport.adaptiveLatestSafeLine == 263 &&
+        stats.transport.adaptiveHealthyAcks > 0 &&
+        stats.transport.adaptiveReductions == 0 &&
+        stats.transport.adaptiveResets == 0);
+}
+
 // A monitor resized mid-stream must have its crop recomputed, not keep
 // streaming a rectangle sized for the old geometry.
 static void checkCropFollowsMonitorResize() {
@@ -408,6 +433,7 @@ int main() {
   checkAudioSkippedWhenCoreHasAudioOff();
   checkTransformStats();
   checkNoAudioSessionNegotiation();
+  checkAdaptiveSessionStats();
   auto dir = std::filesystem::temp_directory_path() / "mistercast-core-test";
   std::filesystem::create_directories(dir);
   auto path = dir / "config.json";

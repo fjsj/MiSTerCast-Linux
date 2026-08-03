@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -261,6 +262,67 @@ class FakeUdpSyscalls final : public UdpSubmitSyscalls {
   }
 };
 
+void checkAdaptiveDeliveryMargin() {
+  AdaptiveDeliveryMargin margin;
+  margin.configure(525, true);
+  auto stats = margin.stats();
+  CHECK(stats.reserveLines == 262 && stats.latestSafeLine == 263 &&
+        stats.healthyAcks == 0 && stats.reductions == 0 && stats.resets == 0);
+  for (unsigned i = 0; i < 299; ++i) margin.healthyAck();
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 262 && stats.healthyAcks == 299 &&
+        stats.reductions == 0);
+  margin.healthyAck();
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 258 && stats.latestSafeLine == 267 &&
+        stats.healthyAcks == 0 && stats.reductions == 1);
+  margin.unhealthyAck();
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 262 && stats.latestSafeLine == 263 &&
+        stats.resets == 1);
+  margin.unhealthyAck();
+  CHECK(margin.stats().resets == 1);
+  for (unsigned i = 0; i < 10; ++i) margin.healthyAck();
+  margin.unhealthyAck();
+  CHECK(margin.stats().resets == 2 && margin.stats().healthyAcks == 0);
+  for (unsigned i = 0; i < 300; ++i) margin.healthyAck();
+  for (unsigned i = 0; i < 10; ++i) margin.healthyAck();
+  margin.missingAck();
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 258 && stats.healthyAcks == 0 &&
+        stats.resets == 2);
+  for (unsigned step = 0; step < 20; ++step)
+    for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i)
+      margin.healthyAck();
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 196 && stats.latestSafeLine == 329);
+  const auto reductionsAtFloor = stats.reductions;
+  for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i)
+    margin.healthyAck();
+  CHECK(margin.stats().reserveLines == 196 &&
+        margin.stats().reductions == reductionsAtFloor);
+
+  margin.configure(625, true);
+  for (unsigned step = 0; step < 20; ++step)
+    for (unsigned i = 0; i < AdaptiveHealthyAcksPerStep; ++i)
+      margin.healthyAck();
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 234 && stats.latestSafeLine == 391 &&
+        stats.reductions == 20);
+  margin.configure(525, false);
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 0 && stats.latestSafeLine == 0 &&
+        stats.reductions == 0 && stats.resets == 0);
+  margin.configure(525, true);
+  margin.healthyAck();
+  margin.configure(625, true);
+  stats = margin.stats();
+  CHECK(stats.reserveLines == 312 && stats.latestSafeLine == 313 &&
+        stats.healthyAcks == 0 && stats.reductions == 0 && stats.resets == 0);
+  margin.close();
+  CHECK(margin.stats().reserveLines == 0);
+}
+
 struct TestMessages {
   std::vector<uint8_t> bytes;
   std::vector<iovec> vectors;
@@ -506,7 +568,9 @@ void checkSendErrorsAreFatal() {
   transport.close();
 }
 
-void checkAutomaticSyncLine(bool interlaced) {
+void checkAutomaticSyncLine(bool interlaced, bool progressiveBuffer = false,
+                            bool syncRefresh = true,
+                            uint16_t frameDelay = 0) {
   FakeGroovyEndpoint endpoint([](auto& peer, const auto& packet) {
     if (!packet.empty() && packet[0] == kInit) peer.replyAck({});
   });
@@ -516,9 +580,10 @@ void checkAutomaticSyncLine(bool interlaced) {
   CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
   Modeline vga{"vga", 25.175, 640, 656, 752, 800, 480, 490, 492, 525,
                interlaced};
-  CHECK(transport.switchMode(vga, false, error));
-  transport.setSyncOptions(true, 0);
-  std::vector<uint8_t> pixels(size_t(640) * (interlaced ? 240 : 480) * 3, 42);
+  CHECK(transport.switchMode(vga, progressiveBuffer, error));
+  transport.setSyncOptions(syncRefresh, frameDelay);
+  std::vector<uint8_t> pixels(
+      size_t(640) * (interlaced && !progressiveBuffer ? 240 : 480) * 3, 42);
   uint16_t warmUpLine = 0, steadyLine = 0;
   for (uint32_t frame = 1; frame <= 12; ++frame) {
     CHECK(transport.sendFrame(frame, 0, pixels, error));
@@ -528,11 +593,19 @@ void checkAutomaticSyncLine(bool interlaced) {
   }
   transport.close();
   CHECK(transport.stats().acknowledgedFrames == 0);
-  CHECK(warmUpLine == 525 / 2);
-  if (interlaced)
-    CHECK(steadyLine > 0 && steadyLine <= 525 / 2);
-  else
-    CHECK(steadyLine != 525 / 2 && steadyLine > 0);
+  if (!syncRefresh) {
+    CHECK(warmUpLine == 0 && steadyLine == 0);
+  } else if (frameDelay) {
+    const auto expected =
+        uint16_t(std::llround(double(525) * frameDelay / 10.0) + 1);
+    CHECK(warmUpLine == expected && steadyLine == expected);
+  } else {
+    CHECK(warmUpLine == 525 / 2);
+    if (interlaced && !progressiveBuffer)
+      CHECK(steadyLine > 0 && steadyLine <= 525 / 2);
+    else
+      CHECK(steadyLine != 525 / 2 && steadyLine > 0);
+  }
 }
 }  // namespace
 
@@ -542,6 +615,7 @@ int main() {
   checkFieldAlignment();
   checkFieldAlignmentWraparound();
   checkFpgaHealthDiagnostics();
+  checkAdaptiveDeliveryMargin();
   checkPacingCalculations();
   checkPacingSubmissionState();
   checkFatalPayloadFailureStopsProtocol();
@@ -549,5 +623,8 @@ int main() {
   checkSendErrorsAreFatal();
   checkAutomaticSyncLine(false);
   checkAutomaticSyncLine(true);
+  checkAutomaticSyncLine(true, true);
+  checkAutomaticSyncLine(true, false, true, 4);
+  checkAutomaticSyncLine(true, false, false);
   return failed ? 1 : 0;
 }

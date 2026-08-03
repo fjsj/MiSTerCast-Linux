@@ -134,11 +134,12 @@ void checkRunnerProtocol() {
           sawClose = true;
         }
       },
-      32100);
+      0);
   if (!endpoint.valid()) return;
 
   PatternOptions options;
   options.target = "localhost";
+  options.port = endpoint.port();
   options.tone = true;
   options.modeline = {"runner", 1, 8, 10, 12, 100, 8, 10, 12, 100, true};
   std::ostringstream status;

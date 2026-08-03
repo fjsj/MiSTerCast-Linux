@@ -49,7 +49,14 @@ void printStats(std::ostream& output, const GroovyTransportStats& stats) {
          << ", UDP peak "
          << stats.observedUdpQueueHighWater << " B, late "
          << stats.lateBatchReleases << " (max "
-         << stats.maxBatchReleaseLatenessNs / 1000 << " us)\n";
+         << stats.maxBatchReleaseLatenessNs / 1000 << " us)";
+  if (stats.interlacedFieldBuffer)
+    output << ", reserve/latest " << stats.deliveryReserveLines << "/"
+           << stats.adaptiveLatestSafeLine << ", healthy "
+           << stats.adaptiveHealthyAcks << "/" << AdaptiveHealthyAcksPerStep
+           << ", steps/resets " << stats.adaptiveReductions << "/"
+           << stats.adaptiveResets;
+  output << "\n";
 }
 }  // namespace
 

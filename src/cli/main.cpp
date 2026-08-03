@@ -254,7 +254,14 @@ int main(int argc, char** argv) {
         std::cerr << ", field " << unsigned(s.transport.outgoingField)
                   << "/FPGA " << unsigned(s.transport.fpgaField)
                   << (s.transport.fieldPhaseValid ? " locked" : " acquiring")
-                  << ", realignments " << s.transport.fieldRealignments;
+                  << ", realignments " << s.transport.fieldRealignments
+                  << ", reserve/latest "
+                  << s.transport.deliveryReserveLines << "/"
+                  << s.transport.adaptiveLatestSafeLine << ", healthy "
+                  << s.transport.adaptiveHealthyAcks << "/"
+                  << AdaptiveHealthyAcksPerStep << ", steps/resets "
+                  << s.transport.adaptiveReductions << "/"
+                  << s.transport.adaptiveResets;
       std::cerr << ", audio buffered "
                 << s.audioBufferedSamples << " samples, level "
                 << int(s.audioPeak * 100) << "%, MiSTer audio "

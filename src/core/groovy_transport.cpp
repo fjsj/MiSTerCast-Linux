@@ -122,6 +122,12 @@ bool GroovyTransport::drainStatus(uint32_t expectedFrame) noexcept {
         if (vgaFrameskip_) ++fpgaFallbackSamples_;
         if (!vramSynced_) ++vramUnsyncedSamples_;
         if (!vramQueuePresent_) ++vramQueueEmptySamples_;
+        if (adaptiveTimingEligible()) {
+          if (vramSynced_ && !vgaFrameskip_ && vramQueuePresent_)
+            adaptiveMargin_.healthyAck();
+          else
+            adaptiveMargin_.unhealthyAck();
+        }
       }
     }
   }
@@ -188,6 +194,7 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
       false;
   diagnosticFrame_ = 0;
   fatalPayloadError_ = false;
+  adaptiveMargin_.close();
   fpga_ = {};
   haveFpgaStatus_ = false;
   if (host.empty()) {
@@ -336,6 +343,7 @@ bool GroovyTransport::switchMode(const Modeline& m,
   lineTimeNs_ =
       uint64_t(std::llround(double(m.hTotal) * 1000.0 / m.pixelClockMHz));
   frameTimeNs_ = (lineTimeNs_ * m.vTotal) >> interlaceShift_;
+  adaptiveMargin_.configure(vTotal_, interlacedFieldBuffer_);
   syncEpoch_ = std::chrono::steady_clock::now();
   lastAckAt_ = {};
   lastStreamNs_ = 0;
@@ -349,6 +357,7 @@ void GroovyTransport::setSyncOptions(bool syncRefresh,
                                      uint16_t frameDelay) noexcept {
   syncRefresh_ = syncRefresh;
   frameDelay_ = std::min<uint16_t>(frameDelay, 10);
+  if (!syncRefresh_ || frameDelay_) adaptiveMargin_.missingAck();
 }
 
 void GroovyTransport::alignFrame(uint32_t& frame, uint8_t& field) noexcept {
@@ -399,13 +408,16 @@ uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
   // late or dropped datagram leaves garbage there and can strand the receiver
   // waiting for the rest of the frame.  The old synchronous capture path
   // happened to keep the request in the first half of the raster.  Make that
-  // safety requirement explicit for alternating field buffers.  The opt-in
-  // progressive framebuffer does not alternate buffers and keeps the normal
-  // low-latency calculation.
-  const uint16_t latestSafeLine =
-      interlaceShift_ && !progressiveInterlaceBuffer_
-          ? std::max<uint16_t>(1, vTotal_ >> 1)
-          : vTotal_;
+  // safety requirement explicit for alternating field buffers. Adaptive mode
+  // begins from that conservative cap only after a matching post-switch ACK,
+  // and can move it later after sustained healthy receiver feedback. The
+  // opt-in progressive framebuffer keeps the normal low-latency calculation.
+  uint16_t latestSafeLine = vTotal_;
+  if (interlaceShift_ && !progressiveInterlaceBuffer_) {
+    latestSafeLine = adaptiveTimingEligible()
+                         ? adaptiveMargin_.stats().latestSafeLine
+                         : std::max<uint16_t>(1, vTotal_ >> 1);
+  }
   // lastStreamNs_ contains only active compression/syscall work because the
   // historical formula subtracts it. Paced wire delivery is future work for
   // the next field, so account for its estimate with the opposite sign.
@@ -418,6 +430,13 @@ uint16_t GroovyTransport::syncLine(uint64_t workNs) const noexcept {
       std::llround(double(vTotal_) * double(leadNs) / double(frameTimeNs_)));
   return uint16_t(std::clamp<uint64_t>(
       vTotal_ - std::min<uint64_t>(lines, vTotal_ - 1), 1, latestSafeLine));
+}
+
+bool GroovyTransport::adaptiveTimingEligible() const noexcept {
+  // Every video payload uses submitVideoDatagrams, which applies pacing when
+  // its packet count requires it; there is no unpaced large-payload mode.
+  return interlacedFieldBuffer_.load() && fieldPhaseValid_.load() &&
+         syncRefresh_ && frameDelay_ == 0;
 }
 
 bool GroovyTransport::sendFrame(uint32_t frame, uint8_t field,
@@ -601,8 +620,10 @@ void GroovyTransport::waitSync() noexcept {
       if (uint64_t(sample) < frameTimeNs_)
         networkRttNs_ = (networkRttNs_ * 7 + uint64_t(sample)) / 8;
     }
-  } else
+  } else {
     ++missedAcks_;
+    adaptiveMargin_.missingAck();
+  }
   rasterCorrectionUs_ = correctionNs / 1000;
   const auto sleepUntil = deadline - std::chrono::microseconds(100);
   if (sleepUntil > std::chrono::steady_clock::now())
@@ -656,6 +677,13 @@ GroovyTransportStats GroovyTransport::stats() const noexcept {
   s.observedUdpQueueHighWater = observedUdpQueueHighWater_;
   s.socketSendBufferBytes = socketSendBufferBytes_;
   s.pathMtu = pathMtu_;
+  const auto adaptive = adaptiveMargin_.stats();
+  s.deliveryReserveLines = adaptive.reserveLines;
+  s.adaptiveLatestSafeLine = adaptive.latestSafeLine;
+  s.adaptiveHealthyAcks = adaptive.healthyAcks;
+  s.adaptiveReductions = adaptive.reductions;
+  s.adaptiveResets = adaptive.resets;
+  s.adaptiveTimingEligible = adaptiveTimingEligible();
   s.outgoingField = outgoingField_;
   s.fpgaField = fpgaField_;
   s.vramSynced = vramSynced_;
@@ -686,6 +714,7 @@ void GroovyTransport::close() noexcept {
       false;
   diagnosticFrame_ = 0;
   fatalPayloadError_ = false;
+  adaptiveMargin_.close();
   fpgaStatusSamples_ = fpgaFallbackSamples_ = vramUnsyncedSamples_ =
       vramQueueEmptySamples_ = 0;
   compressionTimeUs_ = submissionTimeUs_ = estimatedWireTimeUs_ = 0;

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "mistercast/types.hpp"
+#include "mistercast/adaptive_timing.hpp"
 #include "mistercast/udp_pacing.hpp"
 namespace mistercast {
 struct GroovyTransportStats {
@@ -18,11 +19,14 @@ struct GroovyTransportStats {
       compressionTimeUs{}, submissionTimeUs{}, estimatedWireTimeUs{},
       pacedVideoPayloads{}, pacedDatagrams{}, lateBatchReleases{},
       maxBatchReleaseLatenessNs{}, observedUdpQueueHighWater{},
-      socketSendBufferBytes{}, pathMtu{};
+      socketSendBufferBytes{}, pathMtu{}, adaptiveReductions{},
+      adaptiveResets{};
   int64_t rasterCorrectionUs{};
   uint8_t outgoingField{}, fpgaField{};
+  uint16_t deliveryReserveLines{}, adaptiveLatestSafeLine{};
+  uint32_t adaptiveHealthyAcks{};
   bool vramSynced{}, vgaFrameskip{}, vgaVblank{}, vramQueuePresent{},
-      interlacedFieldBuffer{}, fieldPhaseValid{};
+      interlacedFieldBuffer{}, fieldPhaseValid{}, adaptiveTimingEligible{};
 };
 // False when the build has no liblz4, in which case frames go out uncompressed
 // at roughly 3-5x the bandwidth. Windows always compressed.
@@ -76,6 +80,7 @@ class GroovyTransport {
       diagnosticFrame_{};
   uint8_t coreVersion_{}, lastAlignedField_{};
   FpgaStatus fpga_{};
+  AdaptiveDeliveryMargin adaptiveMargin_;
   UdpSubmitSyscalls* udpSyscalls_{};
   std::chrono::steady_clock::time_point syncEpoch_{}, lastAckAt_{},
       lastSendEndAt_{};
@@ -85,6 +90,7 @@ class GroovyTransport {
   void applyStatus(const FpgaStatus&) noexcept;
   bool drainStatus(uint32_t expectedFrame) noexcept;
   uint16_t syncLine(uint64_t workNs) const noexcept;
+  bool adaptiveTimingEligible() const noexcept;
   int64_t rasterCorrection() const noexcept;
   std::atomic<bool> misterAudioEnabled_{false}, vramSynced_{false},
       vgaFrameskip_{false}, vgaVblank_{false}, vramQueuePresent_{false},
