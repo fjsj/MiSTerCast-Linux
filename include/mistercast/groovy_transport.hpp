@@ -1,9 +1,9 @@
 #pragma once
 #include <atomic>
-#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,16 +33,13 @@ struct GroovyTransportStats {
 // False when the build has no liblz4, in which case frames go out uncompressed
 // at roughly 3-5x the bandwidth. Windows always compressed.
 bool compressionAvailable() noexcept;
-bool encodeInitCommand(bool compression, bool audioEnabled,
-                       uint32_t audioRate, std::array<uint8_t, 5>& command,
-                       std::string& error) noexcept;
 class GroovyTransport {
  public:
   GroovyTransport();
   ~GroovyTransport();
   GroovyTransport(const GroovyTransport&) = delete;
   GroovyTransport& operator=(const GroovyTransport&) = delete;
-  bool open(const std::string& host, bool audioEnabled, uint32_t audioRate,
+  bool open(const std::string& host, std::optional<uint32_t> audioRate,
             std::string& error, uint16_t port = 32100);
   bool switchMode(const Modeline&, bool progressiveInterlaceBuffer,
                   std::string& error);
@@ -81,6 +78,7 @@ class GroovyTransport {
       lastWireDeliveryNs_{};
   uint32_t currentFrame_{}, fallbackFrame_{}, lastAlignedFrame_{},
       diagnosticFrame_{};
+  std::optional<uint32_t> audioRate_;
   uint8_t coreVersion_{}, lastAlignedField_{};
   FpgaStatus fpga_{};
   AdaptiveDeliveryMargin adaptiveMargin_;

@@ -388,16 +388,6 @@ int main() {
   std::string error;
   CHECK(parseModeline("6.7 320 336 367 426 240 244 247 262 0", parsed, error));
   CHECK(!parseModeline("nonsense", parsed, error));
-  std::array<uint8_t, 5> init{};
-  CHECK(encodeInitCommand(true, false, 12345, init, error));
-  CHECK(init == (std::array<uint8_t, 5>{2, 1, 0, 0, 0}));
-  for (const auto rate : {std::pair<uint32_t, uint8_t>{22050, 1},
-                          {44100, 2}, {48000, 3}}) {
-    CHECK(encodeInitCommand(false, true, rate.first, init, error));
-    CHECK(init ==
-          (std::array<uint8_t, 5>{2, 0, rate.second, 2, 0}));
-  }
-  CHECK(!encodeInitCommand(true, true, 96000, init, error));
   AudioRing ring(4);
   int16_t a[] = {1, 2, 3};
   CHECK(ring.push(a, 3) == 0);

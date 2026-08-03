@@ -43,6 +43,25 @@ T readLe(const uint8_t* p) {
 bool frameAfter(uint32_t a, uint32_t b) {
   return int32_t(a - b) > 0;
 }
+
+bool encodeInitCommand(bool compression, std::optional<uint32_t> audioRate,
+                       std::array<uint8_t, 5>& command,
+                       std::string& error) noexcept {
+  uint8_t rateCode = 0;
+  if (audioRate) {
+    rateCode = *audioRate == 22050   ? 1
+               : *audioRate == 44100 ? 2
+               : *audioRate == 48000 ? 3
+                                     : 0;
+    if (!rateCode) {
+      error = "unsupported audio sample rate";
+      return false;
+    }
+  }
+  command = {CMD_INIT, uint8_t(compression), rateCode,
+             uint8_t(audioRate ? 2 : 0), 0};
+  return true;
+}
 }  // namespace
 
 bool compressionAvailable() noexcept {
@@ -51,25 +70,6 @@ bool compressionAvailable() noexcept {
 #else
   return false;
 #endif
-}
-
-bool encodeInitCommand(bool compression, bool audioEnabled,
-                       uint32_t audioRate, std::array<uint8_t, 5>& command,
-                       std::string& error) noexcept {
-  uint8_t rateCode = 0;
-  if (audioEnabled) {
-    rateCode = audioRate == 22050   ? 1
-               : audioRate == 44100 ? 2
-               : audioRate == 48000 ? 3
-                                    : 0;
-    if (!rateCode) {
-      error = "unsupported audio sample rate";
-      return false;
-    }
-  }
-  command = {CMD_INIT, uint8_t(compression), rateCode,
-             uint8_t(audioEnabled ? 2 : 0), 0};
-  return true;
 }
 
 GroovyTransport::GroovyTransport()
@@ -180,8 +180,9 @@ bool GroovyTransport::sendChunks(const uint8_t* p, size_t n, std::string& e) {
   return true;
 }
 
-bool GroovyTransport::open(const std::string& host, bool audioEnabled,
-                           uint32_t rate, std::string& e, uint16_t port) {
+bool GroovyTransport::open(const std::string& host,
+                           std::optional<uint32_t> audioRate, std::string& e,
+                           uint16_t port) {
   close();
   ackFrame_ = fpgaFrame_ = 0;
   syncLine_ = fpgaVCount_ = 0;
@@ -274,7 +275,7 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
 #else
           false,
 #endif
-          audioEnabled, rate, cmd, e)) {
+          audioRate, cmd, e)) {
     close();
     return false;
   }
@@ -311,6 +312,7 @@ bool GroovyTransport::open(const std::string& host, bool audioEnabled,
     decodeStatus(ack, size_t(received), status);
     applyStatus(status);
   }
+  audioRate_ = audioRate;
   return true;
 }
 
@@ -613,6 +615,10 @@ void GroovyTransport::waitSync() noexcept {
 }
 
 bool GroovyTransport::sendAudio(const int16_t* s, size_t n, std::string& e) {
+  if (!audioRate_) {
+    e = "audio was not negotiated for this transport";
+    return false;
+  }
   size_t bytes = n * sizeof(int16_t);
   if (bytes > 65535) {
     e = "audio packet is too large";
@@ -681,6 +687,7 @@ void GroovyTransport::close() noexcept {
     fd_ = -1;
   }
   misterAudioEnabled_ = false;
+  audioRate_.reset();
   vramSynced_ = false;
   vgaFrameskip_ = false;
   vgaVblank_ = false;

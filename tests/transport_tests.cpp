@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "fake_groovy_endpoint.hpp"
@@ -53,6 +54,55 @@ Modeline tinyMode(bool interlaced = true) {
   return {"tiny", 1, 2, 3, 4, 5, 2, 3, 4, 5, interlaced};
 }
 
+void checkInitNegotiation() {
+  struct InitCase {
+    std::optional<uint32_t> audioRate;
+    uint8_t rateCode;
+  };
+  const InitCase cases[] = {
+      {std::nullopt, 0}, {22050, 1}, {44100, 2}, {48000, 3}};
+
+  for (const auto& test : cases) {
+    FakeGroovyEndpoint endpoint([](auto& peer, const auto& packet) {
+      if (!packet.empty() && packet[0] == kInit) peer.replyVersion();
+    });
+    if (!endpoint.valid()) return;
+
+    std::string error;
+    GroovyTransport transport;
+    CHECK(transport.open("localhost", test.audioRate, error, endpoint.port()));
+    const FakeGroovyEndpoint::Packet expected{
+        kInit, uint8_t(compressionAvailable()), test.rateCode,
+        uint8_t(test.audioRate ? 2 : 0), 0};
+    bool sawExpectedInit = false;
+    for (const auto& packet : endpoint.packets())
+      if (packet == expected) sawExpectedInit = true;
+    CHECK(sawExpectedInit);
+
+    if (!test.audioRate) {
+      int16_t samples[2]{};
+      CHECK(!transport.sendAudio(samples, 2, error));
+      CHECK(error == "audio was not negotiated for this transport");
+      for (const auto& packet : endpoint.packets())
+        CHECK(packet.empty() || packet[0] != kAudio);
+    }
+    transport.close();
+    endpoint.stop();
+  }
+
+  FakeGroovyEndpoint endpoint([](auto& peer, const auto& packet) {
+    if (!packet.empty() && packet[0] == kInit) peer.replyVersion();
+  });
+  if (!endpoint.valid()) return;
+  std::string error;
+  GroovyTransport transport;
+  CHECK(!transport.open("localhost", 96000, error, endpoint.port()));
+  CHECK(error == "unsupported audio sample rate");
+  endpoint.stop();
+  for (const auto& packet : endpoint.packets())
+    CHECK(packet.empty() || packet[0] != kInit);
+}
+
 void acknowledgeBlit(FakeGroovyEndpoint& endpoint,
                      const FakeGroovyEndpoint::Packet& packet,
                      uint32_t fpgaFrame, uint16_t fpgaLine,
@@ -95,7 +145,7 @@ void checkInterlaceTransport(bool progressive, uint8_t sentField,
 
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(), progressive, error));
   transport.setSyncOptions(true, 0);
   CHECK(transport.sendFrame(1, sentField,
@@ -131,7 +181,7 @@ void checkFieldAlignment() {
 
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(), false, error));
   transport.setSyncOptions(true, 0);
   std::vector<uint8_t> pixels(6, 42);
@@ -181,7 +231,7 @@ void checkFieldAlignmentWraparound() {
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(), false, error));
   transport.setSyncOptions(true, 0);
   uint32_t frame = UINT32_MAX;
@@ -214,7 +264,7 @@ void checkFpgaHealthDiagnostics() {
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   CHECK(transport.switchMode(tinyMode(false), false, error));
   std::vector<uint8_t> pixels(12, 42);
   CHECK(transport.sendFrame(UINT32_MAX, 0, pixels, error));
@@ -239,7 +289,7 @@ void checkFpgaHealthDiagnostics() {
   CHECK(status.fpgaStatusSamples == 0 && status.fpgaFallbackSamples == 0 &&
         status.vramUnsyncedSamples == 0 && status.vramQueueEmptySamples == 0 &&
         !status.vramQueuePresent);
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   status = transport.stats();
   CHECK(status.fpgaStatusSamples == 0 && status.fpgaFallbackSamples == 0 &&
         status.vramUnsyncedSamples == 0 && status.vramQueueEmptySamples == 0 &&
@@ -336,7 +386,7 @@ void checkFatalPayloadFailureStopsProtocol() {
   FailingVideoSyscalls syscalls;
   auto transport = GroovyTransportTestPeer::withVideoSyscalls(syscalls);
   std::string error;
-  CHECK(transport->open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport->open("localhost", 48000, error, endpoint.port()));
   CHECK(transport->switchMode(tinyMode(false), false, error));
   CHECK(!transport->sendFrame(1, 0, std::vector<uint8_t>(12, 42), error));
   int16_t audio[2]{};
@@ -375,7 +425,7 @@ void checkSharedAudioVideoPacketization() {
 
   auto transport = GroovyTransportTestPeer::withVideoConfig(config);
   std::string error;
-  CHECK(transport->open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport->open("localhost", 48000, error, endpoint.port()));
   CHECK(transport->switchMode(tinyMode(false), false, error));
   int16_t audio[4]{};
   CHECK(transport->sendAudio(audio, 4, error));
@@ -430,7 +480,7 @@ void checkPacedUdpDelivery() {
   }
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   Modeline mode{"pacing", 12.5, 640, 656, 700, 800, 245, 246, 247, 260,
                 false};
   CHECK(transport.switchMode(mode, false, error));
@@ -458,7 +508,7 @@ void checkSendErrorsAreFatal() {
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   endpoint.stop();
   bool sendFailed = false;
   for (int attempt = 0; attempt < 10 && !sendFailed; ++attempt)
@@ -477,7 +527,7 @@ void checkAutomaticSyncLine(bool interlaced, bool progressiveBuffer = false,
   if (!endpoint.valid()) return;
   std::string error;
   GroovyTransport transport;
-  CHECK(transport.open("localhost", true, 48000, error, endpoint.port()));
+  CHECK(transport.open("localhost", 48000, error, endpoint.port()));
   Modeline vga{"vga", 25.175, 640, 656, 752, 800, 480, 490, 492, 525,
                interlaced};
   CHECK(transport.switchMode(vga, progressiveBuffer, error));
@@ -510,6 +560,7 @@ void checkAutomaticSyncLine(bool interlaced, bool progressiveBuffer = false,
 }  // namespace
 
 int main() {
+  checkInitNegotiation();
   checkInterlaceTransport(false, 1, 1, 1, 6);
   checkInterlaceTransport(true, 1, 2, 0, 12);
   checkFieldAlignment();

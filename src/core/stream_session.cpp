@@ -9,6 +9,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <optional>
 
 #include "mistercast/audio_pacer.hpp"
 #include "mistercast/groovy_protocol.hpp"
@@ -122,16 +123,17 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   }
   video_->setRegion(crop);
   cropGeometry_ = monitor;
-  uint32_t rate = 48000;
   if (c.source.audio && !audio_->start(c.source.audioSink, onError)) {
     video_->stop();
     if (err) *err = "audio capture initialization failed";
     setState(SessionState::Error);
     return false;
   }
-  if (c.source.audio) rate = audio_->sampleRate();
+  const auto audioRate = c.source.audio
+                             ? std::optional<uint32_t>{audio_->sampleRate()}
+                             : std::nullopt;
   std::string e;
-  if (!transport_.open(c.target, c.source.audio, rate, e) ||
+  if (!transport_.open(c.target, audioRate, e) ||
       !transport_.switchMode(c.modeline, c.source.progressiveInterlaceBuffer,
                              e)) {
     audio_->stop();

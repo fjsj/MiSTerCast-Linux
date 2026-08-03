@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <optional>
 
 #include "mistercast/groovy_transport.hpp"
 #include "mistercast/groovy_protocol.hpp"
@@ -178,8 +179,9 @@ bool runGeneratedPattern(const PatternOptions& options,
                          const std::atomic<bool>& stop, std::ostream& status,
                          std::string& error) {
   GroovyTransport transport;
-  if (!transport.open(options.target, options.tone, kToneRate, error,
-                      options.port) ||
+  const auto audioRate = options.tone ? std::optional<uint32_t>{kToneRate}
+                                      : std::nullopt;
+  if (!transport.open(options.target, audioRate, error, options.port) ||
       !transport.switchMode(options.modeline,
                             options.progressiveInterlaceBuffer, error))
     return false;
