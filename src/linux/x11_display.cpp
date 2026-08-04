@@ -4,6 +4,13 @@
 #include <utility>
 
 namespace mistercast {
+bool x11ExtensionPresent(xcb_connection_t* connection,
+                         xcb_extension_t& extension) noexcept {
+  if (!connection) return false;
+  const auto* data = xcb_get_extension_data(connection, &extension);
+  return data && data->present;
+}
+
 X11DisplayConnection::~X11DisplayConnection() { reset(); }
 
 X11DisplayConnection::X11DisplayConnection(

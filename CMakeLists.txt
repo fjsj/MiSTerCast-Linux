@@ -40,9 +40,6 @@ add_library(mistercast-core
   src/core/groovy_transport.cpp src/core/stream_session.cpp)
 add_library(MiSTerCast::core ALIAS mistercast-core)
 target_include_directories(mistercast-core PUBLIC include)
-# Tests reach the Linux-only headers (x11_display.hpp, x11_source_catalog.hpp)
-# through this root; production sources keep using their relative includes.
-target_include_directories(mistercast-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mistercast-core PUBLIC Threads::Threads PkgConfig::XCB)
 target_compile_options(mistercast-core PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(mistercast-core PRIVATE _GNU_SOURCE MISTERCAST_VERSION="${PROJECT_VERSION}")
@@ -53,7 +50,7 @@ if(XCB_RANDR_FOUND)
 endif()
 if(PULSE_FOUND)
   target_link_libraries(mistercast-core PRIVATE PkgConfig::PULSE)
-  target_compile_definitions(mistercast-core PUBLIC MISTERCAST_HAVE_PULSE=1)
+  target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_PULSE=1)
 endif()
 if(LZ4_LIBRARY)
   target_link_libraries(mistercast-core PRIVATE ${LZ4_LIBRARY})
@@ -77,7 +74,6 @@ if(Qt6_FOUND)
   # A library rather than a source file on the executable, so the window can be
   # constructed and driven by offscreen tests.
   add_library(mistercast-gui src/gui/main_window.cpp)
-  target_include_directories(mistercast-gui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(mistercast-gui
     PUBLIC mistercast-core Qt6::Core Qt6::Gui Qt6::Widgets)
   target_compile_options(mistercast-gui PRIVATE -Wall -Wextra -Wpedantic)

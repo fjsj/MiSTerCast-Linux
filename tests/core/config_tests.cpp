@@ -6,6 +6,7 @@
 
 #include "mistercast/config.hpp"
 #include "mistercast/interfaces.hpp"
+#include "support/scoped_environment.hpp"
 #include "support/temp_directory.hpp"
 
 using namespace mistercast;

@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
     std::cerr << "Start failed: " << e << "\n";
     return 1;
   }
-  auto nextStats = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  auto nextStats = std::chrono::steady_clock::now() + kStatsInterval;
   while (!interrupted && session.state() == SessionState::Streaming) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     if (std::chrono::steady_clock::now() >= nextStats) {
@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
                 << (s.misterAudioEnabled ? "on" : "off") << ", overruns "
                 << s.audioDroppedSamples << ", underruns "
                 << s.audioUnderrunSamples << "\n";
-      nextStats += std::chrono::seconds(5);
+      nextStats += kStatsInterval;
     }
   }
   bool failed = session.state() == SessionState::Error;

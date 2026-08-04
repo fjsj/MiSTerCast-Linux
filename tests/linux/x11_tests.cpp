@@ -4,8 +4,6 @@
 #include <xcb/composite.h>
 #include <xcb/xcb.h>
 
-#include <fcntl.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -16,7 +14,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -24,11 +21,20 @@
 #include "linux/x11_source_catalog.hpp"
 #include "mistercast/interfaces.hpp"
 #include "support/nested_xvfb.hpp"
+#include "support/subprocess.hpp"
+#include "support/scoped_environment.hpp"
 #include "support/temp_directory.hpp"
+#include "support/wait_for.hpp"
+#include "support/x11_windows.hpp"
 
 using namespace mistercast;
+using mistercast::test::BackgroundProcess;
 using mistercast::test::NestedXvfb;
+using mistercast::test::createWindow;
+using mistercast::test::fill;
 using mistercast::test::ScopedEnvironment;
+using mistercast::test::sync;
+using mistercast::test::waitFor;
 using testing::HasSubstr;
 
 namespace {
@@ -39,42 +45,37 @@ namespace {
 //
 // Xvfb, unlike a real Xorg server, intermittently refuses a connection when a
 // process opens several in quick succession (measured at roughly one in four
-// with no pause, and never with a 20 ms gap). Production makes one connection
-// per capture session and correctly reports a failure as actionable, so the
-// retries below belong to the harness, not to the code under test.
-constexpr int kConnectAttempts = 6;
-constexpr auto kConnectPause = std::chrono::milliseconds(25);
+// with no pause, and never once the attempts are spaced out). Production makes
+// one connection per capture session and correctly reports a failure as
+// actionable, so retrying belongs to the harness, not to the code under test —
+// hence waitFor rather than a bespoke attempt loop.
+constexpr auto kConnectAllowance = std::chrono::milliseconds(250);
 
 xcb_connection_t* connectForTest() {
-  for (int attempt = 0; attempt < kConnectAttempts; ++attempt) {
-    if (attempt) std::this_thread::sleep_for(kConnectPause);
-    auto* candidate = xcb_connect(nullptr, nullptr);
-    if (candidate && !xcb_connection_has_error(candidate)) return candidate;
-    if (candidate) xcb_disconnect(candidate);
-  }
-  return nullptr;
+  xcb_connection_t* connection = nullptr;
+  waitFor(
+      [&] {
+        auto* candidate = xcb_connect(nullptr, nullptr);
+        if (candidate && !xcb_connection_has_error(candidate)) {
+          connection = candidate;
+          return true;
+        }
+        if (candidate) xcb_disconnect(candidate);
+        return false;
+      },
+      kConnectAllowance);
+  return connection;
 }
 
 bool connectForTest(X11DisplayConnection& connection, std::string& error) {
-  for (int attempt = 0; attempt < kConnectAttempts; ++attempt) {
-    if (attempt) std::this_thread::sleep_for(kConnectPause);
-    if (connection.connect(error)) return true;
-  }
-  return false;
+  return waitFor([&] { return connection.connect(error); }, kConnectAllowance);
 }
 
 // Starting a capture opens a connection too, so the same allowance applies.
 bool startForTest(IVideoCapture& capture, const CaptureSource& source,
                   ErrorCallback callback = {}) {
-  for (int attempt = 0; attempt < kConnectAttempts; ++attempt) {
-    if (attempt) std::this_thread::sleep_for(kConnectPause);
-    if (capture.start(source, callback)) return true;
-  }
-  return false;
-}
-void sync(xcb_connection_t* connection) {
-  free(xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection),
-                                 nullptr));
+  return waitFor([&] { return capture.start(source, callback); },
+                 kConnectAllowance);
 }
 
 xcb_atom_t atom(xcb_connection_t* connection, std::string_view name) {
@@ -87,32 +88,8 @@ xcb_atom_t atom(xcb_connection_t* connection, std::string_view name) {
   return result;
 }
 
-xcb_window_t createWindow(xcb_connection_t* connection, xcb_screen_t* screen,
-                          uint16_t width, uint16_t height,
-                          std::string_view title, bool map = true) {
-  const auto window = xcb_generate_id(connection);
-  const uint32_t background[] = {screen->black_pixel};
-  xcb_create_window(connection, screen->root_depth, window, screen->root, 0, 0,
-                    width, height, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
-                    screen->root_visual, XCB_CW_BACK_PIXEL, background);
-  xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window,
-                      XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, title.size(),
-                      title.data());
-  if (map) xcb_map_window(connection, window);
-  return window;
-}
-
-void fill(xcb_connection_t* connection, xcb_drawable_t drawable,
-          xcb_gcontext_t gc, uint32_t color, uint16_t width, uint16_t height) {
-  xcb_change_gc(connection, gc, XCB_GC_FOREGROUND, &color);
-  const xcb_rectangle_t rectangle{0, 0, width, height};
-  xcb_poly_fill_rectangle(connection, drawable, gc, 1, &rectangle);
-  sync(connection);
-}
-
 bool compositeNamedPixmapsAvailable(xcb_connection_t* connection) {
-  const auto* composite = xcb_get_extension_data(connection, &xcb_composite_id);
-  if (!composite || !composite->present) return false;
+  if (!x11ExtensionPresent(connection, xcb_composite_id)) return false;
   auto* version = xcb_composite_query_version_reply(
       connection, xcb_composite_query_version(connection, 0, 4), nullptr);
   const bool available =
@@ -259,6 +236,51 @@ TEST_F(X11, ListsMonitorsThroughThePublicEntryPoint) {
   const auto monitors = x11Monitors(error);
   EXPECT_THAT(error, testing::IsEmpty());
   EXPECT_FALSE(monitors.empty());
+}
+
+// ------------------------------------------------------------ monitor selection
+//
+// selectX11Monitor is pure, so every branch of the configured-name-to-monitor
+// resolution is checked here directly rather than through a capture session on
+// a server that happens to have the right layout.
+
+TEST(SelectMonitor, PrefersThePrimaryWhenNoMonitorWasRequested) {
+  const std::vector<Monitor> monitors{{"DP-0", 0, 0, 640, 480, false},
+                                      {"DP-1", 640, 0, 800, 600, true}};
+  const auto selected = selectX11Monitor(monitors, "");
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(selected->name, "DP-1");
+}
+
+TEST(SelectMonitor, FallsBackToTheFirstMonitorWhenNoneIsFlaggedPrimary) {
+  // What Xvfb reports, and what some multi-head layouts look like after an
+  // xrandr change. Refusing to stream here was the defect.
+  const std::vector<Monitor> monitors{{"DP-0", 0, 0, 640, 480, false},
+                                      {"DP-1", 640, 0, 800, 600, false}};
+  const auto selected = selectX11Monitor(monitors, "");
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(selected->name, "DP-0");
+}
+
+TEST(SelectMonitor, MatchesARequestedNameExactlyAndIgnoresThePrimaryFlag) {
+  const std::vector<Monitor> monitors{{"DP-0", 0, 0, 640, 480, false},
+                                      {"DP-1", 640, 0, 800, 600, true}};
+  const auto selected = selectX11Monitor(monitors, "DP-0");
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(selected->name, "DP-0");
+  EXPECT_EQ(selected->width, 640);
+}
+
+TEST(SelectMonitor, FailsOnANameTheServerDoesNotReport) {
+  const std::vector<Monitor> monitors{{"DP-0", 0, 0, 640, 480, true}};
+  EXPECT_FALSE(selectX11Monitor(monitors, "HDMI-9").has_value());
+}
+
+TEST(SelectMonitor, FailsOnAnEmptyEnumeration) {
+  // enumerateX11Monitors never returns an empty list, so this is defensive: the
+  // caller must still get "unavailable" rather than a dereferenced end().
+  EXPECT_FALSE(selectX11Monitor({}, "").has_value());
+  EXPECT_FALSE(selectX11Monitor({}, "DP-0").has_value());
 }
 
 // -------------------------------------------------------------- window catalog
@@ -426,7 +448,7 @@ TEST(X11Display, SelectsTheScreenNamedByTheDisplayVariable) {
   }
 }
 
-// ------------------------------------------------------------- monitor capture// ------------------------------------------------------------- monitor capture
+// ------------------------------------------------------------- monitor capture
 
 // Also covers the fallback for servers that flag no monitor primary, which is
 // what Xvfb does: an empty selection must still bind a monitor.
@@ -508,32 +530,15 @@ TEST(X11Capture, RebindsAMonitorAcrossAServerRestart) {
 
   // The replacement has a different screen size, so recovery has to re-read the
   // geometry and rebuild the shared segment rather than reuse either.
-  const auto replacement = fork();
-  ASSERT_GE(replacement, 0);
-  if (replacement == 0) {
-      // Detach the server from this process's stdio and process group. A forked
-      // X server that keeps the test binary's stdout open makes ctest wait for
-      // EOF long after the test itself has finished.
-      const int devNull = open("/dev/null", O_RDWR);
-      if (devNull >= 0) {
-        dup2(devNull, STDIN_FILENO);
-        dup2(devNull, STDOUT_FILENO);
-        dup2(devNull, STDERR_FILENO);
-        if (devNull > STDERR_FILENO) close(devNull);
-      }
-      setsid();
-    execlp("Xvfb", "Xvfb", display.c_str(), "-screen", "0", "96x72x24",
-           "-nolisten", "tcp", nullptr);
-    _exit(127);
-  }
-  bool rebound = false;
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (!rebound && std::chrono::steady_clock::now() < deadline) {
+  // Scoped, so an assertion below cannot leave the server running: a bare fork
+  // with a kill at the end of the body orphans it on every early exit.
+  BackgroundProcess replacement({"Xvfb", display, "-screen", "0", "96x72x24",
+                                 "-nolisten", "tcp"});
+  ASSERT_TRUE(replacement.started());
+  const bool rebound = waitFor([&] {
     capture->next(frame, std::chrono::milliseconds(20));
-    rebound = capture->selectedGeometry().width == 96;
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  }
+    return capture->selectedGeometry().width == 96;
+  });
   EXPECT_TRUE(rebound) << "a monitor must be rebound to the new server";
   if (rebound) {
     capture->setRegion({0, 0, 96, 72});
@@ -543,8 +548,6 @@ TEST(X11Capture, RebindsAMonitorAcrossAServerRestart) {
         << "a server restart is recoverable for a monitor capture";
   }
   capture->stop();
-  kill(replacement, SIGTERM);
-  waitpid(replacement, nullptr, 0);
 }
 
 TEST_F(X11, ReportsAMonitorThatDoesNotExist) {
@@ -828,12 +831,10 @@ TEST_F(X11, ReportsAFatalErrorOnceCaptureKeepsFailing) {
   // after it has persisted for about two seconds.
   xcb_unmap_window(connection, target);
   sync(connection);
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (problems.empty() && std::chrono::steady_clock::now() < deadline) {
+  waitFor([&] {
     capture->next(frame, std::chrono::milliseconds(0));
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+    return !problems.empty();
+  });
   ASSERT_FALSE(problems.empty()) << "a persistent failure must be reported";
   EXPECT_EQ(problems.front().component, "video");
   EXPECT_EQ(problems.front().message, "X11 capture kept failing");
@@ -911,43 +912,11 @@ TEST_F(X11, RestartingRebindsTheSelectedSource) {
 // A window ID is scoped to one X server connection and may name a different
 // client after a restart, so it must never be silently rebound.
 TEST(X11WindowLifetime, AConnectionLossPermanentlyExpiresTheWindowSelection) {
-  int displayPipe[2];
-  ASSERT_EQ(pipe(displayPipe), 0);
-  const auto server = fork();
-  ASSERT_GE(server, 0);
-  if (server == 0) {
-    close(displayPipe[0]);
-    const auto descriptor = std::to_string(displayPipe[1]);
-      // Detach the server from this process's stdio and process group. A forked
-      // X server that keeps the test binary's stdout open makes ctest wait for
-      // EOF long after the test itself has finished.
-      const int devNull = open("/dev/null", O_RDWR);
-      if (devNull >= 0) {
-        dup2(devNull, STDIN_FILENO);
-        dup2(devNull, STDOUT_FILENO);
-        dup2(devNull, STDERR_FILENO);
-        if (devNull > STDERR_FILENO) close(devNull);
-      }
-      setsid();
-    execlp("Xvfb", "Xvfb", "-displayfd", descriptor.c_str(), "-screen", "0",
-           "64x64x24", "-nolisten", "tcp", nullptr);
-    _exit(127);
-  }
-  close(displayPipe[1]);
-  char number[16]{};
-  const auto length = read(displayPipe[0], number, sizeof(number) - 1);
-  close(displayPipe[0]);
-  if (length <= 0) {
-    waitpid(server, nullptr, 0);
-    GTEST_SKIP() << "a nested Xvfb server could not be started";
-  }
-  number[length] = '\0';
-  std::string nested = ":" + std::string(number);
-  while (!nested.empty() && (nested.back() == '\n' || nested.back() == '\r'))
-    nested.pop_back();
+  auto server = std::make_unique<NestedXvfb>();
+  if (!server->ready()) GTEST_SKIP() << "a nested Xvfb could not be started";
+  const auto nested = server->display();
 
   {
-    const ScopedEnvironment display("DISPLAY", nested.c_str());
     auto* connection = connectForTest();
     ASSERT_NE(connection, nullptr);
     auto* screen = xcb_setup_roots_iterator(xcb_get_setup(connection)).data;
@@ -962,39 +931,16 @@ TEST(X11WindowLifetime, AConnectionLossPermanentlyExpiresTheWindowSelection) {
     Frame frame;
     ASSERT_TRUE(capture->next(frame, std::chrono::milliseconds(0)));
 
-    kill(server, SIGTERM);
-    waitpid(server, nullptr, 0);
+    server->forgetEnvironment();
+    server->terminate();
+    const ScopedEnvironment same("DISPLAY", nested.c_str());
 
     // A replacement server deliberately reuses the numeric ID for different
     // content and geometry.
-    const auto replacement = fork();
-    ASSERT_GE(replacement, 0);
-    if (replacement == 0) {
-      // Detach the server from this process's stdio and process group. A forked
-      // X server that keeps the test binary's stdout open makes ctest wait for
-      // EOF long after the test itself has finished.
-      const int devNull = open("/dev/null", O_RDWR);
-      if (devNull >= 0) {
-        dup2(devNull, STDIN_FILENO);
-        dup2(devNull, STDOUT_FILENO);
-        dup2(devNull, STDERR_FILENO);
-        if (devNull > STDERR_FILENO) close(devNull);
-      }
-      setsid();
-      execlp("Xvfb", "Xvfb", nested.c_str(), "-screen", "0", "64x64x24",
-             "-nolisten", "tcp", nullptr);
-      _exit(127);
-    }
-    xcb_connection_t* replacementConnection = nullptr;
-    for (int attempt = 0; attempt < 200; ++attempt) {
-      replacementConnection = xcb_connect(nullptr, nullptr);
-      if (replacementConnection &&
-          !xcb_connection_has_error(replacementConnection))
-        break;
-      if (replacementConnection) xcb_disconnect(replacementConnection);
-      replacementConnection = nullptr;
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    BackgroundProcess replacement({"Xvfb", nested, "-screen", "0", "64x64x24",
+                                   "-nolisten", "tcp"});
+    ASSERT_TRUE(replacement.started());
+    auto* replacementConnection = connectForTest();
     ASSERT_NE(replacementConnection, nullptr);
     auto* replacementScreen =
         xcb_setup_roots_iterator(xcb_get_setup(replacementConnection)).data;
@@ -1016,8 +962,6 @@ TEST(X11WindowLifetime, AConnectionLossPermanentlyExpiresTheWindowSelection) {
 
     xcb_disconnect(connection);
     xcb_disconnect(replacementConnection);
-    kill(replacement, SIGTERM);
-    waitpid(replacement, nullptr, 0);
   }
 }
 

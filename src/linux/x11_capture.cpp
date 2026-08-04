@@ -215,9 +215,7 @@ class X11Capture final : public IVideoCapture {
   bool connect(std::string& error) {
     if (connection()) return true;
     if (!display_.connect(error)) return false;
-    const auto* composite =
-        xcb_get_extension_data(connection(), &xcb_composite_id);
-    if (composite && composite->present) {
+    if (x11ExtensionPresent(connection(), xcb_composite_id)) {
       auto* version = xcb_composite_query_version_reply(
           connection(), xcb_composite_query_version(connection(), 0, 4),
           nullptr);
@@ -232,14 +230,9 @@ class X11Capture final : public IVideoCapture {
   bool setupShm() {
     shmAttempted_ = true;
     if (!options_.useShm) return false;
-    // libxcb shuts the whole connection down when a request belonging to an
-    // absent extension is sent, so MIT-SHM has to be checked for before it is
-    // queried. Skipping this check made every capture fail permanently on
-    // servers without the extension — remote X, some VNC/RDP servers — instead
-    // of falling back to xcb_get_image, which is the whole point of the
-    // fallback. Composite is guarded the same way in connect().
-    const auto* extension = xcb_get_extension_data(connection(), &xcb_shm_id);
-    if (!extension || !extension->present) return false;
+    // Without MIT-SHM the documented xcb_get_image fallback is the whole point:
+    // remote X and some VNC/RDP servers have no SHM at all.
+    if (!x11ExtensionPresent(connection(), xcb_shm_id)) return false;
     auto version = xcb_shm_query_version_reply(
         connection(), xcb_shm_query_version(connection()), nullptr);
     if (!version) return false;
@@ -329,29 +322,16 @@ class X11Capture final : public IVideoCapture {
         return false;
       }
     } else {
-      const auto& requested = std::get<MonitorCaptureSource>(source).name;
-      const auto monitors = enumerateX11Monitors(connection(), screen());
-      auto it =
-          requested.empty()
-              ? std::find_if(monitors.begin(), monitors.end(),
-                             [](const auto& monitor) { return monitor.primary; })
-              : std::find_if(monitors.begin(), monitors.end(),
-                             [&](const auto& monitor) {
-                               return monitor.name == requested;
-                             });
-      // RandR can report monitors with none flagged primary, which is what Xvfb
-      // does and what some multi-head setups end up with after an xrandr change.
-      // Capturing the first monitor is far better than refusing to stream at all
-      // when the caller expressed no preference.
-      if (requested.empty() && it == monitors.end() && !monitors.empty())
-        it = monitors.begin();
-      if (it == monitors.end()) {
+      const auto monitor = selectX11Monitor(
+          enumerateX11Monitors(connection(), screen()),
+          std::get<MonitorCaptureSource>(source).name);
+      if (!monitor) {
         if (cb)
           cb({"video", "selected monitor is unavailable",
               "Run 'mistercast list-monitors'."});
         return false;
       }
-      source_.emplace<MonitorBinding>(MonitorBinding{it->name, *it});
+      source_.emplace<MonitorBinding>(MonitorBinding{monitor->name, *monitor});
       const auto selected = snapshot();
       resolvePixelFormat(selected.depth, selected.visual);
       setupShm();

@@ -30,6 +30,9 @@ class FakeGroovyEndpoint {
   using Packet = std::vector<uint8_t>;
   using Handler = std::function<void(FakeGroovyEndpoint&, const Packet&)>;
 
+  // Every datagram is kept, so a test can assert on the traffic afterwards. That
+  // makes this the wrong endpoint for a fake that has to keep up with a real
+  // full-resolution stream — see FakeMister, which decodes in place instead.
   explicit FakeGroovyEndpoint(Handler handler, uint16_t port = 0);
   ~FakeGroovyEndpoint();
   FakeGroovyEndpoint(const FakeGroovyEndpoint&) = delete;

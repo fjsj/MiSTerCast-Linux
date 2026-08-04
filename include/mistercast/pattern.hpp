@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <iosfwd>
 #include <string>
@@ -11,6 +12,11 @@
 
 namespace mistercast {
 class GroovyTransport;
+
+// How often a long-running stream prints its performance counters. Shared by the
+// pattern generator and the capture CLI so the cadence is stated once.
+inline constexpr auto kStatsInterval = std::chrono::seconds(5);
+
 enum class PatternContent : uint8_t { Bars, Noise };
 
 struct PatternOptions {
@@ -19,6 +25,9 @@ struct PatternOptions {
   PatternContent content{PatternContent::Bars};
   bool tone{}, progressiveInterlaceBuffer{};
   uint16_t frameDelay{};
+  // Overridable so a test can cross the reporting boundary without waiting out
+  // the default cadence.
+  std::chrono::steady_clock::duration statsInterval{kStatsInterval};
 };
 
 bool parsePatternOptions(const std::vector<std::string>& arguments,

@@ -25,11 +25,6 @@ constexpr uint8_t CMD_CLOSE = 1, CMD_INIT = 2, CMD_SWITCHRES = 3, CMD_AUDIO = 4,
 constexpr uint8_t INTERLACE_FIELD_BUFFER = 1, INTERLACE_PROGRESSIVE_BUFFER = 2;
 constexpr uint64_t kAutoMarginNs = 1500000;
 
-UdpVideoConfig groovyVideoConfig() noexcept {
-  return {GroovyUdpPayloadBytes, GroovyFramebufferBytes,
-          GroovyUdpWireOverheadBytes, 950000000, 32, 100000};
-}
-
 bool configureStrictPathMtu(int fd, std::string& error) noexcept {
   const int mode = IP_PMTUDISC_DO;
   if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, sizeof(mode)) == 0)

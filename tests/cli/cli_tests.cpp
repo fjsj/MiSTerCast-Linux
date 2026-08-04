@@ -12,6 +12,7 @@
 #include "mistercast/config.hpp"
 #include "mistercast/interfaces.hpp"
 #include "support/fake_mister.hpp"
+#include "support/groovy_wire.hpp"
 #include "support/nested_xvfb.hpp"
 #include "support/subprocess.hpp"
 #include "support/temp_directory.hpp"
@@ -22,8 +23,6 @@ using namespace mistercast::test;
 using testing::HasSubstr;
 
 namespace {
-
-constexpr uint8_t kHealthy = 0x84;
 
 // Every case drives the installed entry point rather than a linked-in copy of
 // the parser, so exit codes and diagnostics are checked exactly as a user or a

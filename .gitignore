@@ -1,8 +1,5 @@
 build/
-build-asan/
-build-tsan/
-build-cov/
-build-coverage/
+build-*/
 coverage/
 coverage.xml
 _CPack_Packages/

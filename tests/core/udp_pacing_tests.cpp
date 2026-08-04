@@ -24,8 +24,7 @@ using testing::HasSubstr;
 namespace {
 
 UdpVideoConfig groovyConfig(size_t payloadBytes = GroovyUdpPayloadBytes) {
-  return {payloadBytes, GroovyFramebufferBytes, GroovyUdpWireOverheadBytes,
-          950000000, 32, 100000};
+  return {payloadBytes, GroovyFramebufferBytes, GroovyUdpWireOverheadBytes};
 }
 
 // A scripted stand-in for the four syscalls the submitter needs. This is the

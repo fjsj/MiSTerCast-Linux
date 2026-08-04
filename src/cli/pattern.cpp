@@ -201,7 +201,7 @@ bool streamGeneratedPattern(const PatternOptions& options,
   std::vector<int16_t> toneSamples;
   PatternTone tone(kToneRate);
   auto audioClock = std::chrono::steady_clock::now();
-  auto nextStats = audioClock + std::chrono::seconds(5);
+  auto nextStats = audioClock + options.statsInterval;
   uint32_t frame = 0;
   uint8_t field = 0;
   while (!stop) {
@@ -228,7 +228,7 @@ bool streamGeneratedPattern(const PatternOptions& options,
     transport.waitSync();
     if (std::chrono::steady_clock::now() >= nextStats) {
       printStats(status, transport.stats());
-      nextStats += std::chrono::seconds(5);
+      nextStats += options.statsInterval;
     }
   }
   return true;

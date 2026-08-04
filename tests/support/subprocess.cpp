@@ -24,7 +24,55 @@ void readAvailable(int descriptor, std::string& into) {
   }
 }
 
+std::vector<char*> argumentVector(const std::vector<std::string>& arguments) {
+  std::vector<char*> argv;
+  argv.reserve(arguments.size() + 1);
+  for (const auto& argument : arguments)
+    argv.push_back(const_cast<char*>(argument.c_str()));
+  argv.push_back(nullptr);
+  return argv;
+}
+
 }  // namespace
+
+BackgroundProcess::BackgroundProcess(const std::vector<std::string>& arguments,
+                                     const std::function<void()>& childSetup) {
+  if (arguments.empty()) return;
+  const auto child = ::fork();
+  if (child < 0) return;
+  if (child == 0) {
+    const int devNull = ::open("/dev/null", O_RDWR);
+    if (devNull >= 0) {
+      ::dup2(devNull, STDIN_FILENO);
+      ::dup2(devNull, STDOUT_FILENO);
+      ::dup2(devNull, STDERR_FILENO);
+      if (devNull > STDERR_FILENO) ::close(devNull);
+    }
+    ::setsid();
+    if (childSetup) childSetup();
+    auto argv = argumentVector(arguments);
+    ::execvp(argv[0], argv.data());
+    ::_exit(127);
+  }
+  child_ = child;
+}
+
+BackgroundProcess::~BackgroundProcess() { terminate(); }
+
+bool BackgroundProcess::running() noexcept {
+  if (child_ <= 0) return false;
+  int status = 0;
+  if (::waitpid(child_, &status, WNOHANG) != child_) return true;
+  child_ = -1;  // reaped here, so nothing may signal this pid again
+  return false;
+}
+
+void BackgroundProcess::terminate() noexcept {
+  if (child_ <= 0) return;
+  ::kill(child_, SIGTERM);
+  ::waitpid(child_, nullptr, 0);
+  child_ = -1;
+}
 
 bool ProcessResult::mentions(const std::string& text) const {
   return out.find(text) != std::string::npos ||
@@ -65,11 +113,7 @@ ProcessResult runProcess(const std::vector<std::string>& arguments,
       else
         ::setenv(name.c_str(), value.c_str(), 1);
     }
-    std::vector<char*> argv;
-    argv.reserve(arguments.size() + 1);
-    for (const auto& argument : arguments)
-      argv.push_back(const_cast<char*>(argument.c_str()));
-    argv.push_back(nullptr);
+    auto argv = argumentVector(arguments);
     ::execv(argv[0], argv.data());
     ::_exit(127);
   }

@@ -23,25 +23,20 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(BUILD_GMOCK ON CACHE BOOL "" FORCE)
 
-set(mistercast_gtest_args
-  googletest
+# Prefer an installed GTest, fetch only when there is none. This is what
+# FetchContent's FIND_PACKAGE_ARGS does, spelled out by hand because that option
+# needs CMake 3.24 and the project supports 3.16 — and doing it in one code path
+# means the supported-version range is not two configurations to reason about.
+find_package(GTest QUIET)
+if(GTest_FOUND)
+  return()
+endif()
+
+FetchContent_Declare(googletest
   URL https://github.com/google/googletest/archive/refs/tags/v${MISTERCAST_GTEST_VERSION}.tar.gz
   URL_HASH SHA256=${MISTERCAST_GTEST_SHA256}
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-
-# FIND_PACKAGE_ARGS needs CMake 3.24; on older CMake, look for the installed
-# package by hand first and only fetch when it is missing.
-if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
-  FetchContent_Declare(${mistercast_gtest_args} FIND_PACKAGE_ARGS NAMES GTest)
-  FetchContent_MakeAvailable(googletest)
-else()
-  find_package(GTest QUIET)
-  if(GTest_FOUND)
-    return()
-  endif()
-  FetchContent_Declare(${mistercast_gtest_args})
-  FetchContent_MakeAvailable(googletest)
-endif()
+FetchContent_MakeAvailable(googletest)
 
 # The fetched build is a dependency, not first-party code: keep its warnings out
 # of the project's own -Wall -Wextra -Wpedantic output.

@@ -9,7 +9,9 @@
 
 #include "mistercast/stream_session.hpp"
 #include "support/fake_capture.hpp"
+#include "support/fake_groovy_endpoint.hpp"
 #include "support/fake_mister.hpp"
+#include "support/groovy_wire.hpp"
 #include "support/wait_for.hpp"
 
 using namespace mistercast;
@@ -17,12 +19,6 @@ using namespace mistercast::test;
 using testing::HasSubstr;
 
 namespace {
-
-// Receiver status bits, as decoded by the transport.
-constexpr uint8_t kVramSynced = 0x04, kFrameskip = 0x08, kCoreAudioOn = 0x40,
-                  kQueuePresent = 0x80;
-constexpr uint8_t kHealthy = kVramSynced | kQueuePresent;
-constexpr uint8_t kHealthyWithAudio = kHealthy | kCoreAudioOn;
 
 AppConfig sessionConfig() {
   AppConfig config;
@@ -90,12 +86,29 @@ class Session {
 // A machine already running something there skips rather than fails.
 class SessionTest : public testing::Test {
  protected:
+  // GTEST_SKIP() returns from the function it appears in, so a skip raised here
+  // only aborts this helper. Every call site follows it with
+  // `if (IsSkipped()) return;` — without that the body runs on against an
+  // unbound receiver and fails instead of skipping.
   void bindReceiver(uint8_t statusBits = kHealthy) {
+    silent.reset();  // free the port if this test was holding it
     mister = std::make_unique<FakeMister>(statusBits);
     if (!mister->bound())
       GTEST_SKIP() << "UDP port 32100 is already in use on this machine";
   }
 
+  // Owns UDP 32100 without ever answering, for the tests whose premise is that
+  // nothing is listening. Leaving the port unbound would do on an idle machine,
+  // but anything else on 32100 — another ctest invocation, a running MiSTerCast —
+  // answers the init and turns those tests into failures about the wrong thing.
+  void holdPortSilently() {
+    silent = std::make_unique<FakeGroovyEndpoint>(
+        [](FakeGroovyEndpoint&, const FakeGroovyEndpoint::Packet&) {}, 32100);
+    if (!silent->valid())
+      GTEST_SKIP() << "UDP port 32100 is already in use on this machine";
+  }
+
+  std::unique_ptr<FakeGroovyEndpoint> silent;
   std::unique_ptr<FakeMister> mister;
 };
 
@@ -159,7 +172,8 @@ TEST_F(SessionTest, ReportsAnAudioCaptureThatCannotStart) {
 }
 
 TEST_F(SessionTest, ReportsATargetThatIsNotListening) {
-  // No fake receiver is bound here, so the transport's CMD_INIT goes unanswered.
+  holdPortSilently();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   EXPECT_FALSE(session.start(sessionConfig(), MonitorCaptureSource{}, &error));
@@ -175,6 +189,7 @@ TEST_F(SessionTest, ReportsATargetThatIsNotListening) {
 
 TEST_F(SessionTest, PassesTheSelectedSourceAndSinkToTheCaptureDevices) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session;
   auto config = sessionConfig();
   config.source.audio = true;
@@ -190,6 +205,7 @@ TEST_F(SessionTest, PassesTheSelectedSourceAndSinkToTheCaptureDevices) {
 
 TEST_F(SessionTest, AnActiveStreamCannotBeStartedAgain) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -202,6 +218,7 @@ TEST_F(SessionTest, AnActiveStreamCannotBeStartedAgain) {
 
 TEST_F(SessionTest, PublishesTheDocumentedStateSequence) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -220,6 +237,7 @@ TEST_F(SessionTest, PublishesTheDocumentedStateSequence) {
 
 TEST_F(SessionTest, StreamsFramesAndReportsProgress) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -235,12 +253,17 @@ TEST_F(SessionTest, StreamsFramesAndReportsProgress) {
   EXPECT_EQ(stats.audioSampleRate, 0u) << "audio was disabled";
   EXPECT_GE(mister->blits(), 3u);
   EXPECT_EQ(mister->audioPackets(), 0u);
-  EXPECT_EQ(mister->switchModes(), 1u);
+  // Exactly one mode switch preceded the stream. Asserted before the first blit
+  // because this test streams: past that point an uncompressed blit's payload
+  // would be decoded as commands and could inflate the total (see FakeMister),
+  // which is a build without liblz4 rather than a defect in the session.
+  EXPECT_EQ(mister->switchModesBeforeFirstBlit(), 1u);
   EXPECT_TRUE(waitFor([&] { return mister->closes() >= 1; }));
 }
 
 TEST_F(SessionTest, TracksTransformCostAndResetsItOnRestart) {
   bindReceiver(kHealthy | kFrameskip);
+  if (IsSkipped()) return;
   Session session;
   session.video().produce = false;
   auto config = sessionConfig();
@@ -278,6 +301,7 @@ TEST_F(SessionTest, TracksTransformCostAndResetsItOnRestart) {
 
 TEST_F(SessionTest, AnInterlacedModeReachesTheAdaptiveDeliveryMargin) {
   bindReceiver(kHealthy);
+  if (IsSkipped()) return;
   Session session;
   auto config = sessionConfig();
   config.modeline = {"480i", 12.336, 640, 662, 720, 784, 480, 488, 494, 525,
@@ -300,6 +324,7 @@ TEST_F(SessionTest, AnInterlacedModeReachesTheAdaptiveDeliveryMargin) {
 
 TEST_F(SessionTest, TheProgressiveInterlaceBufferSendsFullHeightFrames) {
   bindReceiver(kHealthy);
+  if (IsSkipped()) return;
   Session session;
   auto config = sessionConfig();
   config.modeline = {"480i", 12.336, 640, 662, 720, 784, 480, 488, 494, 525,
@@ -318,6 +343,7 @@ TEST_F(SessionTest, TheProgressiveInterlaceBufferSendsFullHeightFrames) {
 
 TEST_F(SessionTest, CaptureIsPacedAgainstSendingSoNoBacklogCanForm) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   // Transient capture failures, which is when the capture loop re-requests a
   // frame of its own accord and could otherwise run ahead of the sender.
@@ -339,6 +365,7 @@ TEST_F(SessionTest, CaptureIsPacedAgainstSendingSoNoBacklogCanForm) {
 
 TEST_F(SessionTest, RecomputesTheCropWhenTheMonitorIsResized) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   // 4:3 of a 1080-tall monitor is 1440x1080.
@@ -361,6 +388,7 @@ TEST_F(SessionTest, RecomputesTheCropWhenTheMonitorIsResized) {
 
 TEST_F(SessionTest, KeepsStreamingWhileCaptureIsTemporarilyUnavailable) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -383,6 +411,7 @@ TEST_F(SessionTest, KeepsStreamingWhileCaptureIsTemporarilyUnavailable) {
 
 TEST_F(SessionTest, AFatalCaptureErrorFailsTheSession) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -401,6 +430,7 @@ TEST_F(SessionTest, AFatalCaptureErrorFailsTheSession) {
 
 TEST_F(SessionTest, PublishesPreviewFramesAtAThrottledRate) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::atomic<uint32_t> previews{0};
   std::atomic<uint32_t> lastWidth{0};
@@ -423,6 +453,7 @@ TEST_F(SessionTest, PublishesPreviewFramesAtAThrottledRate) {
 
 TEST_F(SessionTest, PreviewIsSilentWhenTheSettingIsOff) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::atomic<uint32_t> previews{0};
   session->setPreviewCallback([&](const Frame&) { ++previews; });
@@ -438,6 +469,7 @@ TEST_F(SessionTest, PreviewIsSilentWhenTheSettingIsOff) {
 
 TEST_F(SessionTest, SwitchesTimingsLiveAndFollowsTheNewActiveArea) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   auto config = sessionConfig();
   config.source.crop = CropMode::X1;  // 1x crop tracks the active area
@@ -469,6 +501,7 @@ TEST_F(SessionTest, SwitchesTimingsLiveAndFollowsTheNewActiveArea) {
 
 TEST_F(SessionTest, RefusesToSwitchToTimingsTheProtocolCannotStream) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -496,6 +529,7 @@ TEST_F(SessionTest, RefusesToSwitchTimingsWhileIdle) {
 
 TEST_F(SessionTest, NegotiatesNoAudioAtAllWhenAudioIsDisabled) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   auto config = sessionConfig();
   config.source.audio = false;
@@ -512,6 +546,7 @@ TEST_F(SessionTest, NegotiatesNoAudioAtAllWhenAudioIsDisabled) {
 
 TEST_F(SessionTest, NegotiatesStereoAndSendsPcmWhenTheCoreHasAudioOn) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   auto config = sessionConfig();
   config.source.audio = true;
@@ -530,6 +565,7 @@ TEST_F(SessionTest, NegotiatesStereoAndSendsPcmWhenTheCoreHasAudioOn) {
 
 TEST_F(SessionTest, SendsNoAudioAtAllWhileTheCoreReportsAudioOff) {
   bindReceiver(kHealthy);  // core audio bit clear
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   auto config = sessionConfig();
   config.source.audio = true;
@@ -547,6 +583,7 @@ TEST_F(SessionTest, SendsNoAudioAtAllWhileTheCoreReportsAudioOff) {
 
 TEST_F(SessionTest, StartsSendingAudioWhenTheCoreTurnsItOnMidStream) {
   bindReceiver(kHealthy);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   auto config = sessionConfig();
   config.source.audio = true;
@@ -563,6 +600,7 @@ TEST_F(SessionTest, StartsSendingAudioWhenTheCoreTurnsItOnMidStream) {
 
 TEST_F(SessionTest, DropsTheOldestSamplesWhenAudioArrivesFasterThanItIsSent) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   // Far more PCM than one video frame's worth, delivered with no delay.
   session.audio().valuesPerBlock = 9600;
@@ -580,6 +618,7 @@ TEST_F(SessionTest, DropsTheOldestSamplesWhenAudioArrivesFasterThanItIsSent) {
 
 TEST_F(SessionTest, InsertsSilenceWhenNoPcmIsAvailable) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   // A trickle: enough to pass the prebuffer, then far too little to keep up.
   session.audio().valuesPerBlock = 4000;
@@ -597,6 +636,7 @@ TEST_F(SessionTest, InsertsSilenceWhenNoPcmIsAvailable) {
 
 TEST_F(SessionTest, MeasuresThePeakOfTheLoudestPossibleSample) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   session.audio().sampleValue = INT16_MIN;  // magnitude 32768, not 32767
   auto config = sessionConfig();
@@ -610,6 +650,7 @@ TEST_F(SessionTest, MeasuresThePeakOfTheLoudestPossibleSample) {
 
 TEST_F(SessionTest, AdoptsTheRateTheAudioDeviceActuallyOpened) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   session.audio().rate = 44100;
   auto config = sessionConfig();
@@ -630,6 +671,7 @@ TEST_F(SessionTest, StopIsIdempotentAndSafeWhileIdle) {
   EXPECT_EQ(session->state(), SessionState::Idle);
 
   bindReceiver();
+  if (IsSkipped()) return;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
       << error;
@@ -646,6 +688,7 @@ TEST_F(SessionTest, StopIsIdempotentAndSafeWhileIdle) {
 
 TEST_F(SessionTest, StoppingSendsTheCloseCommandAndJoinsEveryWorker) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   auto config = sessionConfig();
   config.source.audio = true;
@@ -664,6 +707,7 @@ TEST_F(SessionTest, StoppingSendsTheCloseCommandAndJoinsEveryWorker) {
 
 TEST_F(SessionTest, DestructionStopsARunningStream) {
   bindReceiver();
+  if (IsSkipped()) return;
   {
     Session session;
     std::string error;
@@ -675,6 +719,8 @@ TEST_F(SessionTest, DestructionStopsARunningStream) {
 }
 
 TEST_F(SessionTest, RestartsCleanlyAfterAFailedStart) {
+  holdPortSilently();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   // Fails because nothing is listening yet.
@@ -682,6 +728,7 @@ TEST_F(SessionTest, RestartsCleanlyAfterAFailedStart) {
   ASSERT_EQ(session->state(), SessionState::Error);
 
   bindReceiver();
+  if (IsSkipped()) return;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
       << error;
   EXPECT_TRUE(waitFor([&] { return session->stats().sentFrames >= 1; }));
@@ -692,6 +739,7 @@ TEST_F(SessionTest, RestartsCleanlyAfterAFailedStart) {
 // the CLI's pattern mode and the destructor path both leave them out.
 TEST_F(SessionTest, WorksWithNeitherACallbackNorAnErrorPointer) {
   bindReceiver();
+  if (IsSkipped()) return;
   auto video = std::make_unique<FakeVideo>();
   auto* raw = video.get();
   StreamSession session(std::move(video), std::make_unique<FakeAudio>());
@@ -710,6 +758,8 @@ TEST_F(SessionTest, WorksWithNeitherACallbackNorAnErrorPointer) {
 }
 
 TEST_F(SessionTest, EveryFailurePathIsSafeWithoutACallbackOrErrorPointer) {
+  holdPortSilently();
+  if (IsSkipped()) return;
   {  // configuration the protocol cannot stream
     StreamSession session(std::make_unique<FakeVideo>(),
                           std::make_unique<FakeAudio>());
@@ -757,6 +807,7 @@ TEST_F(SessionTest, EveryFailurePathIsSafeWithoutACallbackOrErrorPointer) {
 
 TEST_F(SessionTest, FailsTheStreamWhenTheTargetStopsListening) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -777,6 +828,7 @@ TEST_F(SessionTest, FailsTheStreamWhenTheTargetStopsListening) {
 
 TEST_F(SessionTest, ReportsAnAudioSendFailureAsAnAudioProblem) {
   bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   Session session(/*withAudio=*/true);
   auto config = sessionConfig();
   config.source.audio = true;
@@ -797,6 +849,7 @@ TEST_F(SessionTest, ReportsAnAudioSendFailureAsAnAudioProblem) {
 
 TEST_F(SessionTest, KeepsTheWorkingCropWhenTheSourceGeometryBecomesUnusable) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   std::string error;
   ASSERT_TRUE(session.start(sessionConfig(), MonitorCaptureSource{}, &error))
@@ -818,6 +871,7 @@ TEST_F(SessionTest, KeepsTheWorkingCropWhenTheSourceGeometryBecomesUnusable) {
 
 TEST_F(SessionTest, FailsWhenNoFrameIsCapturedForFiveSeconds) {
   bindReceiver();
+  if (IsSkipped()) return;
   Session session;
   session.video().produce = false;
   std::string error;

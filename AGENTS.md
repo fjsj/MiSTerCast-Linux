@@ -42,9 +42,19 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
 | `x11` | capture, display connection, and window catalog against a real X server | X11 |
 | `pulse-audio` | capture and silent-output routing against a private PulseAudio server | `pulseaudio` |
 
-- `ctest -L unit` runs only the suites that need no display, network, or daemon.
+- `ctest -L unit` runs only the suites that need no display, no daemon and no
+  fixed port: `core` needs nothing at all and `transport` needs only loopback
+  on an arbitrary port, so both are safe to run anywhere and in parallel.
 - Suites that bind UDP 32100 share a ctest `RESOURCE_LOCK`, so `ctest -j` will not
   make them skip each other out. A machine already using that port skips them.
+- That lock only covers one ctest invocation. Do not run two at once against the
+  same machine: the second one's receiver answers the first one's `CMD_INIT`, and
+  the port-bound suites then **fail rather than skip**, because `GTEST_SKIP()`
+  inside a helper such as `bindReceiver` returns from the helper and leaves the
+  test body running against an unbound receiver. Reproduce by holding 32100 with
+  anything that replies while `ctest -R session` runs. Fixing it properly means
+  guarding all 47 `bindReceiver` call sites — with `if (IsSkipped()) return;`, or
+  by moving the bind into a `SetUp()` where `GTEST_SKIP()` does stop the test.
 - `x11` and `pulse-audio` exit 77 (a ctest skip) when no X server or no
   `pulseaudio` binary is available; everything else must pass everywhere.
 - Widgets carry an `objectName` matching the member name without its trailing
@@ -58,6 +68,30 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
 - Anything this suite forks (Xvfb, pulseaudio) must redirect its stdio to
   `/dev/null` and call `setsid()`. A forked daemon holding the test binary's
   stdout keeps ctest waiting for EOF long after the tests have finished.
+  `BackgroundProcess` in `tests/support/subprocess.hpp` does both; start helper
+  daemons through it rather than forking again by hand.
+- There are two Groovy fakes. `FakeGroovyEndpoint` records every datagram so a
+  transport test can assert on the traffic; `FakeMister` decodes in place and keeps
+  counters. Rebuilding the second on the first was tried and reverted: the suites
+  using `FakeMister` stream real full-resolution frames, roughly 850 datagrams per
+  frame at 60 Hz, and routing those through the recording endpoint made the GUI
+  suite fail intermittently (3 runs in 25, against 0 in 22 before and 0 in 16
+  after reverting), with acknowledgements lost while the session under test
+  reported errors nothing in production caused. What that experiment did *not*
+  do is isolate the cause: suppressing packet accumulation alone still left 1
+  failure in 14, and a non-owning-view handler that would remove the per-datagram
+  allocation was never tried. So treat this as measured-flaky-when-shared rather
+  than proven-unmergeable, and note the corollary — these tests are sensitive
+  enough to fake overhead that a shared design must be measured, not reasoned
+  about. Peak RSS was never the problem (55 MB).
+- The wire vocabulary the fakes and suites assert against lives once in
+  `tests/support/groovy_wire.hpp`, and is deliberately not taken from the
+  production headers: reading the opcodes out of the code under test would make
+  "CMD_INIT is opcode 2 in a 5-byte datagram" unfalsifiable.
+- Suites reach a layer with no public header (`src/linux`, `src/gui`) by passing
+  `SOURCE_TREE` to `mistercast_add_test_suite`, which puts `src/` on that test
+  target's include path only. Do not make `src/` a public include directory of a
+  library: that exports every internal header to every consumer.
 - Xvfb refuses roughly one connection in four when a process opens several in
   quick succession; a real Xorg server never does. `tests/linux/x11_tests.cpp`
   retries for that reason, and it is a harness allowance, not a product defect.

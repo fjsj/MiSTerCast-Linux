@@ -7,10 +7,14 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstring>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 #include <vector>
+
+#include "support/fake_groovy_endpoint.hpp"
+#include "support/groovy_wire.hpp"
 
 namespace mistercast::test {
 
@@ -18,10 +22,20 @@ namespace mistercast::test {
 // dials 32100, so a session-level test needs the fake to own it; when the port is
 // already taken, `bound()` is false and the test skips instead of failing.
 //
-// Unlike FakeGroovyEndpoint (arbitrary port, used for transport-level tests),
-// this acknowledges every blit by echoing the requested frame and sync line back
-// as both the echo and the current raster, which is what keeps a session's ACK
-// tracking and adaptive timing progressing.
+// It acknowledges every blit by echoing the requested frame and sync line back as
+// both the echo and the current raster, which is what keeps a session's ACK
+// tracking and adaptive timing progressing, and counts the traffic so a test can
+// assert on it afterwards.
+//
+// This keeps its own receive loop rather than reusing FakeGroovyEndpoint, which
+// exists to record traffic for the transport tests to inspect. The suites that
+// use this fake stream real full-resolution frames — roughly 850 datagrams per
+// frame at 60 Hz — and a per-datagram vector, let alone keeping them all, makes
+// the fake the bottleneck: the receive queue overflows, acknowledgements are lost
+// and the session under test reports errors that nothing in production caused.
+// Measured: reusing the recording endpoint made the GUI suite fail about one run
+// in eight. So each command is decoded in place out of the stack buffer, and the
+// two share the wire vocabulary and the acknowledgement encoder instead.
 class FakeMister {
  public:
   explicit FakeMister(uint8_t statusBits) : statusBits_(statusBits) {
@@ -59,6 +73,13 @@ class FakeMister {
   void setStatusBits(uint8_t bits) noexcept { statusBits_ = bits; }
   void setAcknowledge(bool value) noexcept { acknowledge_ = value; }
 
+  // Assert on DELTAS across the step under test, not on absolute totals. These
+  // counters can over-report: an uncompressed blit's 8-byte header carries no
+  // payload length, so the pixel datagrams that follow it cannot be skipped, and
+  // any one of them that happens to begin with a command opcode at that
+  // command's exact size is counted as a command. Compressed blits carry the
+  // length and are skipped correctly, which is the usual case with liblz4 built
+  // in, but nothing in the protocol guarantees it.
   uint32_t blits() const noexcept { return blits_; }
   uint32_t audioPackets() const noexcept { return audioPackets_; }
   uint64_t audioBytes() const noexcept { return audioBytes_; }
@@ -68,6 +89,16 @@ class FakeMister {
   uint8_t initChannelCode() const noexcept { return initChannels_; }
   uint16_t lastSyncLine() const noexcept { return lastSyncLine_; }
   uint8_t lastInterlaceMode() const noexcept { return lastInterlace_; }
+
+  // Mode switches counted before the first blit — the one switch count that is
+  // exact in every build. Video payload is the only traffic this fake can
+  // misread, and it can never precede the blit header it belongs to, so nothing
+  // spurious is counted this early. Use it to assert "the session switched mode
+  // exactly once before streaming" without depending on liblz4 being present to
+  // make blits carry their payload length.
+  uint32_t switchModesBeforeFirstBlit() const noexcept {
+    return switchModesBeforeFirstBlit_;
+  }
 
   std::vector<uint8_t> fields() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -85,78 +116,59 @@ class FakeMister {
     sockaddr_storage peer{};
     socklen_t peerSize = sizeof(peer);
     // Command payloads (audio PCM, video pixels) arrive as follow-up datagrams
-    // that must not be mistaken for commands.
+    // that carry no opcode and must not be decoded as commands.
     size_t payloadRemaining = 0;
     while (running_) {
-      const auto size = recvfrom(fd_, packet, sizeof(packet), 0,
-                                 reinterpret_cast<sockaddr*>(&peer), &peerSize);
-      if (size <= 0) continue;
+      const auto received = recvfrom(fd_, packet, sizeof(packet), 0,
+                                     reinterpret_cast<sockaddr*>(&peer),
+                                     &peerSize);
+      if (received <= 0) continue;
+      const auto size = size_t(received);
       if (payloadRemaining) {
-        payloadRemaining -= std::min(payloadRemaining, size_t(size));
+        payloadRemaining -= std::min(payloadRemaining, size);
         continue;
       }
-      switch (packet[0]) {
-        case 2:
-          if (size != 5) break;
-          initRate_ = packet[2];
-          initChannels_ = packet[3];
-          replyStatus(peer, peerSize, 0, 0, 0, 0);
-          break;
-        case 3: {
-          if (size != 26) break;
-          ++switchModes_;
-          uint16_t vActive = 0;
-          std::memcpy(&vActive, packet + 17, 2);
-          lastInterlace_ = packet[25];
+      const auto opcode = packet[0];
+      if (isGroovyCommand(opcode, size, kInit)) {
+        initRate_ = packet[2];
+        initChannels_ = packet[3];
+        reply(peer, peerSize, {0, 0, 0, 0, statusBits_});
+      } else if (isGroovyCommand(opcode, size, kSwitchMode)) {
+        ++switchModes_;
+        lastInterlace_ = packet[25];
+        std::lock_guard<std::mutex> lock(mutex_);
+        activeHeights_.push_back(readWire<uint16_t>(packet, size, 17));
+      } else if (isGroovyCommand(opcode, size, kAudio)) {
+        ++audioPackets_;
+        const auto bytes = readWire<uint16_t>(packet, size, 1);
+        audioBytes_ += bytes;
+        payloadRemaining = bytes;
+      } else if (isGroovyCommand(opcode, size, kBlit)) {
+        if (!blits_) switchModesBeforeFirstBlit_ = switchModes_.load();
+        ++blits_;
+        const auto frame = readWire<uint32_t>(packet, size, 1);
+        const auto line = readWire<uint16_t>(packet, size, 6);
+        lastSyncLine_ = line;
+        {
           std::lock_guard<std::mutex> lock(mutex_);
-          activeHeights_.push_back(vActive);
-          break;
+          fields_.push_back(packet[5]);
         }
-        case 4: {
-          if (size != 3) break;
-          ++audioPackets_;
-          uint16_t bytes = 0;
-          std::memcpy(&bytes, packet + 1, 2);
-          audioBytes_ += bytes;
-          payloadRemaining = bytes;
-          break;
-        }
-        case 7: {
-          if (size != 8 && size != 12) break;
-          ++blits_;
-          uint32_t frame = 0, compressed = 0;
-          uint16_t line = 0;
-          std::memcpy(&frame, packet + 1, 4);
-          std::memcpy(&line, packet + 6, 2);
-          if (size == 12) std::memcpy(&compressed, packet + 8, 4);
-          lastSyncLine_ = line;
-          {
-            std::lock_guard<std::mutex> lock(mutex_);
-            fields_.push_back(packet[5]);
-          }
-          payloadRemaining = compressed;
-          if (acknowledge_) replyStatus(peer, peerSize, frame, line, frame, line);
-          break;
-        }
-        case 1:
-          ++closes_;
-          break;
-        default:
-          break;
+        payloadRemaining = size == kBlitCompressedBytes
+                               ? readWire<uint32_t>(packet, size, 8)
+                               : 0;
+        if (acknowledge_)
+          reply(peer, peerSize, {frame, line, frame, line, statusBits_});
+      } else if (isGroovyCommand(opcode, size, kClose)) {
+        ++closes_;
       }
     }
   }
 
-  void replyStatus(const sockaddr_storage& peer, socklen_t peerSize,
-                   uint32_t frameEcho, uint16_t lineEcho, uint32_t frame,
-                   uint16_t line) {
-    uint8_t status[13]{};
-    std::memcpy(status, &frameEcho, 4);
-    std::memcpy(status + 4, &lineEcho, 2);
-    std::memcpy(status + 6, &frame, 4);
-    std::memcpy(status + 10, &line, 2);
-    status[12] = statusBits_;
-    sendto(fd_, status, sizeof(status), 0,
+  // GroovyAck owns the 13-byte acknowledgement layout for both fakes.
+  void reply(const sockaddr_storage& peer, socklen_t peerSize,
+             const GroovyAck& ack) const {
+    const auto bytes = ack.encode();
+    sendto(fd_, bytes.data(), bytes.size(), 0,
            reinterpret_cast<const sockaddr*>(&peer), peerSize);
   }
 
@@ -169,6 +181,7 @@ class FakeMister {
   std::atomic<uint8_t> initRate_{0xff}, initChannels_{0xff}, lastInterlace_{
                                                                  0xff};
   std::atomic<uint16_t> lastSyncLine_{0};
+  std::atomic<uint32_t> switchModesBeforeFirstBlit_{0};
   std::thread worker_;
   mutable std::mutex mutex_;
   std::vector<uint8_t> fields_;

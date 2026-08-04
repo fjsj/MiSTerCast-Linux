@@ -13,6 +13,7 @@
 #include "mistercast/pattern.hpp"
 #include "support/fake_groovy_endpoint.hpp"
 #include "support/fake_mister.hpp"
+#include "support/groovy_wire.hpp"
 #include "support/wait_for.hpp"
 
 using namespace mistercast;
@@ -20,10 +21,6 @@ using namespace mistercast::test;
 using testing::HasSubstr;
 
 namespace {
-
-constexpr uint8_t kClose = 1, kInit = 2, kSwitchMode = 3, kAudio = 4,
-                  kBlit = 7;
-constexpr uint8_t kHealthyWithAudio = 0xc4;
 
 // 8x8 active on a 100-line raster: a whole frame is a few hundred bytes and the
 // pacing wait is short, so protocol-level tests stay fast.
@@ -486,7 +483,6 @@ TEST(StreamGeneratedPattern, PrintsPeriodicDiagnosticsForAnInterlacedMode) {
   std::atomic<bool> stop{false};
   // Synced but with the VGA frameskip fallback engaged and an empty VRAM queue,
   // so the unhealthy side of every diagnostic is printed too.
-  constexpr uint8_t kUnhealthy = 0x0c;
   FakeGroovyEndpoint endpoint([&](auto& peer, const auto& packet) {
     if (packet.empty()) return;
     if (packet[0] == kInit)
@@ -503,15 +499,16 @@ TEST(StreamGeneratedPattern, PrintsPeriodicDiagnosticsForAnInterlacedMode) {
   // The stream is only inspected after the worker is joined, so the stream
   // object is never touched from two threads at once.
   std::ostringstream status;
+  // Report on every pass instead of once every five seconds, so the periodic
+  // branch is crossed repeatedly within a few frames rather than by waiting out
+  // the production cadence.
+  auto options = patternFor(runnerMode(true));
+  options.statsInterval = std::chrono::milliseconds(1);
   std::thread runner([&] {
-    EXPECT_TRUE(streamGeneratedPattern(patternFor(runnerMode(true)), transport,
-                                       stop, status, error))
+    EXPECT_TRUE(streamGeneratedPattern(options, transport, stop, status, error))
         << error;
   });
-  const auto started = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - started <
-         std::chrono::milliseconds(6000))
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  waitFor([&] { return endpoint.packets().size() > 8; });
   stop = true;
   runner.join();
   transport.close();

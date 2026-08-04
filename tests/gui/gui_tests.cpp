@@ -16,19 +16,19 @@
 #include <QSpinBox>
 #include <QTimer>
 
-#include <xcb/xcb.h>
-
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "gui/main_window.hpp"
+#include "gui_test_support.hpp"
 #include "mistercast/config.hpp"
 #include "support/fake_mister.hpp"
+#include "support/groovy_wire.hpp"
 #include "support/pulse_server.hpp"
-#include "support/temp_directory.hpp"
+#include "support/x11_windows.hpp"
 
 using namespace mistercast;
 using namespace mistercast::test;
@@ -36,130 +36,6 @@ using mistercast::gui::MainWindow;
 using testing::HasSubstr;
 
 namespace {
-
-constexpr uint8_t kHealthy = 0x84;
-
-// Runs the Qt event loop until the condition holds or the deadline passes. Every
-// widget mutation still happens on this, the Qt thread.
-bool pumpUntil(const std::function<bool()>& ready,
-               std::chrono::milliseconds timeout =
-                   std::chrono::milliseconds(15000)) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (ready()) return true;
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-    QCoreApplication::sendPostedEvents();
-  }
-  return ready();
-}
-
-void pumpFor(std::chrono::milliseconds duration) {
-  pumpUntil([] { return false; }, duration);
-}
-
-// Real X11 windows for the chooser to find. Xvfb has no window manager and no
-// other clients, so a test that needs a capturable window has to create one.
-class ForeignWindows {
- public:
-  explicit ForeignWindows(const std::vector<std::string>& titles) {
-    connection_ = xcb_connect(nullptr, nullptr);
-    if (!connection_ || xcb_connection_has_error(connection_)) return;
-    auto* screen = xcb_setup_roots_iterator(xcb_get_setup(connection_)).data;
-    if (!screen) return;
-    for (const auto& title : titles) {
-      const auto window = xcb_generate_id(connection_);
-      const uint32_t background[] = {screen->black_pixel};
-      xcb_create_window(connection_, screen->root_depth, window, screen->root, 0,
-                        0, 64, 48, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
-                        screen->root_visual, XCB_CW_BACK_PIXEL, background);
-      xcb_change_property(connection_, XCB_PROP_MODE_REPLACE, window,
-                          XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, title.size(),
-                          title.data());
-      xcb_map_window(connection_, window);
-      windows_.push_back(window);
-    }
-    free(xcb_get_input_focus_reply(
-        connection_, xcb_get_input_focus(connection_), nullptr));
-    ready_ = true;
-  }
-
-  ~ForeignWindows() {
-    if (!connection_) return;
-    for (const auto window : windows_) xcb_destroy_window(connection_, window);
-    xcb_disconnect(connection_);
-  }
-
-  ForeignWindows(const ForeignWindows&) = delete;
-  ForeignWindows& operator=(const ForeignWindows&) = delete;
-
-  bool ready() const noexcept { return ready_; }
-  uint32_t first() const noexcept { return windows_.empty() ? 0 : windows_.front(); }
-
- private:
-  xcb_connection_t* connection_{};
-  std::vector<xcb_window_t> windows_;
-  bool ready_{false};
-};
-
-// Each test gets its own configuration directory, so the window never reads or
-// writes the developer's real ~/.config/mistercast.
-class Gui : public testing::Test {
- protected:
-  void SetUp() override {
-    directory = std::make_unique<TemporaryDirectory>("gui");
-    configHome = std::make_unique<ScopedEnvironment>(
-        "XDG_CONFIG_HOME", directory->path().string().c_str());
-  }
-
-  void TearDown() override {
-    window.reset();
-    receiver.reset();
-    configHome.reset();
-    directory.reset();
-  }
-
-  // Writes a configuration the window will load on construction.
-  void writeConfig(const AppConfig& config) {
-    const auto path = directory->path() / "mistercast/config.json";
-    std::filesystem::create_directories(path.parent_path());
-    std::string error;
-    ASSERT_TRUE(saveGroovyConfig(config, path, error)) << error;
-  }
-
-  AppConfig streamableConfig() const {
-    AppConfig config;
-    config.target = "127.0.0.1";
-    config.source.audio = false;
-    config.source.preview = false;
-    config.source.crop = CropMode::X1;
-    config.modeline = Modeline::safeDefault();
-    return config;
-  }
-
-  void build() { window = std::make_unique<MainWindow>(); }
-
-  void bindReceiver(uint8_t statusBits = kHealthy) {
-    receiver = std::make_unique<FakeMister>(statusBits);
-    if (!receiver->bound())
-      GTEST_SKIP() << "UDP port 32100 is already in use on this machine";
-  }
-
-  template <class Widget>
-  Widget* find(const char* name) const {
-    auto* widget = window->findChild<Widget*>(QString::fromLatin1(name));
-    EXPECT_NE(widget, nullptr) << "no widget named " << name;
-    return widget;
-  }
-
-  QString log() const {
-    return find<QPlainTextEdit>("log")->toPlainText();
-  }
-
-  std::unique_ptr<TemporaryDirectory> directory;
-  std::unique_ptr<ScopedEnvironment> configHome;
-  std::unique_ptr<FakeMister> receiver;
-  std::unique_ptr<MainWindow> window;
-};
 
 // ------------------------------------------------------------------ construction
 
@@ -531,6 +407,7 @@ TEST_F(Gui, StreamsASingleWindowWhenWindowModeIsSelected) {
   const ForeignWindows candidates({"gui-window-stream"});
   if (!candidates.ready()) GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QComboBox>("captureMode")->setCurrentIndex(1);
@@ -584,9 +461,11 @@ TEST_F(Gui, CannotBeAskedToStartAConfigurationTheProtocolRejects) {
 }
 
 TEST_F(Gui, ReportsATargetThatIsNotListening) {
+  holdPortSilently();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
-  // No receiver is bound, so the transport cannot negotiate.
+  // Nothing answers on the protocol port, so the transport cannot negotiate.
   find<QPushButton>("streamButton")->click();
   EXPECT_TRUE(pumpUntil(
       [&] { return find<QLabel>("status")->text() == "Error"; }));
@@ -601,6 +480,7 @@ TEST_F(Gui, StreamsToAListeningTargetAndLocksTheSourceControls) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
 
@@ -646,6 +526,7 @@ TEST_F(Gui, StartingAStreamPersistsTheSettingsWithoutSayingSo) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QLineEdit>("target")->setText("127.0.0.1");
@@ -665,20 +546,25 @@ TEST_F(Gui, EditingTimingsWhileStreamingSwitchesThemLiveAfterADebounce) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QPushButton>("streamButton")->click();
   ASSERT_EQ(find<QLabel>("status")->text(), "Streaming");
   ASSERT_TRUE(pumpUntil([&] { return receiver->switchModes() >= 1; }));
+  const auto switchesBeforeEdit = receiver->switchModes();
 
   // One CMD_SWITCHRES per digit would be wrong: the change is debounced.
   find<QSpinBox>("vActive")->setValue(200);
   find<QSpinBox>("vBegin")->setValue(210);
   find<QSpinBox>("vEnd")->setValue(213);
   find<QSpinBox>("vTotal")->setValue(240);
-  EXPECT_EQ(receiver->switchModes(), 1u) << "not switched yet";
+  // A delta again: four edits must not have switched anything *yet*, whatever the
+  // start path already sent.
+  EXPECT_EQ(receiver->switchModes(), switchesBeforeEdit) << "not switched yet";
 
-  ASSERT_TRUE(pumpUntil([&] { return receiver->switchModes() >= 2; }));
+  ASSERT_TRUE(pumpUntil(
+      [&] { return receiver->switchModes() > switchesBeforeEdit; }));
   EXPECT_THAT(log().toStdString(), HasSubstr("Modeline switched live to"));
   EXPECT_THAT(receiver->activeHeights(), testing::Contains(200));
   EXPECT_EQ(find<QLabel>("status")->text(), "Streaming");
@@ -687,6 +573,7 @@ TEST_F(Gui, EditingTimingsWhileStreamingSwitchesThemLiveAfterADebounce) {
 
 TEST_F(Gui, EditingTimingsWhileIdleSwitchesNothing) {
   bindReceiver();
+  if (IsSkipped()) return;
   build();
   find<QSpinBox>("vActive")->setValue(200);
   pumpFor(std::chrono::milliseconds(900));
@@ -699,6 +586,7 @@ TEST_F(Gui, ReportsFieldPhaseAndAdaptiveReserveForAnInterlacedMode) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   auto config = streamableConfig();
   config.modeline = {"480i", 12.336, 640, 662, 720, 784, 480, 488, 494, 525,
                      true};
@@ -727,7 +615,8 @@ TEST_F(Gui, LogsInterlaceRealignmentsReportedByTheReceiver) {
   // A receiver that always reports field one while the sender alternates: the
   // FPGA phase keeps contradicting the local one, which is exactly the
   // condition the interlace diagnostic exists for.
-  bindReceiver(0xa4);  // synced, queue ready, FPGA field 1
+  bindReceiver(kHealthy | kFpgaField);  // synced, queue ready, FPGA field 1
+  if (IsSkipped()) return;
   auto config = streamableConfig();
   config.modeline = {"480i", 12.336, 640, 662, 720, 784, 480, 488, 494, 525,
                      true};
@@ -757,7 +646,8 @@ TEST_F(Gui, ReportsAudioLevelAndCoreAudioStateWhileStreaming) {
     GTEST_SKIP() << "a private pulseaudio server could not be started";
   const ScopedEnvironment pulse("PULSE_SERVER", audioServer.address().c_str());
 
-  bindReceiver(0xc4);  // healthy, core audio on
+  bindReceiver(kHealthyWithAudio);
+  if (IsSkipped()) return;
   auto config = streamableConfig();
   config.source.audio = true;
   writeConfig(config);
@@ -829,6 +719,7 @@ TEST_F(Gui, SwitchingLiveToAnInterlacedModeIsReportedAsInterlaced) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QPushButton>("streamButton")->click();
@@ -856,6 +747,7 @@ TEST_F(Gui, TurningPreviewOffMidStreamStopsUpdatingTheImage) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   auto config = streamableConfig();
   config.source.preview = true;
   writeConfig(config);
@@ -892,11 +784,13 @@ TEST_F(Gui, InvalidTimingsEnteredWhileStreamingAreNotSwitchedLive) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QPushButton>("streamButton")->click();
   ASSERT_EQ(find<QLabel>("status")->text(), "Streaming");
   ASSERT_TRUE(pumpUntil([&] { return receiver->switchModes() >= 1; }));
+  const auto switchesBeforeEdit = receiver->switchModes();
 
   // Timings that cannot be ordered: the debounce still fires, but nothing may be
   // sent and the stream must carry on with the mode it already has.
@@ -904,7 +798,11 @@ TEST_F(Gui, InvalidTimingsEnteredWhileStreamingAreNotSwitchedLive) {
   EXPECT_TRUE(find<QPushButton>("streamButton")->isEnabled())
       << "stopping must stay possible however bad the timings in the fields are";
   pumpFor(std::chrono::milliseconds(1100));
-  EXPECT_EQ(receiver->switchModes(), 1u);
+  // A delta, not a total: what this test is about is that the rejected edit adds
+  // no switch of its own. Pinning an absolute count also fails on any switch the
+  // start path legitimately made, and on a miscount by the fake (see
+  // FakeMister), neither of which is what is under test here.
+  EXPECT_EQ(receiver->switchModes(), switchesBeforeEdit);
   EXPECT_THAT(log().toStdString(),
               testing::Not(HasSubstr("Modeline switched live")));
   EXPECT_EQ(find<QLabel>("status")->text(), "Streaming");
@@ -914,7 +812,8 @@ TEST_F(Gui, InvalidTimingsEnteredWhileStreamingAreNotSwitchedLive) {
 TEST_F(Gui, ReportsAnUnsyncedReceiverWithAnEmptyQueue) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
-  bindReceiver(0x08);  // VGA frameskip only: not synced, no queue, audio off
+  bindReceiver(kFrameskip);  // not synced, no queue, audio off
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QPushButton>("streamButton")->click();
@@ -932,6 +831,7 @@ TEST_F(Gui, ShowsTheSessionErrorWhenTheTargetDisappearsMidStream) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QPushButton>("streamButton")->click();
@@ -956,6 +856,7 @@ TEST_F(Gui, ClosingTheWindowStopsAnActiveStream) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   writeConfig(streamableConfig());
   build();
   find<QPushButton>("streamButton")->click();
@@ -970,6 +871,7 @@ TEST_F(Gui, PreviewFramesReachTheLabelWhilePreviewIsEnabled) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
+  if (IsSkipped()) return;
   auto config = streamableConfig();
   config.source.preview = true;
   writeConfig(config);

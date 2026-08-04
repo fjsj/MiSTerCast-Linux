@@ -6,33 +6,14 @@
 #include <algorithm>
 #include <cstring>
 
+#include "support/groovy_wire.hpp"
+
 namespace mistercast::test {
 namespace {
-template <class T>
-T readPacket(const FakeGroovyEndpoint::Packet& packet, size_t offset) noexcept {
-  T value{};
-  if (offset + sizeof(value) <= packet.size())
-    std::memcpy(&value, packet.data() + offset, sizeof(value));
-  return value;
-}
-
 bool isCommand(const FakeGroovyEndpoint::Packet& packet,
                uint8_t command) noexcept {
-  if (packet.empty() || packet[0] != command) return false;
-  switch (command) {
-    case 1:
-      return packet.size() == 1;
-    case 2:
-      return packet.size() == 5;
-    case 3:
-      return packet.size() == 26;
-    case 4:
-      return packet.size() == 3;
-    case 7:
-      return packet.size() == 8 || packet.size() == 12;
-    default:
-      return true;
-  }
+  if (packet.empty()) return false;
+  return isGroovyCommand(packet[0], packet.size(), command);
 }
 }  // namespace
 
@@ -148,12 +129,12 @@ void FakeGroovyEndpoint::stop() noexcept {
 
 uint32_t packetU32(const FakeGroovyEndpoint::Packet& packet,
                    size_t offset) noexcept {
-  return readPacket<uint32_t>(packet, offset);
+  return readWire<uint32_t>(packet.data(), packet.size(), offset);
 }
 
 uint16_t packetU16(const FakeGroovyEndpoint::Packet& packet,
                    size_t offset) noexcept {
-  return readPacket<uint16_t>(packet, offset);
+  return readWire<uint16_t>(packet.data(), packet.size(), offset);
 }
 
 }  // namespace mistercast::test

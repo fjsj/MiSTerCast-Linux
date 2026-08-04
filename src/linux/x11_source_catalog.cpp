@@ -151,16 +151,9 @@ std::vector<Monitor> enumerateX11Monitors(xcb_connection_t* connection,
                                           xcb_screen_t* screen) {
   std::vector<Monitor> result;
 #ifdef MISTERCAST_HAVE_RANDR
-  // libxcb shuts the connection down when a request belonging to an absent
-  // extension is sent, and this function is called with the caller's own
-  // connection — including X11Capture's, on every recovery. Probing RandR
-  // without this check therefore did not merely fail to list monitors: it
-  // destroyed the capture connection on any server without RandR, so capture
-  // could never recover. Screens without RandR fall through to the whole-screen
-  // entry below.
-  const auto* randr = xcb_get_extension_data(connection, &xcb_randr_id);
+  // Screens without RandR fall through to the whole-screen entry below.
   auto* reply =
-      randr && randr->present
+      x11ExtensionPresent(connection, xcb_randr_id)
           ? xcb_randr_get_monitors_reply(
                 connection, xcb_randr_get_monitors(connection, screen->root, 1),
                 nullptr)
@@ -186,6 +179,22 @@ std::vector<Monitor> enumerateX11Monitors(xcb_connection_t* connection,
     result.push_back({"X11-screen-0", 0, 0, screen->width_in_pixels,
                       screen->height_in_pixels, true});
   return result;
+}
+
+std::optional<Monitor> selectX11Monitor(const std::vector<Monitor>& monitors,
+                                        std::string_view requested) {
+  if (!requested.empty()) {
+    const auto named = std::find_if(
+        monitors.begin(), monitors.end(),
+        [&](const auto& monitor) { return monitor.name == requested; });
+    if (named == monitors.end()) return std::nullopt;
+    return *named;
+  }
+  if (monitors.empty()) return std::nullopt;
+  const auto primary =
+      std::find_if(monitors.begin(), monitors.end(),
+                   [](const auto& monitor) { return monitor.primary; });
+  return primary != monitors.end() ? *primary : monitors.front();
 }
 
 std::vector<Monitor> x11Monitors(std::string& error) {

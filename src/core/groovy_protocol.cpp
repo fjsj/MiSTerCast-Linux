@@ -1,6 +1,11 @@
 #include "mistercast/groovy_protocol.hpp"
 
 namespace mistercast {
+UdpVideoConfig groovyVideoConfig() noexcept {
+  return {GroovyUdpPayloadBytes, GroovyFramebufferBytes,
+          GroovyUdpWireOverheadBytes};
+}
+
 std::optional<std::string> validateGroovyModeline(const Modeline& modeline) {
   if (auto error = modeline.validate()) return error;
   if (static_cast<uint64_t>(modeline.hActive) * modeline.vActive * 3 >

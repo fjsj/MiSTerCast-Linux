@@ -15,6 +15,7 @@
 
 #include "mistercast/interfaces.hpp"
 #include "support/pulse_server.hpp"
+#include "support/scoped_environment.hpp"
 #include "support/temp_directory.hpp"
 
 using namespace mistercast;

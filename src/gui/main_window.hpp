@@ -80,5 +80,3 @@ class MainWindow final : public QMainWindow {
 };
 
 }  // namespace mistercast::gui
-
-int launchGui(int argc, char** argv);
