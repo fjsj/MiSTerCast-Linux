@@ -363,6 +363,40 @@ TEST_F(SessionTest, CaptureIsPacedAgainstSendingSoNoBacklogCanForm) {
   EXPECT_GT(stats.sentFrames, 0u);
 }
 
+TEST_F(SessionTest, CountsACapturedFrameThatIsReplacedBeforeItIsSent) {
+  bindReceiver();
+  if (IsSkipped()) return;
+  Session session;
+  // A small source keeps the two captures below well inside one blit period.
+  session.video().width = 320;
+  session.video().height = 240;
+  session.video().gated = true;
+  auto config = sessionConfig();
+  config.source.crop = CropMode::X1;
+  std::string error;
+  ASSERT_TRUE(session.start(config, MonitorCaptureSource{}, &error)) << error;
+  session.video().release(1);  // the sender blocks until its first frame
+
+  // One capture is requested per blit, but the request is a flag, not a queue,
+  // and it is set again at the end of every blit whether or not a frame arrived.
+  // So a capture that stalls past a blit and then delivers two frames quickly —
+  // an X11 hiccup followed by a fast frame — finds the flag already set and
+  // publishes twice before the sender picks either one up. The first of the two
+  // is the frame that is dropped.
+  uint64_t dropped = 0;
+  for (int attempt = 0; attempt < 20 && !dropped; ++attempt) {
+    ASSERT_TRUE(waitFor([&] { return session.video().parked(); }));
+    const auto sent = session->stats().sentFrames;
+    ASSERT_TRUE(waitFor([&] { return session->stats().sentFrames > sent + 1; }))
+        << "the sender must blit past the stall and re-request a capture";
+    session.video().release(2);
+    ASSERT_TRUE(waitFor([&] { return session.video().parked(); }));
+    dropped = session->droppedFrames();
+  }
+  session->stop();
+  EXPECT_GT(dropped, 0u) << "a replaced capture must be counted as dropped";
+}
+
 TEST_F(SessionTest, RecomputesTheCropWhenTheMonitorIsResized) {
   bindReceiver();
   if (IsSkipped()) return;

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -51,7 +52,37 @@ class FakeVideo final : public IVideoCapture {
     regions.push_back(value);
   }
 
+  // Holds next() until the test hands out captures, so a finished frame can be
+  // placed at a chosen point in the sender's cycle. The wait ignores the
+  // caller's timeout on purpose: a timeout would send the capture loop around
+  // its own retry path and re-request a frame, which is exactly the state a
+  // gated test is trying to hold still.
+  std::atomic<bool> gated{false};
+
+  void release(uint32_t frames) {
+    {
+      std::lock_guard<std::mutex> lock(gateMutex_);
+      credits_ += frames;
+    }
+    gate_.notify_all();
+  }
+
+  // True once every released capture has been taken and the capture thread is
+  // parked in the gate again.
+  bool parked() const {
+    std::lock_guard<std::mutex> lock(gateMutex_);
+    return waiting_ && !credits_;
+  }
+
   bool next(Frame& out, std::chrono::milliseconds) override {
+    if (gated) {
+      std::unique_lock<std::mutex> lock(gateMutex_);
+      waiting_ = true;
+      gate_.wait(lock, [this] { return credits_ || !gated; });
+      waiting_ = false;
+      if (!credits_) return false;  // released by stop()
+      --credits_;
+    }
     if (reportError.exchange(false)) {
       ErrorCallback callback;
       {
@@ -80,7 +111,11 @@ class FakeVideo final : public IVideoCapture {
     return true;
   }
 
-  void stop() noexcept override { ++stops; }
+  void stop() noexcept override {
+    ++stops;
+    gated = false;
+    gate_.notify_all();
+  }
 
   std::vector<CropRect> capturedRegions() const {
     std::lock_guard<std::mutex> lock(mutex);
@@ -89,6 +124,10 @@ class FakeVideo final : public IVideoCapture {
 
  private:
   std::atomic<uint32_t> attempts_{0};
+  mutable std::mutex gateMutex_;
+  std::condition_variable gate_;
+  uint32_t credits_{0};
+  bool waiting_{false};
 };
 
 class FakeAudio final : public IAudioCapture {
