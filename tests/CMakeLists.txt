@@ -79,7 +79,8 @@ mistercast_add_test_suite(core GTEST_MAIN LABEL unit SOURCES
   core/audio_tests.cpp
   core/adaptive_timing_tests.cpp
   core/transform_tests.cpp
-  core/udp_pacing_tests.cpp)
+  core/udp_pacing_tests.cpp
+  support/capture_gate_tests.cpp)
 
 mistercast_add_test_suite(transport GTEST_MAIN LABEL unit TIMEOUT 300 SOURCES
   core/transport_open_tests.cpp

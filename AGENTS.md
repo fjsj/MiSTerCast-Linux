@@ -88,6 +88,16 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
   `tests/support/groovy_wire.hpp`, and is deliberately not taken from the
   production headers: reading the opcodes out of the code under test would make
   "CMD_INIT is opcode 2 in a 5-byte datagram" unfalsifiable.
+- `FakeVideo`'s `CaptureGate` is the one piece of `tests/support` carrying its
+  own test (`support/capture_gate_tests.cpp`, in the `core` suite, ~40 ms). Its
+  contract is that `disarm()` publishes the wait predicate **under** the gate
+  mutex. Writing it outside loses a wakeup, which wedges the capture thread
+  inside `next()` and hangs `StreamSession::stop()` on its join instead of
+  failing; the session suite would show only a 900 s timeout, and nothing here
+  is a data race so ThreadSanitizer cannot see it either. The test races
+  `disarm()` against gate entry over a sweep of offsets — the defect reproduces
+  within single-digit trials — and prods a stuck waiter loose after a deadline
+  so a regression fails in two seconds rather than hanging the suite.
 - Suites reach a layer with no public header (`src/linux`, `src/gui`) by passing
   `SOURCE_TREE` to `mistercast_add_test_suite`, which puts `src/` on that test
   target's include path only. Do not make `src/` a public include directory of a
