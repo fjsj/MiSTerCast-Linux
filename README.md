@@ -16,6 +16,15 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+Tests use GoogleTest, which CMake fetches from a pinned release unless a `GTest`
+package is installed; `-DMISTERCAST_USE_SYSTEM_GTEST=ON` requires the installed
+one and never uses the network. Suites that need an X server run under
+`xvfb-run` when it is available, and the X11 and PulseAudio suites report a
+ctest skip rather than a failure when no display or no `pulseaudio` binary is
+present. `ctest -L unit` runs only the suites that need neither. Branch coverage
+is measured with `gcovr`; see `AGENTS.md` for that and for the rest of the
+testing conventions.
+
 Qt is optional at configure time so headless/build-server installations can still build the CLI and core. Without Qt, invoking `mistercast` with no command reports how to enable the GUI.
 
 ## Use

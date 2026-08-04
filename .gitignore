@@ -1,6 +1,10 @@
 build/
 build-asan/
 build-tsan/
+build-cov/
+build-coverage/
+coverage/
+coverage.xml
 _CPack_Packages/
 *.deb
 *.AppImage

@@ -151,8 +151,20 @@ std::vector<Monitor> enumerateX11Monitors(xcb_connection_t* connection,
                                           xcb_screen_t* screen) {
   std::vector<Monitor> result;
 #ifdef MISTERCAST_HAVE_RANDR
-  auto* reply = xcb_randr_get_monitors_reply(
-      connection, xcb_randr_get_monitors(connection, screen->root, 1), nullptr);
+  // libxcb shuts the connection down when a request belonging to an absent
+  // extension is sent, and this function is called with the caller's own
+  // connection — including X11Capture's, on every recovery. Probing RandR
+  // without this check therefore did not merely fail to list monitors: it
+  // destroyed the capture connection on any server without RandR, so capture
+  // could never recover. Screens without RandR fall through to the whole-screen
+  // entry below.
+  const auto* randr = xcb_get_extension_data(connection, &xcb_randr_id);
+  auto* reply =
+      randr && randr->present
+          ? xcb_randr_get_monitors_reply(
+                connection, xcb_randr_get_monitors(connection, screen->root, 1),
+                nullptr)
+          : nullptr;
   if (reply) {
     auto monitors = xcb_randr_get_monitors_monitors_iterator(reply);
     for (; monitors.rem; xcb_randr_monitor_info_next(&monitors)) {

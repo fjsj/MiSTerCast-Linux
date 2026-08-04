@@ -7,7 +7,7 @@ Some Windows behaviour is absent on purpose because it was unreachable, inert, o
 ## Build and verification
 
 - Use CMake/Ninja and C++17. Keep platform-neutral code in `src/core`, Linux integrations in `src/linux`, and frontend code in `src/cli` or `src/gui`.
-- Build and run the core test suite after changes:
+- Build and run the test suite after changes:
 
   ```sh
   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -23,6 +23,65 @@ Some Windows behaviour is absent on purpose because it was unreachable, inert, o
 
 - Run ASan/UBSan for changes affecting buffers, pixel conversion, queues, audio, or lifecycle. LeakSanitizer may need `ASAN_OPTIONS=detect_leaks=0` in ptrace-based sandboxes.
 - Keep `git diff --check` clean. Preserve unrelated user changes and do not commit generated build/package artifacts.
+
+## Tests
+
+Tests use GoogleTest, fetched by CMake from a pinned release when no `GTest`
+package is installed; `-DMISTERCAST_USE_SYSTEM_GTEST=ON` requires the installed
+one and never reaches the network. Sources mirror `src/`, with shared fakes in
+`tests/support`.
+
+| ctest name | Covers | Needs |
+| --- | --- | --- |
+| `core` | types, protocol limits, config persistence, audio ring/pacer, adaptive timing, transform, UDP pacing | nothing |
+| `transport` | `GroovyTransport` against a fake endpoint on an arbitrary port | loopback |
+| `session` | `StreamSession` with fake capture devices | UDP 32100 |
+| `pattern` | pattern parsing, generation, tone, and streaming | UDP 32100 |
+| `cli` | the built `mistercast` binary, one case per argument path | X11, UDP 32100 |
+| `gui` | `MainWindow` driven through its real widgets, offscreen | X11, UDP 32100 |
+| `x11` | capture, display connection, and window catalog against a real X server | X11 |
+| `pulse-audio` | capture and silent-output routing against a private PulseAudio server | `pulseaudio` |
+
+- `ctest -L unit` runs only the suites that need no display, network, or daemon.
+- Suites that bind UDP 32100 share a ctest `RESOURCE_LOCK`, so `ctest -j` will not
+  make them skip each other out. A machine already using that port skips them.
+- `x11` and `pulse-audio` exit 77 (a ctest skip) when no X server or no
+  `pulseaudio` binary is available; everything else must pass everywhere.
+- Widgets carry an `objectName` matching the member name without its trailing
+  underscore, so tests reach them with `findChild<QPushButton*>("streamButton")`
+  instead of production accessors that exist only for testing. Keep new widgets
+  named the same way.
+- The audio suite starts its **own** PulseAudio server with a null sink. Never
+  point a test at the developer's sound server: the silent-output feature moves
+  the default sink and live playback streams, which would reroute whatever the
+  machine is playing.
+- Anything this suite forks (Xvfb, pulseaudio) must redirect its stdio to
+  `/dev/null` and call `setsid()`. A forked daemon holding the test binary's
+  stdout keeps ctest waiting for EOF long after the tests have finished.
+- Xvfb refuses roughly one connection in four when a process opens several in
+  quick succession; a real Xorg server never does. `tests/linux/x11_tests.cpp`
+  retries for that reason, and it is a harness allowance, not a product defect.
+
+## Coverage
+
+```sh
+cmake -S . -B build-coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DMISTERCAST_ENABLE_COVERAGE=ON
+cmake --build build-coverage
+ctest --test-dir build-coverage --output-on-failure
+cmake --build build-coverage --target coverage   # summary + HTML + Cobertura
+```
+
+- Needs `gcovr` (`uv tool install gcovr`, `pipx install gcovr`, or `pip install
+  gcovr`). Only first-party targets are instrumented, so GoogleTest stays out of
+  both the build and the report.
+- The `coverage` target fails below `MISTERCAST_COVERAGE_BRANCH_FLOOR`
+  percent branch coverage. Raise the floor when coverage rises; do not lower it
+  to make a change pass.
+- Instrumented builds use `-fprofile-update=atomic` because capture, rendering,
+  and audio run concurrently and racy counter updates silently lose coverage.
+- Always start from a clean build directory, or delete stale `*.gcda` first;
+  mismatched profile data is discarded with a warning rather than merged.
 
 ## X11 capture gotchas
 

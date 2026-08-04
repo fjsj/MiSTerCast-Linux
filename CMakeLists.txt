@@ -14,6 +14,23 @@ pkg_check_modules(PULSE IMPORTED_TARGET libpulse-simple)
 find_library(LZ4_LIBRARY lz4)
 find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
 
+option(MISTERCAST_ENABLE_COVERAGE
+  "Instrument MiSTerCast targets for gcov line/branch coverage" OFF)
+option(MISTERCAST_USE_SYSTEM_GTEST
+  "Require an installed GTest instead of fetching a pinned release" OFF)
+
+# Applied only to first-party targets, so GoogleTest and other dependencies stay
+# out of the coverage report and out of the instrumented build.
+# -fprofile-update=atomic matters here: capture, rendering, and audio run on
+# concurrent threads, and racy counter updates silently lose coverage.
+function(mistercast_instrument target)
+  if(MISTERCAST_ENABLE_COVERAGE)
+    target_compile_options(${target} PRIVATE
+      --coverage -fprofile-update=atomic -O0 -g)
+    target_link_options(${target} PUBLIC --coverage)
+  endif()
+endfunction()
+
 add_library(mistercast-core
   src/core/types.cpp src/core/groovy_protocol.cpp src/core/config.cpp src/core/transform.cpp
   src/core/audio_ring.cpp src/core/audio_pacer.cpp src/linux/x11_display.cpp
@@ -23,16 +40,20 @@ add_library(mistercast-core
   src/core/groovy_transport.cpp src/core/stream_session.cpp)
 add_library(MiSTerCast::core ALIAS mistercast-core)
 target_include_directories(mistercast-core PUBLIC include)
+# Tests reach the Linux-only headers (x11_display.hpp, x11_source_catalog.hpp)
+# through this root; production sources keep using their relative includes.
+target_include_directories(mistercast-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mistercast-core PUBLIC Threads::Threads PkgConfig::XCB)
 target_compile_options(mistercast-core PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(mistercast-core PRIVATE _GNU_SOURCE MISTERCAST_VERSION="${PROJECT_VERSION}")
+mistercast_instrument(mistercast-core)
 if(XCB_RANDR_FOUND)
   target_link_libraries(mistercast-core PRIVATE PkgConfig::XCB_RANDR)
   target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_RANDR=1)
 endif()
 if(PULSE_FOUND)
   target_link_libraries(mistercast-core PRIVATE PkgConfig::PULSE)
-  target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_PULSE=1)
+  target_compile_definitions(mistercast-core PUBLIC MISTERCAST_HAVE_PULSE=1)
 endif()
 if(LZ4_LIBRARY)
   target_link_libraries(mistercast-core PRIVATE ${LZ4_LIBRARY})
@@ -47,12 +68,21 @@ add_library(mistercast-pattern src/cli/pattern.cpp)
 target_include_directories(mistercast-pattern PUBLIC include)
 target_link_libraries(mistercast-pattern PUBLIC mistercast-core)
 target_compile_options(mistercast-pattern PRIVATE -Wall -Wextra -Wpedantic)
+mistercast_instrument(mistercast-pattern)
 
 add_executable(mistercast src/cli/main.cpp)
 target_link_libraries(mistercast PRIVATE mistercast-pattern)
+mistercast_instrument(mistercast)
 if(Qt6_FOUND)
-  target_sources(mistercast PRIVATE src/gui/main_window.cpp)
-  target_link_libraries(mistercast PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+  # A library rather than a source file on the executable, so the window can be
+  # constructed and driven by offscreen tests.
+  add_library(mistercast-gui src/gui/main_window.cpp)
+  target_include_directories(mistercast-gui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mistercast-gui
+    PUBLIC mistercast-core Qt6::Core Qt6::Gui Qt6::Widgets)
+  target_compile_options(mistercast-gui PRIVATE -Wall -Wextra -Wpedantic)
+  mistercast_instrument(mistercast-gui)
+  target_link_libraries(mistercast PRIVATE mistercast-gui)
   target_compile_definitions(mistercast PRIVATE MISTERCAST_HAVE_QT=1)
 endif()
 
@@ -78,40 +108,7 @@ set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 include(CPack)
 
 if(BUILD_TESTING)
-  add_executable(mistercast-tests tests/core_tests.cpp)
-  target_link_libraries(mistercast-tests PRIVATE mistercast-pattern)
-  add_test(NAME core COMMAND mistercast-tests)
-  add_executable(mistercast-transport-tests
-    tests/transport_tests.cpp tests/fake_groovy_endpoint.cpp)
-  target_link_libraries(mistercast-transport-tests PRIVATE mistercast-core)
-  add_test(NAME transport COMMAND mistercast-transport-tests)
-  add_executable(mistercast-udp-pacing-tests tests/udp_pacing_tests.cpp)
-  target_link_libraries(mistercast-udp-pacing-tests PRIVATE mistercast-core)
-  add_test(NAME udp-pacing COMMAND mistercast-udp-pacing-tests)
-  add_executable(mistercast-pattern-tests
-    tests/pattern_tests.cpp tests/fake_groovy_endpoint.cpp)
-  target_link_libraries(mistercast-pattern-tests PRIVATE mistercast-pattern)
-  add_test(NAME pattern COMMAND mistercast-pattern-tests)
-  add_executable(mistercast-transform-tests tests/transform_tests.cpp)
-  target_link_libraries(mistercast-transform-tests PRIVATE mistercast-core)
-  add_test(NAME transform COMMAND mistercast-transform-tests)
-  add_executable(mistercast-x11-capture-tests tests/x11_capture_tests.cpp)
-  target_link_libraries(mistercast-x11-capture-tests PRIVATE mistercast-core)
-  find_program(XVFB_RUN xvfb-run)
-  if(XVFB_RUN)
-    add_test(NAME x11-capture
-      COMMAND ${XVFB_RUN} -a $<TARGET_FILE:mistercast-x11-capture-tests>)
-  else()
-    add_test(NAME x11-capture COMMAND mistercast-x11-capture-tests)
-  endif()
-  set_tests_properties(x11-capture PROPERTIES SKIP_RETURN_CODE 77)
-  add_test(NAME cli-invalid-sampling
-    COMMAND mistercast stream --target 127.0.0.1 --sampling area)
-  set_tests_properties(cli-invalid-sampling PROPERTIES WILL_FAIL TRUE)
-  if(Qt6_FOUND)
-    add_executable(mistercast-gui-signal-tests tests/gui_signal_tests.cpp)
-    target_link_libraries(mistercast-gui-signal-tests PRIVATE Threads::Threads)
-    add_test(NAME gui-sigint
-      COMMAND mistercast-gui-signal-tests $<TARGET_FILE:mistercast>)
-  endif()
+  include(cmake/GoogleTest.cmake)
+  include(cmake/Coverage.cmake)
+  add_subdirectory(tests)
 endif()
