@@ -220,11 +220,11 @@ TEST(Cli, StreamValidatesTheModeline) {
   EXPECT_TRUE(result.exitedWith(2));
   EXPECT_THAT(result.err, HasSubstr("modeline needs"));
 
-  // Orderable timings the core has no framebuffer for parse successfully; the
-  // protocol limit is reported when the session refuses to start.
+  // Orderable timings the core has no framebuffer for are a usage error too,
+  // reported before anything is dialled and the same way `pattern` reports them.
   result = run({"stream", "--target", "127.0.0.1", "--no-audio", "--modeline",
                 "65 1024 1048 1184 1344 768 771 777 806 0"});
-  EXPECT_TRUE(result.exitedWith(1));
+  EXPECT_TRUE(result.exitedWith(2));
   EXPECT_THAT(result.err, HasSubstr("exceeds Groovy_MiSTer frame buffer"));
 }
 

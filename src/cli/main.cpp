@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "mistercast/config.hpp"
+#include "mistercast/groovy_protocol.hpp"
 #include "mistercast/interfaces.hpp"
 #include "mistercast/pattern.hpp"
 #include "mistercast/stream_session.hpp"
@@ -118,6 +119,14 @@ int main(int argc, char** argv) {
       std::string e;
       if (!parseModeline(x, c.modeline, e)) {
         std::cerr << e << "\n";
+        return 2;
+      }
+      // parseModeline only checks that the timings are orderable. Apply the
+      // protocol's framebuffer limit here too, so an unstreamable modeline is
+      // rejected as the usage error it is rather than at dial time, and so
+      // `pattern --modeline` and `stream --modeline` answer the same way.
+      if (auto invalid = validateGroovyModeline(c.modeline)) {
+        std::cerr << *invalid << "\n";
         return 2;
       }
     } else if (a == "--audio")
