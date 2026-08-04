@@ -139,9 +139,9 @@ AppConfig loadGroovyConfig(const std::filesystem::path& path,
   std::string captureMode;
   if (stringValue(json, "captureMode", captureMode)) {
     if (captureMode == "window")
-      config.source.captureMode = CaptureMode::Window;
+      config.source.capturePreference = CapturePreference::Window;
     else if (captureMode == "monitor")
-      config.source.captureMode = CaptureMode::Monitor;
+      config.source.capturePreference = CapturePreference::Monitor;
     else {
       if (warning) *warning = "invalid capture mode; safe defaults loaded";
       return AppConfig{};
@@ -233,8 +233,9 @@ bool saveGroovyConfig(const AppConfig& config,
        << "  \"target\": \"" << escape(config.target) << "\",\n"
        << "  \"monitor\": \"" << escape(config.source.monitor) << "\",\n"
        << "  \"captureMode\": \""
-       << (config.source.captureMode == CaptureMode::Window ? "window"
-                                                            : "monitor")
+       << (config.source.capturePreference == CapturePreference::Window
+               ? "window"
+               : "monitor")
        << "\",\n"
        << "  \"audioSink\": \"" << escape(config.source.audioSink) << "\",\n"
        << "  \"syncRefresh\": "

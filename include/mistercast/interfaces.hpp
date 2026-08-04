@@ -12,9 +12,7 @@ using ErrorCallback = std::function<void(SessionError)>;
 class IVideoCapture {
  public:
   virtual ~IVideoCapture() = default;
-  virtual std::vector<Monitor> monitors(std::string& error) = 0;
-  virtual std::vector<CaptureWindow> windows(std::string& error) = 0;
-  virtual bool start(const SourceOptions& source, ErrorCallback) = 0;
+  virtual bool start(const CaptureSource& source, ErrorCallback) = 0;
   // Geometry of the monitor or window chosen by start(), for computing crop.
   virtual SourceGeometry selectedGeometry() const = 0;
   // Restricts subsequent next() calls to this source-relative sub-rectangle,
@@ -35,6 +33,14 @@ class IAudioCapture {
   virtual uint32_t sampleRate() const noexcept = 0;
 };
 std::unique_ptr<IVideoCapture> makeX11Capture();
+struct X11CaptureOptions {
+  bool useShm{true};
+  bool useComposite{true};
+};
+std::unique_ptr<IVideoCapture> makeX11Capture(X11CaptureOptions);
+// Window discovery has a separate lifetime and concern from frame capture.
+std::vector<Monitor> x11Monitors(std::string& error);
+std::vector<CaptureWindow> x11CaptureWindows(std::string& error);
 std::unique_ptr<IAudioCapture> makePulseAudioCapture();
 std::vector<AudioSink> pulseAudioSinks(std::string& error);
 inline constexpr const char* SilentAudioSink = "@mistercast-silent";

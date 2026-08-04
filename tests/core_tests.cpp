@@ -59,9 +59,7 @@ class FakeVideo final : public IVideoCapture {
     m.primary = true;
     return m;
   }
-  std::vector<Monitor> monitors(std::string&) override { return {geometry()}; }
-  std::vector<CaptureWindow> windows(std::string&) override { return {}; }
-  bool start(const SourceOptions&, ErrorCallback) override { return true; }
+  bool start(const CaptureSource&, ErrorCallback) override { return true; }
   SourceGeometry selectedGeometry() const override {
     const auto monitor = geometry();
     return {monitor.width, monitor.height};
@@ -210,7 +208,7 @@ static void checkTransformStats() {
   auto config = sessionConfig();
   config.source.sampling = SamplingMode::LineBlend;
   std::string error;
-  CHECK(session.start(config, {}, &error));
+  CHECK(session.start(config, MonitorCaptureSource{}, {}, &error));
   auto stats = session.stats();
   CHECK(stats.transformTimeUs == 0 && stats.transformMaxUs == 0);
   raw->produce = true;
@@ -226,7 +224,7 @@ static void checkTransformStats() {
         stats.transport.vramQueuePresent);
   session.stop();
   raw->produce = false;
-  CHECK(session.start(config, {}, &error));
+  CHECK(session.start(config, MonitorCaptureSource{}, {}, &error));
   stats = session.stats();
   CHECK(stats.transformTimeUs == 0 && stats.transformMaxUs == 0);
   session.stop();
@@ -242,7 +240,7 @@ static void checkNoAudioSessionNegotiation() {
   auto config = sessionConfig();
   config.source.audio = false;
   std::string error;
-  CHECK(session.start(config, {}, &error));
+  CHECK(session.start(config, MonitorCaptureSource{}, {}, &error));
   CHECK(waitFor([&] { return mister.blits >= 2; }));
   session.stop();
   CHECK(rawAudio->starts == 0 && mister.audioPackets == 0 &&
@@ -258,7 +256,7 @@ static void checkAdaptiveSessionStats() {
   config.modeline = {"480i", 12.336, 640, 662, 720, 784, 480, 488, 494,
                      525, true};
   std::string error;
-  CHECK(session.start(config, {}, &error));
+  CHECK(session.start(config, MonitorCaptureSource{}, {}, &error));
   CHECK(waitFor([&] { return session.stats().sentFrames >= 3; }));
   const auto stats = session.stats();
   session.stop();
@@ -282,7 +280,7 @@ static void checkCropFollowsMonitorResize() {
   auto config = sessionConfig();
   std::string error;
   // 4:3 of a 1080-tall monitor is 1440x1080.
-  if (!session->start(config, {}, &error)) {
+  if (!session->start(config, MonitorCaptureSource{}, {}, &error)) {
     std::cerr << "session start failed: " << error << "\n";
     ++failed;
     return;
@@ -312,7 +310,7 @@ static void checkLiveModelineSwitch() {
   config.source.crop = CropMode::X1;
   config.modeline = Modeline::safeDefault();  // 320x240 active
   std::string error;
-  if (!session->start(config, {}, &error)) {
+  if (!session->start(config, MonitorCaptureSource{}, {}, &error)) {
     std::cerr << "session start failed: " << error << "\n";
     ++failed;
     return;
@@ -349,7 +347,7 @@ static void checkAudioSkippedWhenCoreHasAudioOff() {
     auto config = sessionConfig();
     config.source.audio = true;
     std::string error;
-    if (!session->start(config, {}, &error)) {
+    if (!session->start(config, MonitorCaptureSource{}, {}, &error)) {
       std::cerr << "session start failed: " << error << "\n";
       ++failed;
       return;
@@ -442,8 +440,7 @@ int main() {
   cfg.target = "mister.local";
   cfg.source.progressiveInterlaceBuffer = true;
   cfg.source.sampling = SamplingMode::LineBlend;
-  cfg.source.captureMode = CaptureMode::Window;
-  cfg.source.window = CaptureWindow{12345, "Example window", 640, 480};
+  cfg.source.capturePreference = CapturePreference::Window;
   auto custom = Modeline::safeDefault();
   custom.name = "My preset";
   cfg.customModelines.push_back(custom);
@@ -460,8 +457,8 @@ int main() {
   CHECK(loaded.target == cfg.target &&
         loaded.source.progressiveInterlaceBuffer &&
         loaded.source.sampling == SamplingMode::LineBlend &&
-        loaded.source.captureMode == CaptureMode::Window &&
-        !loaded.source.window && warning.empty());
+        loaded.source.capturePreference == CapturePreference::Window &&
+        warning.empty());
   CHECK(loaded.customModelines.size() == 1 &&
         loaded.customModelines[0].name == "My preset");
   auto groovyInvalid = cfg;

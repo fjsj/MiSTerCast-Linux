@@ -27,7 +27,8 @@ class StreamSession {
       std::unique_ptr<IVideoCapture> video = makeX11Capture(),
       std::unique_ptr<IAudioCapture> audio = makePulseAudioCapture());
   ~StreamSession();
-  bool start(const AppConfig&, StateCallback callback = {},
+  bool start(const AppConfig&, const CaptureSource&,
+             StateCallback callback = {},
              std::string* error = nullptr);
   // Changes timings on a live stream. The switch is sent immediately before the
   // next frame, so its payload already matches the new active area.
@@ -61,8 +62,8 @@ class StreamSession {
   std::atomic<uint32_t> audioPeak_{0};
   std::atomic<uint64_t> transformTimeUs_{0}, transformMaxUs_{0};
   std::chrono::steady_clock::time_point startedAt_{};
-  // Monitor geometry the active crop was computed for. Set before the threads
-  // start, then owned by the capture thread.
+  // Capture-source geometry the active crop was computed for. Set before the
+  // threads start, then owned by the capture thread.
   SourceGeometry cropGeometry_{};
   // Live modeline switching. config_ stays immutable once streaming, so the
   // timings both worker threads use live here instead. The rendering thread is

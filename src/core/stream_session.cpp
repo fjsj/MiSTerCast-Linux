@@ -65,7 +65,8 @@ void StreamSession::fail(SessionError e) {
   setState(SessionState::Error, e);
   cv_.notify_all();
 }
-bool StreamSession::start(const AppConfig& c, StateCallback cb,
+bool StreamSession::start(const AppConfig& c, const CaptureSource& source,
+                          StateCallback cb,
                           std::string* err) {
   if (state_ != SessionState::Idle && state_ != SessionState::Error) {
     if (err) *err = "stream is already active";
@@ -84,11 +85,6 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     if (err) *err = "target address is required";
     return false;
   }
-  if (c.source.captureMode == CaptureMode::Window &&
-      (!c.source.window || !c.source.window->id)) {
-    if (err) *err = "a window must be selected for window capture";
-    return false;
-  }
   stop_ = false;
   dropped_ = captured_ = sent_ = audioDropped_ = audioUnderrun_ = audioPeak_ =
       0;
@@ -102,18 +98,18 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
   }
   setState(SessionState::Starting);
   auto onError = [this](SessionError e) { fail(std::move(e)); };
-  if (!video_->start(c.source, onError)) {
+  if (!video_->start(source, onError)) {
     if (err) *err = "video capture initialization failed";
     setState(SessionState::Error);
     return false;
   }
   // Restrict capture to the crop up front so only the pixels that will be sent
   // are ever transferred out of the X server.
-  const auto monitor = video_->selectedGeometry();
+  const auto sourceGeometry = video_->selectedGeometry();
   CropRect crop;
   std::string cropError;
-  if (!calculateCrop(monitor.width, monitor.height, c.source, c.modeline, crop,
-                     cropError)) {
+  if (!calculateCrop(sourceGeometry.width, sourceGeometry.height, c.source,
+                     c.modeline, crop, cropError)) {
     video_->stop();
     if (err) *err = cropError;
     setState(SessionState::Error,
@@ -122,7 +118,7 @@ bool StreamSession::start(const AppConfig& c, StateCallback cb,
     return false;
   }
   video_->setRegion(crop);
-  cropGeometry_ = monitor;
+  cropGeometry_ = sourceGeometry;
   if (c.source.audio && !audio_->start(c.source.audioSink, onError)) {
     video_->stop();
     if (err) *err = "audio capture initialization failed";
@@ -222,20 +218,22 @@ void StreamSession::captureLoop() {
     // The monitor can be resized or replugged mid-stream and the modeline can
     // be switched live, either of which changes what the crop should be.
     // Recompute it rather than streaming a stale rectangle.
-    const auto monitor = video_->selectedGeometry();
+    const auto sourceGeometry = video_->selectedGeometry();
     const auto generation = modelineGeneration_.load();
-    if (monitor.width != cropGeometry_.width ||
-        monitor.height != cropGeometry_.height || generation != cropGeneration) {
+    if (sourceGeometry.width != cropGeometry_.width ||
+        sourceGeometry.height != cropGeometry_.height ||
+        generation != cropGeneration) {
       {
         std::lock_guard<std::mutex> l(configMutex_);
         cropModeline = activeModeline_;
       }
       CropRect crop;
       std::string cropError;
-      if (calculateCrop(monitor.width, monitor.height, config_.source,
+      if (calculateCrop(sourceGeometry.width, sourceGeometry.height,
+                        config_.source,
                         cropModeline, crop, cropError)) {
         video_->setRegion(crop);
-        cropGeometry_ = monitor;
+        cropGeometry_ = sourceGeometry;
         cropGeneration = generation;
       }
     }

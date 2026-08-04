@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace mistercast {
@@ -20,7 +21,7 @@ enum class Alignment : uint8_t {
 enum class CropMode : uint8_t { Custom, X1, X2, X3, X4, X5, Full43, Full54 };
 enum class Rotation : uint8_t { None, CW90, CCW90, Flip180 };
 enum class SamplingMode : uint8_t { Point, Bilinear, LineBlend };
-enum class CaptureMode : uint8_t { Monitor, Window };
+enum class CapturePreference : uint8_t { Monitor, Window };
 enum class SessionState : uint8_t {
   Idle,
   Starting,
@@ -34,6 +35,18 @@ struct CaptureWindow {
   std::string title;
   uint16_t width{}, height{};
 };
+
+struct MonitorCaptureSource {
+  std::string name;
+};
+
+struct WindowCaptureSource {
+  uint32_t id{};
+};
+
+// A runtime capture choice. Unlike SourceOptions, this may contain a transient
+// X11 resource and is never serialized.
+using CaptureSource = std::variant<MonitorCaptureSource, WindowCaptureSource>;
 
 struct SourceGeometry {
   uint16_t width{}, height{};
@@ -52,10 +65,8 @@ struct Modeline {
 
 struct SourceOptions {
   std::string monitor;
-  CaptureMode captureMode{CaptureMode::Monitor};
-  // X11 window IDs are runtime-only, server-scoped resources. Persist the
-  // preferred mode, but require a fresh selection after settings are loaded.
-  std::optional<CaptureWindow> window;
+  // Persisted GUI preference. The runtime CaptureSource is supplied separately.
+  CapturePreference capturePreference{CapturePreference::Monitor};
   std::string audioSink;
   bool syncRefresh{true}, progressiveInterlaceBuffer{false}, audio{true},
       preview{true};

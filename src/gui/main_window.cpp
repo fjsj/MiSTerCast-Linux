@@ -79,6 +79,12 @@ class MainWindow final : public QMainWindow {
     append(QString::fromStdString(message));
   }
 
+  void clearWindowSelection() {
+    selectedWindow_.reset();
+    windowSelection_->setText(QStringLiteral("No window selected"));
+    windowSelection_->setToolTip({});
+  }
+
   void refreshStartEnabled() {
     const auto state = session_.state();
     const bool busy =
@@ -106,8 +112,7 @@ class MainWindow final : public QMainWindow {
 
   void chooseWindow() {
     std::string error;
-    auto capture = makeX11Capture();
-    const auto windows = capture->windows(error);
+    const auto windows = x11CaptureWindows(error);
     if (!error.empty()) {
       append("Windows: " + error);
       return;
@@ -238,10 +243,9 @@ class MainWindow final : public QMainWindow {
   void configFromControls() {
     config_.target = target_->text().trimmed().toStdString();
     config_.source.monitor = monitor_->currentText().toStdString();
-    config_.source.captureMode = captureMode_->currentIndex() == 1
-                                     ? CaptureMode::Window
-                                     : CaptureMode::Monitor;
-    config_.source.window = selectedWindow_;
+    config_.source.capturePreference =
+        captureMode_->currentIndex() == 1 ? CapturePreference::Window
+                                          : CapturePreference::Monitor;
     config_.source.audioSink =
         audioSink_->currentData().toString().toStdString();
     config_.source.audio = audio_->isChecked();
@@ -265,15 +269,11 @@ class MainWindow final : public QMainWindow {
     auto monitorIndex =
         monitor_->findText(QString::fromStdString(config_.source.monitor));
     if (monitorIndex >= 0) monitor_->setCurrentIndex(monitorIndex);
-    captureMode_->setCurrentIndex(config_.source.captureMode ==
-                                          CaptureMode::Window
+    captureMode_->setCurrentIndex(config_.source.capturePreference ==
+                                          CapturePreference::Window
                                       ? 1
                                       : 0);
-    selectedWindow_ = config_.source.window;
-    windowSelection_->setText(selectedWindow_
-                                  ? QString::fromStdString(selectedWindow_->title)
-                                  : QStringLiteral("No window selected"));
-    windowSelection_->setToolTip({});
+    clearWindowSelection();
     auto audioSinkIndex =
         audioSink_->findData(QString::fromStdString(config_.source.audioSink));
     if (audioSinkIndex < 0 && !config_.source.audioSink.empty()) {
@@ -336,8 +336,13 @@ class MainWindow final : public QMainWindow {
 
     showState(SessionState::Starting);
     std::string error;
+    const CaptureSource source =
+        captureMode_->currentIndex() == 1
+            ? CaptureSource{WindowCaptureSource{selectedWindow_->id}}
+            : CaptureSource{MonitorCaptureSource{
+                  monitor_->currentText().toStdString()}};
     const bool started = session_.start(
-        config_,
+        config_, source,
         [this](SessionState state, const std::optional<SessionError>& problem) {
           QTimer::singleShot(0, this, [this, state, problem] {
             showState(state);
@@ -663,8 +668,7 @@ class MainWindow final : public QMainWindow {
     resize(840, 790);
 
     std::string monitorError;
-    auto capture = makeX11Capture();
-    for (auto& monitor : capture->monitors(monitorError))
+    for (auto& monitor : x11Monitors(monitorError))
       monitor_->addItem(QString::fromStdString(monitor.name));
     if (!monitorError.empty()) append(monitorError);
     audioSink_->addItem("Default output (PC audio remains on)", QString());
@@ -731,7 +735,10 @@ class MainWindow final : public QMainWindow {
     });
     connect(target_, &QLineEdit::textChanged, this,
             [this] { refreshStartEnabled(); });
-    connect(captureMode_, &QComboBox::currentIndexChanged, this, [this] {
+    connect(captureMode_, &QComboBox::currentIndexChanged, this, [this](int mode) {
+      if (mode == 0) {
+        clearWindowSelection();
+      }
       refreshConfigurationEnabled(session_.state());
       refreshStartEnabled();
     });

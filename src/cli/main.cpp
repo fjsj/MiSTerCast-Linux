@@ -59,9 +59,8 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (command == "list-monitors" || command == "check") {
-    auto v = makeX11Capture();
     std::string e;
-    auto ms = v->monitors(e);
+    auto ms = x11Monitors(e);
     if (ms.empty()) {
       std::cerr << e << "\n";
       return 1;
@@ -104,10 +103,6 @@ int main(int argc, char** argv) {
     return 2;
   }
   AppConfig c = loadGroovyConfig(configPath());
-  // Window selection is deliberately GUI-only and its transient X11 ID is not
-  // persisted. Every CLI stream therefore starts from the saved monitor.
-  c.source.captureMode = CaptureMode::Monitor;
-  c.source.window.reset();
   bool save = false;
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i], x;
@@ -205,7 +200,7 @@ int main(int argc, char** argv) {
   StreamSession session;
   std::string e;
   if (!session.start(
-          c,
+          c, MonitorCaptureSource{c.source.monitor},
           [](SessionState s, const std::optional<SessionError>& x) {
             if (x)
               std::cerr << x->component << ": " << x->message << "\n";
