@@ -89,6 +89,11 @@ void FakeGroovyEndpoint::serve() {
     }
     packetsChanged_.notify_all();
     handler_(*this, packet);
+    {
+      std::lock_guard<std::mutex> lock(packetsMutex_);
+      ++handledPackets_;
+    }
+    packetsChanged_.notify_all();
   }
 }
 
@@ -114,6 +119,18 @@ bool FakeGroovyEndpoint::waitForCommand(uint8_t command,
                        [command](const Packet& packet) {
                          return isCommand(packet, command);
                        });
+  });
+}
+
+bool FakeGroovyEndpoint::waitForHandledCommand(
+    uint8_t command, size_t occurrences, std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(packetsMutex_);
+  return packetsChanged_.wait_for(lock, timeout, [&] {
+    return size_t(std::count_if(
+               packets_.begin(), packets_.begin() + handledPackets_,
+               [command](const Packet& packet) {
+                 return isCommand(packet, command);
+               })) >= occurrences;
   });
 }
 

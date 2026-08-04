@@ -38,6 +38,10 @@ class GroovyTransportTestPeer {
       return std::nullopt;
     return mode;
   }
+  static void drainPendingStatus(GroovyTransport& transport,
+                                 uint32_t expectedFrame) {
+    transport.drainStatus(expectedFrame);
+  }
 };
 }  // namespace mistercast
 
@@ -283,6 +287,8 @@ void checkFpgaHealthDiagnostics() {
   CHECK(transport.switchMode(tinyMode(false), false, error));
   std::vector<uint8_t> pixels(12, 42);
   CHECK(transport.sendFrame(UINT32_MAX, 0, pixels, error));
+  CHECK(endpoint.waitForHandledCommand(kBlit));
+  GroovyTransportTestPeer::drainPendingStatus(transport, UINT32_MAX);
   transport.waitSync();
   auto status = transport.stats();
   CHECK(status.fpgaStatusSamples == 1 && status.fpgaFallbackSamples == 1 &&
@@ -291,6 +297,8 @@ void checkFpgaHealthDiagnostics() {
         !status.vgaFrameskip && !status.vramQueuePresent);
 
   CHECK(transport.sendFrame(0, 0, pixels, error));
+  CHECK(endpoint.waitForHandledCommand(kBlit, 2));
+  GroovyTransportTestPeer::drainPendingStatus(transport, 0);
   transport.waitSync();
   status = transport.stats();
   CHECK(status.fpgaStatusSamples == 2 && status.fpgaFallbackSamples == 1 &&
@@ -496,6 +504,7 @@ void checkFatalPayloadFailureStopsProtocol() {
   int16_t audio[2]{};
   CHECK(!transport->sendAudio(audio, 2, error));
   transport->close();
+  CHECK(endpoint.waitForHandledCommand(kBlit));
   endpoint.stop();
   CHECK(blits == 1 && laterCommands == 0);
 }
@@ -591,6 +600,7 @@ void checkPacedUdpDelivery() {
   CHECK(transport.sendFrame(1, 0, pixels, error));
   const auto stats = transport.stats();
   transport.close();
+  CHECK(endpoint.waitForHandledCommand(kClose));
   endpoint.stop();
 
   CHECK(commandBeforePayload && sizesValid && receivedPayload == payloadBytes);

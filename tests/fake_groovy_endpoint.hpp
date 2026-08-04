@@ -43,6 +43,9 @@ class FakeGroovyEndpoint {
   bool waitForCommand(
       uint8_t command,
       std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
+  bool waitForHandledCommand(
+      uint8_t command, size_t occurrences = 1,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
   std::vector<Packet> packets() const;
   void stop() noexcept;
 
@@ -59,6 +62,7 @@ class FakeGroovyEndpoint {
   mutable std::mutex packetsMutex_;
   std::condition_variable packetsChanged_;
   std::vector<Packet> packets_;
+  size_t handledPackets_{};
 };
 
 uint32_t packetU32(const FakeGroovyEndpoint::Packet&, size_t offset) noexcept;
