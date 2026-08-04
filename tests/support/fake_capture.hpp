@@ -11,6 +11,90 @@
 
 namespace mistercast::test {
 
+// Holds a capture inside next() until a test hands one out, so a finished frame
+// can be placed at a chosen point in the sender's cycle.
+//
+// Credits count next() calls rather than successful captures, matching the unit
+// the session itself uses: captureLoop clears captureRequested_ once per
+// capture attempt, not once per frame that arrives. A released call therefore
+// still runs the fake's other knobs and may fail for their reasons, which also
+// keeps the credit arithmetic independent of how those knobs are configured.
+class CaptureGate {
+ public:
+  // Arm before starting the threads that will wait on the gate. disarm() is a
+  // one-shot, so a session stopped and restarted against the same fake runs
+  // ungated the second time unless the test arms it again.
+  void arm() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    armed_ = true;
+  }
+
+  // Hands out `frames` captures to the waiter.
+  void release(uint32_t frames) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      credits_ += frames;
+    }
+    handout_.notify_all();
+  }
+
+  // True once every released capture has been taken and the waiter is parked in
+  // the gate again. False for the whole of an in-flight capture, so a test that
+  // waits on this knows every released frame has already been published.
+  bool parked() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return waiting_ && !credits_;
+  }
+
+  // Blocks until a capture is handed out. False means disarm() released the
+  // waiter for shutdown rather than a capture arriving.
+  //
+  // This ignores the timeout its caller was given on purpose: timing out would
+  // send the capture loop around its own retry path and re-request a frame,
+  // undoing the state a gated test is holding still. Blocking past that
+  // deadline is more than a real X11Capture would do, but it is only a lever —
+  // the interleaving it reproduces needs a stalled capture followed by a fast
+  // one, which a 30 ms hiccup and a 1 ms frame deliver well inside the timeout.
+  bool take() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!armed_) return true;
+    waiting_ = true;
+    handout_.wait(lock, [this] { return credits_ || !armed_; });
+    waiting_ = false;
+    if (!credits_) return false;
+    --credits_;
+    return true;
+  }
+
+  // Disarms the gate and releases a parked waiter, so the session can join its
+  // capture thread. Every later take() passes straight through.
+  //
+  // `armed_` is part of take()'s wait predicate, so it must be written while
+  // holding the mutex. Writing it outside admits a lost wakeup: the waiter can
+  // evaluate the predicate under the lock and be pre-empted before it blocks,
+  // and then never sees this notify. That wedges the waiter inside next()
+  // forever and hangs the session's captureThread_.join() until ctest's
+  // suite timeout, which buries whatever the test was actually reporting.
+  void disarm() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      armed_ = false;
+    }
+    handout_.notify_all();
+  }
+
+ private:
+  // Every field lives under this one mutex, `armed_` included, so no caller
+  // can reintroduce the lost wakeup above by touching a predicate field
+  // unlocked. An unarmed take() therefore costs a mutex acquisition rather
+  // than an atomic load: measured at 4.2 ns, which against the ~60 next()
+  // calls a second the capture loop makes is 0.25 us per second of streaming.
+  mutable std::mutex mutex_;
+  std::condition_variable handout_;
+  uint32_t credits_{0};
+  bool armed_{false}, waiting_{false};
+};
+
 // Synthetic capture sources, so session behaviour that depends on the monitor
 // changing, on capture stalling, or on the core's audio bit can be driven
 // deterministically. These stand in for the X11 and PulseAudio devices at the
@@ -21,6 +105,8 @@ class FakeVideo final : public IVideoCapture {
   std::atomic<uint16_t> width{1920}, height{1080};
   std::atomic<uint32_t> captured{0}, starts{0}, stops{0};
   std::atomic<bool> produce{true}, startSucceeds{true};
+  // Holds next() so a test can park a capture mid-cycle. Unarmed by default.
+  CaptureGate gate;
   // Reports a fatal capture error through the session's error callback the way
   // X11Capture does after a sustained failure.
   std::atomic<bool> reportError{false};
@@ -52,37 +138,8 @@ class FakeVideo final : public IVideoCapture {
     regions.push_back(value);
   }
 
-  // Holds next() until the test hands out captures, so a finished frame can be
-  // placed at a chosen point in the sender's cycle. The wait ignores the
-  // caller's timeout on purpose: a timeout would send the capture loop around
-  // its own retry path and re-request a frame, which is exactly the state a
-  // gated test is trying to hold still.
-  std::atomic<bool> gated{false};
-
-  void release(uint32_t frames) {
-    {
-      std::lock_guard<std::mutex> lock(gateMutex_);
-      credits_ += frames;
-    }
-    gate_.notify_all();
-  }
-
-  // True once every released capture has been taken and the capture thread is
-  // parked in the gate again.
-  bool parked() const {
-    std::lock_guard<std::mutex> lock(gateMutex_);
-    return waiting_ && !credits_;
-  }
-
   bool next(Frame& out, std::chrono::milliseconds) override {
-    if (gated) {
-      std::unique_lock<std::mutex> lock(gateMutex_);
-      waiting_ = true;
-      gate_.wait(lock, [this] { return credits_ || !gated; });
-      waiting_ = false;
-      if (!credits_) return false;  // released by stop()
-      --credits_;
-    }
+    if (!gate.take()) return false;  // released by stop()
     if (reportError.exchange(false)) {
       ErrorCallback callback;
       {
@@ -113,8 +170,7 @@ class FakeVideo final : public IVideoCapture {
 
   void stop() noexcept override {
     ++stops;
-    gated = false;
-    gate_.notify_all();
+    gate.disarm();
   }
 
   std::vector<CropRect> capturedRegions() const {
@@ -124,10 +180,6 @@ class FakeVideo final : public IVideoCapture {
 
  private:
   std::atomic<uint32_t> attempts_{0};
-  mutable std::mutex gateMutex_;
-  std::condition_variable gate_;
-  uint32_t credits_{0};
-  bool waiting_{false};
 };
 
 class FakeAudio final : public IAudioCapture {

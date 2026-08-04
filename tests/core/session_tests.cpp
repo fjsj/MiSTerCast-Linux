@@ -367,15 +367,14 @@ TEST_F(SessionTest, CountsACapturedFrameThatIsReplacedBeforeItIsSent) {
   bindReceiver();
   if (IsSkipped()) return;
   Session session;
-  // A small source keeps the two captures below well inside one blit period.
-  session.video().width = 320;
-  session.video().height = 240;
-  session.video().gated = true;
+  session.video().gate.arm();
   auto config = sessionConfig();
+  // X1 pins the capture to the modeline's 320x240 active area, so the two
+  // captures below finish in microseconds inside a 16.6 ms blit period.
   config.source.crop = CropMode::X1;
   std::string error;
   ASSERT_TRUE(session.start(config, MonitorCaptureSource{}, &error)) << error;
-  session.video().release(1);  // the sender blocks until its first frame
+  session.video().gate.release(1);  // the sender blocks until its first frame
 
   // One capture is requested per blit, but the request is a flag, not a queue,
   // and it is set again at the end of every blit whether or not a frame arrived.
@@ -383,14 +382,20 @@ TEST_F(SessionTest, CountsACapturedFrameThatIsReplacedBeforeItIsSent) {
   // an X11 hiccup followed by a fast frame — finds the flag already set and
   // publishes twice before the sender picks either one up. The first of the two
   // is the frame that is dropped.
+  //
+  // Both publishes only have to beat the sender to its next waitSync, so the
+  // loop retries as insurance against a slow build rather than because the
+  // interleaving is a coin flip.
   uint64_t dropped = 0;
   for (int attempt = 0; attempt < 20 && !dropped; ++attempt) {
-    ASSERT_TRUE(waitFor([&] { return session.video().parked(); }));
+    ASSERT_TRUE(waitFor([&] { return session.video().gate.parked(); }));
     const auto sent = session->stats().sentFrames;
+    // > sent + 1, not >= : ++sent_ precedes the request being re-armed, so one
+    // more blit would not prove the flag the stall is banking is set again.
     ASSERT_TRUE(waitFor([&] { return session->stats().sentFrames > sent + 1; }))
         << "the sender must blit past the stall and re-request a capture";
-    session.video().release(2);
-    ASSERT_TRUE(waitFor([&] { return session.video().parked(); }));
+    session.video().gate.release(2);
+    ASSERT_TRUE(waitFor([&] { return session.video().gate.parked(); }));
     dropped = session->droppedFrames();
   }
   session->stop();
