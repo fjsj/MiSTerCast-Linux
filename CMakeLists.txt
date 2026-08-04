@@ -108,4 +108,10 @@ if(BUILD_TESTING)
   add_test(NAME cli-invalid-sampling
     COMMAND mistercast stream --target 127.0.0.1 --sampling area)
   set_tests_properties(cli-invalid-sampling PROPERTIES WILL_FAIL TRUE)
+  if(Qt6_FOUND)
+    add_executable(mistercast-gui-signal-tests tests/gui_signal_tests.cpp)
+    target_link_libraries(mistercast-gui-signal-tests PRIVATE Threads::Threads)
+    add_test(NAME gui-sigint
+      COMMAND mistercast-gui-signal-tests $<TARGET_FILE:mistercast>)
+  endif()
 endif()

@@ -22,6 +22,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <csignal>
 
 #include "mistercast/config.hpp"
 #include "mistercast/groovy_protocol.hpp"
@@ -31,6 +32,10 @@
 using namespace mistercast;
 
 namespace {
+volatile std::sig_atomic_t interrupted = 0;
+
+void signalHandler(int) { interrupted = 1; }
+
 QString stateName(SessionState state) {
   switch (state) {
     case SessionState::Idle:
@@ -798,7 +803,16 @@ class MainWindow final : public QMainWindow {
 
 int launchGui(int argc, char** argv) {
   QApplication app(argc, argv);
+  interrupted = 0;
+  std::signal(SIGINT, signalHandler);
+  std::signal(SIGTERM, signalHandler);
   MainWindow window;
+  QTimer signalTimer;
+  signalTimer.setInterval(50);
+  QObject::connect(&signalTimer, &QTimer::timeout, &window, [&window] {
+    if (interrupted) window.close();
+  });
+  signalTimer.start();
   window.show();
   return app.exec();
 }
