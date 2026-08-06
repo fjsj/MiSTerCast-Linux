@@ -13,11 +13,13 @@ class QCheckBox;
 class QCloseEvent;
 class QComboBox;
 class QDoubleSpinBox;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QStackedWidget;
 
 namespace mistercast::gui {
 
@@ -25,7 +27,8 @@ namespace mistercast::gui {
 // without the trailing underscore, so tests can reach it with
 // findChild<QPushButton*>("streamButton") instead of needing accessors that
 // exist only for testing. The window-chooser dialog names itself
-// "windowChooser" and its list "windowList" while it is open.
+// "windowChooser" and its list "windowList" while it is open; the preset
+// editor is "presetEditor" and the save-on-close prompt is "closePrompt".
 class MainWindow final : public QMainWindow {
  public:
   MainWindow();
@@ -41,6 +44,9 @@ class MainWindow final : public QMainWindow {
   void refreshStartEnabled();
   void refreshConfigurationEnabled(SessionState state);
   void chooseWindow();
+  void managePresets();
+  void refreshPresetChoices();
+  void persistCustomModelines();
   void scheduleModelineApply();
   void applyModelineLive();
   void showState(SessionState state);
@@ -48,22 +54,33 @@ class MainWindow final : public QMainWindow {
   void setModelineControls(const Modeline& modeline);
   void configFromControls();
   void controlsFromConfig();
-  void saveSettings(bool announce = true);
+  void saveSettings();
   void loadSettings();
   void toggleStream();
   void updateStats();
   static QSpinBox* timingSpin();
 
   AppConfig config_{loadGroovyConfig(configPath())};
+  // The controls' state as last persisted, for the save prompt on close.
+  AppConfig savedConfig_;
   StreamSession session_;
   std::vector<Modeline> presets_;
   std::optional<CaptureWindow> selectedWindow_;
 
   QPushButton *streamButton_{}, *saveButton_{}, *loadButton_{},
-      *applyModelineButton_{}, *chooseWindowButton_{};
+      *managePresetsButton_{}, *chooseWindowButton_{};
   QLineEdit* target_{};
   QComboBox *captureMode_{}, *monitor_{}, *audioSink_{}, *preset_{}, *crop_{},
       *alignment_{}, *rotation_{}, *sampling_{};
+  QLabel* monitorLabel_{};
+  // One shared capture-source row: each stack shows the monitor or the window
+  // page depending on the capture mode. A stack per grid cell keeps the row
+  // spacing regular, which overlapping widgets in one cell did not.
+  QStackedWidget *chooserLabelStack_{}, *chooserFieldStack_{};
+  // Lives inside the preset editor while it is open and hidden under the
+  // central widget otherwise; the timing fields exist for the whole session so
+  // live modeline switching keeps working with the editor closed.
+  QGroupBox* timingsBox_{};
   QDoubleSpinBox* pixelClock_{};
   QSpinBox *hActive_{}, *hBegin_{}, *hEnd_{}, *hTotal_{};
   QSpinBox *vActive_{}, *vBegin_{}, *vEnd_{}, *vTotal_{};

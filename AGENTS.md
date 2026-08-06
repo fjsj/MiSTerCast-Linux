@@ -172,6 +172,9 @@ cmake --build build-coverage --target coverage   # summary + HTML + Cobertura
 
 ## GUI expectations
 
-- Retain the compact Windows-inspired hierarchy: top stream/save/load/target controls, preset plus editable modeline timings, capture controls beside a large preview, and status/logs at the bottom.
+- Retain the compact hierarchy: top stream/save/load/target controls, a one-row preset chooser, capture controls beside a large preview, and status/logs at the bottom.
+- Selecting a modeline preset applies it immediately (there is no apply button), including live while streaming via the debounced switch. The modeline timing fields live inside the preset editor dialog, not the main window — but the widgets exist for the whole session (hidden between openings, reparented into each dialog), so values set on them keep driving validation and live switching. Custom presets are managed in the same dialog and persisted to the user configuration the moment they change, without writing the other, possibly unsaved, settings.
+- The monitor chooser and the window chooser share one capture-source row; the capture mode decides which pair is visible. Size is enabled only for the Custom crop mode, but offset stays editable in every mode because `calculateCrop` applies it after alignment unconditionally.
+- Settings are saved only on explicit request: the Save Settings button, or the save/discard/cancel prompt shown when closing with unsaved changes. Starting a stream does not persist anything, and a SIGINT/SIGTERM close never prompts.
 - The stream button must visibly transition through `Starting…`, `Stop Stream`, and `Stopping…`; do not let preview traffic starve these state updates.
 - Keep the diagnostic log bounded. Periodic performance counters belong in the status line; log only meaningful threshold crossings rather than repeating an overrun message every frame.

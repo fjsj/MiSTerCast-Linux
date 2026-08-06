@@ -210,25 +210,8 @@ AppConfig loadGroovyConfig(const std::filesystem::path& path,
   return config;
 }
 
-bool saveGroovyConfig(const AppConfig& config,
-                      const std::filesystem::path& path, std::string& error) {
-  if (auto validation = validateGroovyConfig(config)) {
-    error = *validation;
-    return false;
-  }
-  std::error_code filesystemError;
-  std::filesystem::create_directories(path.parent_path(), filesystemError);
-  if (filesystemError) {
-    error = filesystemError.message();
-    return false;
-  }
-  auto temporary = path;
-  temporary += ".tmp." + std::to_string(::getpid());
-  std::ofstream file(temporary, std::ios::trunc);
-  if (!file) {
-    error = "cannot create temporary configuration";
-    return false;
-  }
+std::string serializeGroovyConfig(const AppConfig& config) {
+  std::ostringstream file;
   file << "{\n  \"version\": 1,\n"
        << "  \"target\": \"" << escape(config.target) << "\",\n"
        << "  \"monitor\": \"" << escape(config.source.monitor) << "\",\n"
@@ -282,6 +265,29 @@ bool saveGroovyConfig(const AppConfig& config,
          << '}';
   }
   file << "\n  ]\n}\n";
+  return file.str();
+}
+
+bool saveGroovyConfig(const AppConfig& config,
+                      const std::filesystem::path& path, std::string& error) {
+  if (auto validation = validateGroovyConfig(config)) {
+    error = *validation;
+    return false;
+  }
+  std::error_code filesystemError;
+  std::filesystem::create_directories(path.parent_path(), filesystemError);
+  if (filesystemError) {
+    error = filesystemError.message();
+    return false;
+  }
+  auto temporary = path;
+  temporary += ".tmp." + std::to_string(::getpid());
+  std::ofstream file(temporary, std::ios::trunc);
+  if (!file) {
+    error = "cannot create temporary configuration";
+    return false;
+  }
+  file << serializeGroovyConfig(config);
   file.flush();
   if (!file) {
     error = "failed writing configuration";

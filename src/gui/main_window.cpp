@@ -19,6 +19,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QTextDocument>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -91,10 +92,22 @@ void MainWindow::refreshConfigurationEnabled(SessionState state) {
   const bool enabled =
       state == SessionState::Idle || state == SessionState::Error;
   for (auto* control : streamLockedControls_) control->setEnabled(enabled);
+  // The monitor chooser and the window chooser share one row; only the pair
+  // that matches the capture mode is shown.
   const bool windowMode = captureMode_->currentIndex() == 1;
+  chooserLabelStack_->setCurrentWidget(
+      windowMode ? static_cast<QWidget*>(chooseWindowButton_) : monitorLabel_);
+  chooserFieldStack_->setCurrentWidget(
+      windowMode ? static_cast<QWidget*>(windowSelection_) : monitor_);
   monitor_->setEnabled(enabled && !windowMode);
   chooseWindowButton_->setEnabled(enabled && windowMode);
   if (enabled) audioSink_->setEnabled(audio_->isChecked());
+  // Size describes the custom crop rectangle and every other crop mode
+  // computes it itself; offset nudges the crop position in every mode
+  // (calculateCrop adds it after alignment unconditionally), so it stays
+  // editable whatever the crop.
+  const bool customCrop = crop_->currentIndex() == int(CropMode::Custom);
+  for (auto* spin : {width_, height_}) spin->setEnabled(enabled && customCrop);
   // Interlace buffering tracks the interlaced flag whether or not a stream is
   // running, because timings are now switched live.
   progressiveInterlaceBuffer_->setEnabled(interlaced_->isChecked());
@@ -148,6 +161,127 @@ void MainWindow::chooseWindow() {
   windowSelection_->setToolTip(item->text());
   captureMode_->setCurrentIndex(1);
   refreshStartEnabled();
+}
+
+// Rebuilds the preset chooser from the bundled and custom modelines while
+// keeping the current selection, without re-applying whatever lands at index 0.
+void MainWindow::refreshPresetChoices() {
+  presets_ = bundledModelines();
+  presets_.insert(presets_.end(), config_.customModelines.begin(),
+                  config_.customModelines.end());
+  const QSignalBlocker blocker(preset_);
+  const auto current = preset_->currentText();
+  preset_->clear();
+  for (const auto& preset : presets_)
+    preset_->addItem(QString::fromStdString(preset.name));
+  const auto index = preset_->findText(current);
+  if (index >= 0) preset_->setCurrentIndex(index);
+}
+
+// Custom presets are persisted the moment they are edited, independently of
+// the ask-on-close flow for the other settings: the file's other values stay
+// exactly as last saved.
+void MainWindow::persistCustomModelines() {
+  auto saved = loadGroovyConfig(configPath());
+  saved.customModelines = config_.customModelines;
+  savedConfig_.customModelines = config_.customModelines;
+  std::string error;
+  if (!saveGroovyConfig(saved, configPath(), error))
+    append("Presets: " + error);
+}
+
+void MainWindow::managePresets() {
+  QDialog dialog(this);
+  dialog.setObjectName(QStringLiteral("presetEditor"));
+  dialog.setWindowTitle("Edit Modeline Presets");
+  auto* layout = new QVBoxLayout(&dialog);
+  // The session-long timing fields are shown here and returned to their
+  // hidden home under the central widget before the dialog destroys its
+  // children. Edits switch the modeline live while streaming, editor open.
+  layout->addWidget(timingsBox_);
+  timingsBox_->show();
+  layout->addWidget(
+      new QLabel("Save the timings above as a preset. Custom presets are "
+                 "stored in your configuration."));
+  auto* list = named(new QListWidget, "customPresetList");
+  for (const auto& modeline : config_.customModelines)
+    list->addItem(QString::fromStdString(modeline.name));
+  layout->addWidget(list);
+  auto* nameRow = new QHBoxLayout;
+  auto* name = named(new QLineEdit, "presetName");
+  name->setPlaceholderText("New preset name");
+  auto* add = named(new QPushButton("Save as Preset"), "addPresetButton");
+  add->setEnabled(false);
+  nameRow->addWidget(name, 1);
+  nameRow->addWidget(add);
+  layout->addLayout(nameRow);
+  auto* remove = named(new QPushButton("Remove Selected"), "removePresetButton");
+  remove->setEnabled(false);
+  auto* feedback = named(new QLabel, "presetEditorStatus");
+  auto* bottomRow = new QHBoxLayout;
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+  bottomRow->addWidget(remove);
+  bottomRow->addWidget(feedback, 1);
+  bottomRow->addWidget(buttons);
+  layout->addLayout(bottomRow);
+
+  connect(name, &QLineEdit::textChanged, add, [add](const QString& text) {
+    add->setEnabled(!text.trimmed().isEmpty());
+  });
+  connect(list, &QListWidget::currentItemChanged, remove,
+          [remove](QListWidgetItem* current) { remove->setEnabled(current); });
+  connect(add, &QPushButton::clicked, &dialog, [this, name, list, feedback] {
+    auto modeline = modelineFromControls();
+    modeline.name = name->text().trimmed().toStdString();
+    if (auto problem = validateGroovyModeline(modeline)) {
+      feedback->setText(QString::fromStdString(*problem));
+      return;
+    }
+    for (const auto& bundled : bundledModelines())
+      if (bundled.name == modeline.name) {
+        feedback->setText("That name belongs to a bundled preset.");
+        return;
+      }
+    config_.customModelines.erase(
+        std::remove_if(config_.customModelines.begin(),
+                       config_.customModelines.end(),
+                       [&](const Modeline& existing) {
+                         return existing.name == modeline.name;
+                       }),
+        config_.customModelines.end());
+    config_.customModelines.push_back(modeline);
+    persistCustomModelines();
+    refreshPresetChoices();
+    list->clear();
+    for (const auto& custom : config_.customModelines)
+      list->addItem(QString::fromStdString(custom.name));
+    preset_->setCurrentIndex(
+        preset_->findText(QString::fromStdString(modeline.name)));
+    feedback->setText(QString("Preset \"%1\" saved.")
+                          .arg(QString::fromStdString(modeline.name)));
+    name->clear();
+  });
+  connect(remove, &QPushButton::clicked, &dialog, [this, list, feedback] {
+    auto* item = list->currentItem();
+    if (!item) return;
+    const auto removedName = item->text().toStdString();
+    config_.customModelines.erase(
+        std::remove_if(config_.customModelines.begin(),
+                       config_.customModelines.end(),
+                       [&](const Modeline& existing) {
+                         return existing.name == removedName;
+                       }),
+        config_.customModelines.end());
+    persistCustomModelines();
+    refreshPresetChoices();
+    delete item;
+    feedback->setText(QString("Preset \"%1\" removed.")
+                          .arg(QString::fromStdString(removedName)));
+  });
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  dialog.exec();
+  timingsBox_->hide();
+  timingsBox_->setParent(centralWidget());
 }
 
 // Editing timings fires a change per field, so the live switch is debounced
@@ -294,20 +428,26 @@ void MainWindow::controlsFromConfig() {
   refreshConfigurationEnabled(session_.state());
 }
 
-void MainWindow::saveSettings(bool announce) {
+void MainWindow::saveSettings() {
   configFromControls();
   std::string error;
   if (!saveGroovyConfig(config_, configPath(), error)) {
     append("Settings: " + error);
     return;
   }
-  if (announce) append("Settings saved to " + configPath().string());
+  savedConfig_ = config_;
+  append("Settings saved to " + configPath().string());
 }
 
 void MainWindow::loadSettings() {
   std::string warning;
   config_ = loadGroovyConfig(configPath(), &warning);
+  refreshPresetChoices();
   controlsFromConfig();
+  // The baseline is the loaded file as the controls normalize it, so closing
+  // without further edits never asks about differences the load itself made.
+  configFromControls();
+  savedConfig_ = config_;
   append(warning.empty() ? "Settings loaded." : warning);
 }
 
@@ -353,7 +493,6 @@ void MainWindow::toggleStream() {
     return;
   }
   showState(SessionState::Streaming);
-  saveSettings(false);
   previousDropped_ = previousAudioDropped_ = previousUnderrun_ = 0;
   previousSendErrors_ = previousFieldRealignments_ = 0;
   append("Streaming to " + config_.target + ".");
@@ -516,19 +655,25 @@ MainWindow::MainWindow() {
   controls->addWidget(help);
   root->addWidget(controlsBox);
 
-  auto* modelineRow = new QHBoxLayout;
   auto* presetBox = new QGroupBox("Modeline Presets");
-  auto* presetLayout = new QVBoxLayout(presetBox);
+  auto* presetLayout = new QHBoxLayout(presetBox);
   preset_ = named(new QComboBox, "preset");
-  applyModelineButton_ =
-      named(new QPushButton("Apply Modeline"), "applyModelineButton");
-  presetLayout->addWidget(preset_);
-  presetLayout->addWidget(applyModelineButton_);
-  presetLayout->addStretch();
-  modelineRow->addWidget(presetBox, 1);
+  preset_->setToolTip(
+      "Selecting a preset applies its timings immediately, switching the "
+      "modeline live while a stream is running. Edit Presets… opens the "
+      "timing fields.");
+  managePresetsButton_ =
+      named(new QPushButton("Edit Presets…"), "managePresetsButton");
+  presetLayout->addWidget(preset_, 1);
+  presetLayout->addWidget(managePresetsButton_);
+  root->addWidget(presetBox);
 
-  auto* timingsBox = new QGroupBox("Modeline");
-  auto* timings = new QGridLayout(timingsBox);
+  // The timing fields live inside the preset editor dialog to keep the main
+  // window small, but the widgets themselves last the whole session: values
+  // set on them (presets, loads, tests) keep driving validation and live
+  // switching while the editor is closed.
+  timingsBox_ = named(new QGroupBox("Modeline"), "timingsBox");
+  auto* timings = new QGridLayout(timingsBox_);
   pixelClock_ = named(new QDoubleSpinBox, "pixelClock");
   pixelClock_->setRange(0.1, 400);
   pixelClock_->setDecimals(3);
@@ -552,8 +697,8 @@ MainWindow::MainWindow() {
     timings->addWidget(new QLabel(bottomLabels[column]), 2, column);
     timings->addWidget(bottomFields[column], 3, column);
   }
-  modelineRow->addWidget(timingsBox, 4);
-  root->addLayout(modelineRow);
+  timingsBox_->setParent(central);
+  timingsBox_->hide();
 
   auto* sourceBox = new QGroupBox("Capture Source");
   auto* sourceLayout = new QHBoxLayout(sourceBox);
@@ -599,39 +744,51 @@ MainWindow::MainWindow() {
       "payload and may add latency.");
   audio_ = named(new QCheckBox("Enable Audio"), "audio");
   preview_ = named(new QCheckBox("Enable Preview"), "preview");
+  monitorLabel_ = named(new QLabel("Monitor"), "monitorLabel");
   sourceGrid->addWidget(new QLabel("Source"), 0, 0);
   sourceGrid->addWidget(captureMode_, 0, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Monitor"), 1, 0);
-  sourceGrid->addWidget(monitor_, 1, 1, 1, 2);
-  sourceGrid->addWidget(chooseWindowButton_, 2, 0);
-  sourceGrid->addWidget(windowSelection_, 2, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Audio output"), 3, 0);
-  sourceGrid->addWidget(audioSink_, 3, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Crop"), 4, 0);
-  sourceGrid->addWidget(crop_, 4, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Alignment"), 5, 0);
-  sourceGrid->addWidget(alignment_, 5, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Rotation"), 6, 0);
-  sourceGrid->addWidget(rotation_, 6, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Sampling"), 7, 0);
-  sourceGrid->addWidget(sampling_, 7, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Size"), 8, 0);
-  sourceGrid->addWidget(width_, 8, 1);
-  sourceGrid->addWidget(height_, 8, 2);
-  sourceGrid->addWidget(new QLabel("Offset"), 9, 0);
-  sourceGrid->addWidget(xOffset_, 9, 1);
-  sourceGrid->addWidget(yOffset_, 9, 2);
-  sourceGrid->addWidget(new QLabel("Frame delay"), 10, 0);
-  sourceGrid->addWidget(frameDelay_, 10, 1, 1, 2);
-  sourceGrid->addWidget(progressiveInterlaceBuffer_, 11, 0, 1, 3);
-  sourceGrid->addWidget(audio_, 12, 0, 1, 3);
-  sourceGrid->addWidget(preview_, 13, 0, 1, 3);
+  // The monitor chooser and the window chooser occupy the same row; the
+  // capture mode decides which stack page shows. Stacking one widget per grid
+  // cell keeps the row spacing regular, which two widgets overlapping in one
+  // cell did not.
+  chooserLabelStack_ = new QStackedWidget;
+  chooserLabelStack_->addWidget(monitorLabel_);
+  chooserLabelStack_->addWidget(chooseWindowButton_);
+  chooserFieldStack_ = new QStackedWidget;
+  chooserFieldStack_->addWidget(monitor_);
+  chooserFieldStack_->addWidget(windowSelection_);
+  sourceGrid->addWidget(chooserLabelStack_, 1, 0);
+  sourceGrid->addWidget(chooserFieldStack_, 1, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Audio output"), 2, 0);
+  sourceGrid->addWidget(audioSink_, 2, 1, 1, 2);
+  // Crop sits directly above the size and offset it controls.
+  sourceGrid->addWidget(new QLabel("Crop"), 3, 0);
+  sourceGrid->addWidget(crop_, 3, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Size"), 4, 0);
+  sourceGrid->addWidget(width_, 4, 1);
+  sourceGrid->addWidget(height_, 4, 2);
+  sourceGrid->addWidget(new QLabel("Offset"), 5, 0);
+  sourceGrid->addWidget(xOffset_, 5, 1);
+  sourceGrid->addWidget(yOffset_, 5, 2);
+  sourceGrid->addWidget(new QLabel("Alignment"), 6, 0);
+  sourceGrid->addWidget(alignment_, 6, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Rotation"), 7, 0);
+  sourceGrid->addWidget(rotation_, 7, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Sampling"), 8, 0);
+  sourceGrid->addWidget(sampling_, 8, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Frame delay"), 9, 0);
+  sourceGrid->addWidget(frameDelay_, 9, 1, 1, 2);
+  sourceGrid->addWidget(progressiveInterlaceBuffer_, 10, 0, 1, 3);
+  sourceGrid->addWidget(audio_, 11, 0, 1, 3);
+  sourceGrid->addWidget(preview_, 12, 0, 1, 3);
   sourceGrid->setColumnStretch(1, 1);
   sourceGrid->setColumnStretch(2, 1);
   sourceLayout->addWidget(sourceControls, 1);
   previewImage_ = named(new QLabel("Preview Disabled"), "previewImage");
   previewImage_->setAlignment(Qt::AlignCenter);
-  previewImage_->setMinimumSize(450, 260);
+  // Small enough that narrowing the window squeezes the preview, not the
+  // capture fields, whose minimum width is pinned above.
+  previewImage_->setMinimumSize(320, 180);
   previewImage_->setSizePolicy(QSizePolicy::Expanding,
                                QSizePolicy::Expanding);
   previewImage_->setStyleSheet(
@@ -661,7 +818,7 @@ MainWindow::MainWindow() {
   logsLayout->addWidget(log_);
   root->addWidget(logsBox, 2);
   setCentralWidget(central);
-  resize(840, 790);
+  resize(840, 680);
 
   std::string monitorError;
   for (auto& monitor : x11Monitors(monitorError))
@@ -673,21 +830,37 @@ MainWindow::MainWindow() {
   audioSink_->setToolTip(
       "Silent output temporarily routes active and new playback into a "
       "virtual sink. Original routing is restored when streaming stops.");
+  // A crashed or killed instance leaves its silent-output sink loaded in the
+  // sound server; remove those leftovers and never list one as a choice.
+  std::string staleError;
+  if (const auto removed = cleanupStaleSilentSinks(staleError))
+    append(QString("Removed %1 stale MiSTerCast silent output%2 left by a "
+                   "previous run.")
+               .arg(removed)
+               .arg(removed == 1 ? "" : "s"));
   std::string audioError;
   for (const auto& sink : pulseAudioSinks(audioError)) {
+    if (sink.name.rfind(SilentSinkPrefix, 0) == 0) continue;
     const auto label = QString::fromStdString(sink.description) +
                        (sink.isDefault ? " (default)" : "");
     audioSink_->addItem(label, QString::fromStdString(sink.name));
   }
   if (!audioError.empty()) append("Audio outputs: " + audioError);
-  presets_ = bundledModelines();
-  presets_.insert(presets_.end(), config_.customModelines.begin(),
-                  config_.customModelines.end());
-  for (const auto& preset : presets_)
-    preset_->addItem(QString::fromStdString(preset.name));
+  refreshPresetChoices();
   audio_->setChecked(config_.source.audio);
   preview_->setChecked(config_.source.preview);
   controlsFromConfig();
+  // The baseline for the save prompt on close is the configuration as loaded,
+  // normalized through the controls so a load-then-close never asks.
+  configFromControls();
+  savedConfig_ = config_;
+
+  // The fields never compress below their preferred width: when the window
+  // narrows, the preview shrinks instead of the controls collapsing. Pinned
+  // only now, after the monitor and audio combos have their real content, and
+  // capped so one unusually long sink description cannot force a huge window.
+  sourceControls->setMinimumWidth(
+      std::min(sourceControls->sizeHint().width(), 460));
 
   // Timings stay editable while streaming: they are switched live, as the
   // Windows GUI did, which locked only the capture source and audio.
@@ -718,10 +891,16 @@ MainWindow::MainWindow() {
           [this] { saveSettings(); });
   connect(loadButton_, &QPushButton::clicked, this,
           [this] { loadSettings(); });
-  connect(applyModelineButton_, &QPushButton::clicked, this, [this] {
-    if (preset_->currentIndex() >= 0)
-      setModelineControls(presets_.at(size_t(preset_->currentIndex())));
+  // Choosing a preset applies it directly; while streaming, the resulting
+  // field edits are debounced into a live modeline switch like manual edits.
+  connect(preset_, &QComboBox::currentIndexChanged, this, [this](int index) {
+    if (index >= 0 && size_t(index) < presets_.size())
+      setModelineControls(presets_.at(size_t(index)));
   });
+  connect(managePresetsButton_, &QPushButton::clicked, this,
+          [this] { managePresets(); });
+  connect(crop_, &QComboBox::currentIndexChanged, this,
+          [this] { refreshConfigurationEnabled(session_.state()); });
   connect(help, &QPushButton::clicked, this, [this] {
     QMessageBox::information(
         this, "MiSTerCast",
@@ -784,6 +963,34 @@ MainWindow::MainWindow() {
 MainWindow::~MainWindow() { session_.stop(); }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+  // Settings are only written when the user asks: here, or via Save Settings.
+  // A SIGINT/SIGTERM close must terminate promptly, so it never prompts.
+  configFromControls();
+  if (!interrupted &&
+      serializeGroovyConfig(config_) != serializeGroovyConfig(savedConfig_)) {
+    QMessageBox prompt(QMessageBox::Question, "MiSTerCast",
+                       "Save the changed settings before closing?",
+                       QMessageBox::Save | QMessageBox::Discard |
+                           QMessageBox::Cancel,
+                       this);
+    prompt.setObjectName(QStringLiteral("closePrompt"));
+    prompt.setDefaultButton(QMessageBox::Save);
+    const auto choice = prompt.exec();
+    if (choice == QMessageBox::Cancel) {
+      event->ignore();
+      return;
+    }
+    if (choice == QMessageBox::Save) {
+      std::string error;
+      if (!saveGroovyConfig(config_, configPath(), error)) {
+        QMessageBox::warning(
+            this, "MiSTerCast",
+            QString::fromStdString("Settings could not be saved: " + error));
+        event->ignore();
+        return;
+      }
+    }
+  }
   session_.stop();
   statsTimer_.stop();
   modelineApplyTimer_.stop();

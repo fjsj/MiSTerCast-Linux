@@ -7,6 +7,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -46,6 +47,7 @@ TEST_F(Gui, OpensIdleWithEveryControlPresent) {
   EXPECT_THAT(log().toStdString(), HasSubstr("MiSTerCast ready."));
   EXPECT_GT(find<QComboBox>("preset")->count(),
             int(bundledModelines().size()) - 1);
+  EXPECT_EQ(find<QPushButton>("managePresetsButton")->text(), "Edit Presets…");
   EXPECT_EQ(find<QComboBox>("captureMode")->count(), 2);
   EXPECT_EQ(find<QComboBox>("crop")->count(), 8);
   EXPECT_EQ(find<QComboBox>("alignment")->count(), 9);
@@ -173,30 +175,38 @@ TEST_F(Gui, SwitchingToWindowModeSwapsWhichSourceControlIsUsable) {
   auto* monitor = find<QComboBox>("monitor");
   auto* choose = find<QPushButton>("chooseWindowButton");
 
+  // The two choosers share one row: only the pair matching the mode is shown.
   EXPECT_TRUE(monitor->isEnabled());
-  EXPECT_FALSE(choose->isEnabled());
+  EXPECT_FALSE(monitor->isHidden());
+  EXPECT_FALSE(find<QLabel>("monitorLabel")->isHidden());
+  EXPECT_TRUE(choose->isHidden());
+  EXPECT_TRUE(find<QLabel>("windowSelection")->isHidden());
   EXPECT_TRUE(find<QPushButton>("streamButton")->isEnabled());
 
   mode->setCurrentIndex(1);
-  EXPECT_FALSE(monitor->isEnabled());
+  EXPECT_TRUE(monitor->isHidden());
+  EXPECT_TRUE(find<QLabel>("monitorLabel")->isHidden());
   EXPECT_TRUE(choose->isEnabled());
+  EXPECT_FALSE(choose->isHidden());
+  EXPECT_FALSE(find<QLabel>("windowSelection")->isHidden());
   EXPECT_FALSE(find<QPushButton>("streamButton")->isEnabled());
 
   mode->setCurrentIndex(0);
   EXPECT_TRUE(monitor->isEnabled());
-  EXPECT_FALSE(choose->isEnabled());
+  EXPECT_FALSE(monitor->isHidden());
+  EXPECT_TRUE(choose->isHidden());
   EXPECT_TRUE(find<QPushButton>("streamButton")->isEnabled());
 }
 
 // ----------------------------------------------------------------- plain controls
 
-TEST_F(Gui, ApplyingAPresetLoadsItsTimings) {
+TEST_F(Gui, SelectingAPresetAppliesItsTimingsImmediately) {
   build();
   auto* preset = find<QComboBox>("preset");
   const auto presets = bundledModelines();
   const auto wanted = presets.at(3);  // 640x480i
+  // There is no apply button: choosing the preset is applying it.
   preset->setCurrentIndex(3);
-  find<QPushButton>("applyModelineButton")->click();
 
   EXPECT_DOUBLE_EQ(find<QDoubleSpinBox>("pixelClock")->value(),
                    wanted.pixelClockMHz);
@@ -209,6 +219,157 @@ TEST_F(Gui, ApplyingAPresetLoadsItsTimings) {
   EXPECT_EQ(find<QCheckBox>("interlaced")->isChecked(), wanted.interlaced);
   EXPECT_TRUE(find<QCheckBox>("progressiveInterlaceBuffer")->isEnabled())
       << "the interlace buffering choice only applies to interlaced modes";
+}
+
+TEST_F(Gui, TheModelineTimingsLiveInsideThePresetEditorNotTheMainWindow) {
+  build();
+  // The main window shows only the preset chooser; the timing fields exist
+  // for the whole session (hidden) so presets, loads and live switching keep
+  // driving them, and they surface inside the preset editor.
+  auto* timings = find<QGroupBox>("timingsBox");
+  EXPECT_TRUE(timings->isHidden());
+  find<QSpinBox>("hActive")->setValue(500);
+  EXPECT_EQ(find<QSpinBox>("hActive")->value(), 500)
+      << "hidden timing fields must stay programmable";
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* dialog = qobject_cast<QDialog*>(top);
+          dialog && dialog->objectName() == "presetEditor")
+        dialog->reject();
+  });
+  find<QPushButton>("managePresetsButton")->click();
+  EXPECT_TRUE(timings->isHidden())
+      << "the timings return to their hidden home when the editor closes";
+  EXPECT_EQ(find<QSpinBox>("hActive")->value(), 500)
+      << "the fields survive the dialog teardown";
+}
+
+TEST_F(Gui, ThePresetEditorSavesTheCurrentModelineAsACustomPreset) {
+  build();
+  // Timings no bundled preset has, entered as if the user tuned them by hand.
+  find<QDoubleSpinBox>("pixelClock")->setValue(7.0);
+  find<QSpinBox>("hActive")->setValue(384);
+  find<QSpinBox>("hBegin")->setValue(400);
+  find<QSpinBox>("hEnd")->setValue(432);
+  find<QSpinBox>("hTotal")->setValue(480);
+  find<QSpinBox>("vActive")->setValue(224);
+  find<QSpinBox>("vBegin")->setValue(236);
+  find<QSpinBox>("vEnd")->setValue(239);
+  find<QSpinBox>("vTotal")->setValue(264);
+
+  bool edited = false;
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* dialog = qobject_cast<QDialog*>(top);
+          dialog && dialog->objectName() == "presetEditor") {
+        edited = true;
+        auto* timings = dialog->findChild<QGroupBox*>("timingsBox");
+        ASSERT_NE(timings, nullptr)
+            << "the timing fields are edited inside the preset editor";
+        EXPECT_FALSE(timings->isHidden());
+        auto* add = dialog->findChild<QPushButton*>("addPresetButton");
+        EXPECT_FALSE(add->isEnabled()) << "a preset needs a name";
+        dialog->findChild<QLineEdit*>("presetName")->setText("My CRT");
+        EXPECT_TRUE(add->isEnabled());
+        add->click();
+        EXPECT_EQ(dialog->findChild<QListWidget*>("customPresetList")->count(),
+                  1);
+        dialog->reject();
+      }
+  });
+  find<QPushButton>("managePresetsButton")->click();
+  ASSERT_TRUE(edited);
+
+  // The new preset is offered and selected, and it is already on disk without
+  // the rest of the (unsaved) settings being written along with it.
+  EXPECT_EQ(find<QComboBox>("preset")->currentText(), "My CRT");
+  const auto saved =
+      loadGroovyConfig(directory->path() / "mistercast/config.json");
+  ASSERT_EQ(saved.customModelines.size(), 1u);
+  EXPECT_EQ(saved.customModelines.front().name, "My CRT");
+  EXPECT_EQ(saved.customModelines.front().hActive, 384);
+  EXPECT_EQ(saved.modeline.hActive, Modeline().hActive)
+      << "adding a preset must not save the live modeline fields";
+}
+
+TEST_F(Gui, ThePresetEditorRefusesABundledPresetsName) {
+  build();
+  bool edited = false;
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* dialog = qobject_cast<QDialog*>(top);
+          dialog && dialog->objectName() == "presetEditor") {
+        edited = true;
+        dialog->findChild<QLineEdit*>("presetName")
+            ->setText(QString::fromStdString(bundledModelines().front().name));
+        dialog->findChild<QPushButton*>("addPresetButton")->click();
+        EXPECT_EQ(dialog->findChild<QListWidget*>("customPresetList")->count(),
+                  0);
+        EXPECT_THAT(dialog->findChild<QLabel*>("presetEditorStatus")
+                        ->text()
+                        .toStdString(),
+                    HasSubstr("bundled"));
+        dialog->reject();
+      }
+  });
+  find<QPushButton>("managePresetsButton")->click();
+  ASSERT_TRUE(edited);
+  const auto saved =
+      loadGroovyConfig(directory->path() / "mistercast/config.json");
+  EXPECT_TRUE(saved.customModelines.empty());
+}
+
+TEST_F(Gui, ThePresetEditorRemovesACustomPreset) {
+  auto config = streamableConfig();
+  config.customModelines.push_back(
+      {"Removable", 6.7, 320, 336, 367, 426, 240, 244, 247, 262, false});
+  writeConfig(config);
+  build();
+  ASSERT_GE(find<QComboBox>("preset")->findText("Removable"), 0)
+      << "saved custom presets are offered alongside the bundled ones";
+
+  bool edited = false;
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* dialog = qobject_cast<QDialog*>(top);
+          dialog && dialog->objectName() == "presetEditor") {
+        edited = true;
+        auto* list = dialog->findChild<QListWidget*>("customPresetList");
+        auto* remove = dialog->findChild<QPushButton*>("removePresetButton");
+        EXPECT_FALSE(remove->isEnabled()) << "nothing is selected yet";
+        list->setCurrentRow(0);
+        EXPECT_TRUE(remove->isEnabled());
+        remove->click();
+        EXPECT_EQ(list->count(), 0);
+        dialog->reject();
+      }
+  });
+  find<QPushButton>("managePresetsButton")->click();
+  ASSERT_TRUE(edited);
+
+  EXPECT_EQ(find<QComboBox>("preset")->findText("Removable"), -1);
+  const auto saved =
+      loadGroovyConfig(directory->path() / "mistercast/config.json");
+  EXPECT_TRUE(saved.customModelines.empty());
+}
+
+TEST_F(Gui, SizeIsOnlyEditableForACustomCropButOffsetAlwaysIs) {
+  build();  // the default configuration crops to Full 4:3
+  for (const char* name : {"width", "height"})
+    EXPECT_FALSE(find<QSpinBox>(name)->isEnabled())
+        << name << " describes the custom crop rectangle only";
+  // calculateCrop applies the offset after alignment in every crop mode, so
+  // the offset fields must never be locked out by the crop choice.
+  for (const char* name : {"xOffset", "yOffset"})
+    EXPECT_TRUE(find<QSpinBox>(name)->isEnabled()) << name;
+  find<QComboBox>("crop")->setCurrentIndex(int(CropMode::Custom));
+  for (const char* name : {"width", "height", "xOffset", "yOffset"})
+    EXPECT_TRUE(find<QSpinBox>(name)->isEnabled()) << name;
+  find<QComboBox>("crop")->setCurrentIndex(int(CropMode::X2));
+  for (const char* name : {"width", "height"})
+    EXPECT_FALSE(find<QSpinBox>(name)->isEnabled()) << name;
+  for (const char* name : {"xOffset", "yOffset"})
+    EXPECT_TRUE(find<QSpinBox>(name)->isEnabled()) << name;
 }
 
 TEST_F(Gui, InterlaceBufferingFollowsTheInterlacedFlag) {
@@ -296,6 +457,91 @@ TEST_F(Gui, ReportsAConfigurationThatCannotBeSaved) {
   find<QLineEdit>("target")->setText("mister.example");
   find<QPushButton>("saveButton")->click();
   EXPECT_THAT(log().toStdString(), HasSubstr("Settings:"));
+}
+
+// ------------------------------------------------------------- closing prompts
+
+TEST_F(Gui, ClosingWithUnsavedChangesCanDiscardThem) {
+  writeConfig(streamableConfig());
+  build();
+  find<QSpinBox>("frameDelay")->setValue(7);
+  bool prompted = false;
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* box = qobject_cast<QMessageBox*>(top);
+          box && box->objectName() == "closePrompt") {
+        prompted = true;
+        box->button(QMessageBox::Discard)->click();
+      }
+  });
+  EXPECT_TRUE(window->close());
+  pumpFor(std::chrono::milliseconds(20));  // drain the timer if never prompted
+  EXPECT_TRUE(prompted);
+  const auto saved =
+      loadGroovyConfig(directory->path() / "mistercast/config.json");
+  EXPECT_EQ(saved.source.frameDelay, 0) << "discarding must not write the file";
+}
+
+TEST_F(Gui, ClosingWithUnsavedChangesCanSaveThem) {
+  writeConfig(streamableConfig());
+  build();
+  find<QSpinBox>("frameDelay")->setValue(7);
+  bool prompted = false;
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* box = qobject_cast<QMessageBox*>(top);
+          box && box->objectName() == "closePrompt") {
+        prompted = true;
+        box->button(QMessageBox::Save)->click();
+      }
+  });
+  EXPECT_TRUE(window->close());
+  pumpFor(std::chrono::milliseconds(20));
+  EXPECT_TRUE(prompted);
+  const auto saved =
+      loadGroovyConfig(directory->path() / "mistercast/config.json");
+  EXPECT_EQ(saved.source.frameDelay, 7);
+}
+
+TEST_F(Gui, CancellingTheClosePromptKeepsTheWindowOpen) {
+  writeConfig(streamableConfig());
+  build();
+  find<QSpinBox>("frameDelay")->setValue(7);
+  bool prompted = false;
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* box = qobject_cast<QMessageBox*>(top);
+          box && box->objectName() == "closePrompt") {
+        prompted = true;
+        box->button(QMessageBox::Cancel)->click();
+      }
+  });
+  EXPECT_FALSE(window->close()) << "cancel must abort the close";
+  pumpFor(std::chrono::milliseconds(20));
+  EXPECT_TRUE(prompted);
+  EXPECT_EQ(find<QSpinBox>("frameDelay")->value(), 7)
+      << "the edit survives the cancelled close";
+  const auto saved =
+      loadGroovyConfig(directory->path() / "mistercast/config.json");
+  EXPECT_EQ(saved.source.frameDelay, 0);
+}
+
+TEST_F(Gui, ClosingWithoutChangesNeverPrompts) {
+  writeConfig(streamableConfig());
+  build();
+  bool prompted = false;
+  QTimer::singleShot(0, [&] {
+    for (auto* top : QApplication::topLevelWidgets())
+      if (auto* box = qobject_cast<QMessageBox*>(top);
+          box && box->objectName() == "closePrompt") {
+        prompted = true;
+        box->button(QMessageBox::Discard)->click();
+      }
+  });
+  EXPECT_TRUE(window->close());
+  pumpFor(std::chrono::milliseconds(20));
+  EXPECT_FALSE(prompted)
+      << "an untouched configuration has nothing to ask about";
 }
 
 // -------------------------------------------------------------- window chooser
@@ -433,7 +679,8 @@ TEST_F(Gui, StreamsASingleWindowWhenWindowModeIsSelected) {
   find<QPushButton>("streamButton")->click();
   EXPECT_EQ(find<QLabel>("status")->text(), "Idle");
 
-  // The saved preference records window mode, but never the transient ID.
+  // Saving records window mode as the preference, but never the transient ID.
+  find<QPushButton>("saveButton")->click();
   const auto saved =
       loadGroovyConfig(directory->path() / "mistercast/config.json");
   EXPECT_EQ(saved.source.capturePreference, CapturePreference::Window);
@@ -522,7 +769,7 @@ TEST_F(Gui, StreamsToAListeningTargetAndLocksTheSourceControls) {
   EXPECT_TRUE(pumpUntil([&] { return receiver->closes() >= 1; }));
 }
 
-TEST_F(Gui, StartingAStreamPersistsTheSettingsWithoutSayingSo) {
+TEST_F(Gui, StartingAStreamDoesNotPersistTheSettings) {
   if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
     GTEST_SKIP() << "no X11 display available";
   bindReceiver();
@@ -533,13 +780,12 @@ TEST_F(Gui, StartingAStreamPersistsTheSettingsWithoutSayingSo) {
   find<QSpinBox>("frameDelay")->setValue(2);
   find<QPushButton>("streamButton")->click();
   ASSERT_EQ(find<QLabel>("status")->text(), "Streaming");
-  EXPECT_THAT(log().toStdString(),
-              testing::Not(HasSubstr("Settings saved to")));
   find<QPushButton>("streamButton")->click();
 
+  // Settings are written only on an explicit save (button or close prompt).
   const auto saved =
       loadGroovyConfig(directory->path() / "mistercast/config.json");
-  EXPECT_EQ(saved.source.frameDelay, 2);
+  EXPECT_EQ(saved.source.frameDelay, 0);
 }
 
 TEST_F(Gui, EditingTimingsWhileStreamingSwitchesThemLiveAfterADebounce) {
@@ -567,6 +813,29 @@ TEST_F(Gui, EditingTimingsWhileStreamingSwitchesThemLiveAfterADebounce) {
       [&] { return receiver->switchModes() > switchesBeforeEdit; }));
   EXPECT_THAT(log().toStdString(), HasSubstr("Modeline switched live to"));
   EXPECT_THAT(receiver->activeHeights(), testing::Contains(200));
+  EXPECT_EQ(find<QLabel>("status")->text(), "Streaming");
+  find<QPushButton>("streamButton")->click();
+}
+
+TEST_F(Gui, SelectingAPresetWhileStreamingSwitchesTheModelineLive) {
+  if (!::getenv("DISPLAY") || !*::getenv("DISPLAY"))
+    GTEST_SKIP() << "no X11 display available";
+  bindReceiver();
+  if (IsSkipped()) return;
+  writeConfig(streamableConfig());
+  build();
+  find<QPushButton>("streamButton")->click();
+  ASSERT_EQ(find<QLabel>("status")->text(), "Streaming");
+  ASSERT_TRUE(pumpUntil([&] { return receiver->switchModes() >= 1; }));
+  const auto switchesBeforeEdit = receiver->switchModes();
+
+  // Choosing a preset applies its timings, which the debounce then switches
+  // live exactly as if the fields had been edited by hand.
+  find<QComboBox>("preset")->setCurrentIndex(3);  // 640x480i
+  ASSERT_TRUE(pumpUntil(
+      [&] { return receiver->switchModes() > switchesBeforeEdit; }));
+  EXPECT_THAT(log().toStdString(), HasSubstr("switched live to 640x480i"));
+  EXPECT_THAT(receiver->activeHeights(), testing::Contains(480));
   EXPECT_EQ(find<QLabel>("status")->text(), "Streaming");
   find<QPushButton>("streamButton")->click();
 }
@@ -707,11 +976,10 @@ TEST_F(Gui, AcceptingAnEmptyChooserSelectsNothing) {
   EXPECT_FALSE(find<QPushButton>("streamButton")->isEnabled());
 }
 
-TEST_F(Gui, ApplyingAPresetWithNothingSelectedIsIgnored) {
+TEST_F(Gui, ClearingThePresetSelectionChangesNoTimings) {
   build();
   const auto before = find<QSpinBox>("hActive")->value();
   find<QComboBox>("preset")->setCurrentIndex(-1);
-  find<QPushButton>("applyModelineButton")->click();
   EXPECT_EQ(find<QSpinBox>("hActive")->value(), before);
 }
 

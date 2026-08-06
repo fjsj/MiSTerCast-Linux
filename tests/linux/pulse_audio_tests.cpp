@@ -11,7 +11,10 @@
 #include <vector>
 
 #include <pulse/error.h>
+#include <pulse/pulseaudio.h>
 #include <pulse/simple.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "mistercast/interfaces.hpp"
 #include "support/pulse_server.hpp"
@@ -83,6 +86,86 @@ class Pulse : public testing::Test {
     return result;
   }
 };
+
+// Loads null-sink modules directly, to plant the leftovers a crashed
+// MiSTerCast instance would leave behind. The production code never exposes a
+// way to create a silent sink without also cleaning it up, which is exactly
+// what makes staleness impossible to arrange through it.
+class ModuleLoader {
+ public:
+  ModuleLoader() {
+    loop_ = pa_mainloop_new();
+    context_ = pa_context_new(pa_mainloop_get_api(loop_), "test module loader");
+    if (pa_context_connect(context_, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0)
+      return;
+    for (;;) {
+      const auto state = pa_context_get_state(context_);
+      if (state == PA_CONTEXT_READY) {
+        ready_ = true;
+        return;
+      }
+      if (!PA_CONTEXT_IS_GOOD(state)) return;
+      if (pa_mainloop_iterate(loop_, 1, nullptr) < 0) return;
+    }
+  }
+
+  ~ModuleLoader() {
+    if (context_) {
+      pa_context_disconnect(context_);
+      pa_context_unref(context_);
+    }
+    if (loop_) pa_mainloop_free(loop_);
+  }
+  ModuleLoader(const ModuleLoader&) = delete;
+  ModuleLoader& operator=(const ModuleLoader&) = delete;
+
+  bool ready() const noexcept { return ready_; }
+
+  uint32_t loadNullSink(const std::string& name) {
+    const auto arguments = "sink_name=" + name;
+    uint32_t index = PA_INVALID_INDEX;
+    wait(pa_context_load_module(
+        context_, "module-null-sink", arguments.c_str(),
+        [](pa_context*, uint32_t module, void* data) {
+          *static_cast<uint32_t*>(data) = module;
+        },
+        &index));
+    return index;
+  }
+
+  bool unload(uint32_t module) {
+    bool unloaded = false;
+    wait(pa_context_unload_module(
+        context_, module,
+        [](pa_context*, int success, void* data) {
+          *static_cast<bool*>(data) = success != 0;
+        },
+        &unloaded));
+    return unloaded;
+  }
+
+ private:
+  void wait(pa_operation* operation) {
+    if (!operation) return;
+    while (pa_operation_get_state(operation) == PA_OPERATION_RUNNING)
+      if (pa_mainloop_iterate(loop_, 1, nullptr) < 0) break;
+    pa_operation_unref(operation);
+  }
+
+  pa_mainloop* loop_{};
+  pa_context* context_{};
+  bool ready_{};
+};
+
+// A pid that certainly belonged to no live process: a child that has already
+// exited and been reaped cannot be running, and the kernel will not reuse its
+// pid within this test.
+pid_t deadProcessId() {
+  const pid_t child = fork();
+  if (child == 0) _exit(0);
+  if (child > 0) waitpid(child, nullptr, 0);
+  return child;
+}
 
 TEST_F(Pulse, EnumeratesTheServersOutputSinks) {
   std::string error;
@@ -305,6 +388,44 @@ TEST_F(Pulse, ReportsAServerWithNoOutputAtAll) {
   ASSERT_TRUE(problem.has_value());
   EXPECT_THAT(problem->message, HasSubstr("no default output sink"));
   EXPECT_THAT(problem->hint, HasSubstr("module-null-sink"));
+}
+
+TEST_F(Pulse, RemovesSilentSinksOfDeadProcessesAndKeepsLiveOnes) {
+  const auto before = sinks().size();
+  ModuleLoader loader;
+  ASSERT_TRUE(loader.ready());
+
+  // One sink stamped with a pid that no longer exists — what a killed instance
+  // leaves behind — and one stamped with a live pid, as a second running
+  // instance would create.
+  const pid_t dead = deadProcessId();
+  ASSERT_GT(dead, 0);
+  const auto staleName = std::string(SilentSinkPrefix) + std::to_string(dead);
+  const auto liveName =
+      std::string(SilentSinkPrefix) + std::to_string(::getpid());
+  const auto staleModule = loader.loadNullSink(staleName);
+  const auto liveModule = loader.loadNullSink(liveName);
+  ASSERT_NE(staleModule, uint32_t(-1));
+  ASSERT_NE(liveModule, uint32_t(-1));
+
+  std::string error;
+  EXPECT_EQ(cleanupStaleSilentSinks(error), 1u);
+  EXPECT_THAT(error, testing::IsEmpty());
+
+  const auto remaining = sinks();
+  EXPECT_THAT(remaining,
+              testing::Not(testing::Contains(
+                  testing::Field(&AudioSink::name, staleName))))
+      << "the dead instance's sink is unloaded";
+  EXPECT_THAT(remaining, testing::Contains(
+                             testing::Field(&AudioSink::name, liveName)))
+      << "a sink whose owner is alive must be left alone";
+
+  // Running it again finds nothing further to do.
+  EXPECT_EQ(cleanupStaleSilentSinks(error), 0u);
+
+  EXPECT_TRUE(loader.unload(liveModule));
+  EXPECT_EQ(sinks().size(), before) << "the server is left as it was found";
 }
 
 // Runs last, because it takes the private server down for good.

@@ -10,7 +10,11 @@
 #include <pulse/error.h>
 #include <pulse/pulseaudio.h>
 #include <pulse/simple.h>
+#include <signal.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <string>
 #endif
 
 namespace mistercast {
@@ -143,6 +147,37 @@ void moduleCallback(pa_context*, uint32_t index, void* data) {
   *static_cast<uint32_t*>(data) = index;
 }
 
+struct SinkModule {
+  std::string name;
+  uint32_t module;
+};
+void sinkModuleInfo(pa_context*, const pa_sink_info* info, int end,
+                    void* data) {
+  if (!end && info && info->name)
+    static_cast<std::vector<SinkModule>*>(data)->push_back(
+        {info->name, info->owner_module});
+}
+
+// A silent-output sink names the pid that loaded it; the sink is stale exactly
+// when that process is gone. EPERM still proves the process exists, so only
+// ESRCH counts as dead.
+bool isStaleSilentSink(const std::string& name) {
+  const std::string prefix = SilentSinkPrefix;
+  if (name.rfind(prefix, 0) != 0) return false;
+  const auto digits = name.substr(prefix.size());
+  if (digits.empty() ||
+      digits.find_first_not_of("0123456789") != std::string::npos)
+    return false;
+  long pid = 0;
+  try {
+    pid = std::stol(digits);
+  } catch (...) {
+    return false;
+  }
+  if (pid <= 0 || pid == long(::getpid())) return false;
+  return ::kill(pid_t(pid), 0) < 0 && errno == ESRCH;
+}
+
 struct SinkInput {
   uint32_t index, sink;
 };
@@ -165,7 +200,7 @@ class SilentRouting {
       return false;
     }
     originalDefault_ = server.defaultSink;
-    sinkName_ = "mistercast_silent_" + std::to_string(::getpid());
+    sinkName_ = SilentSinkPrefix + std::to_string(::getpid());
     const std::string arguments =
         "sink_name=" + sinkName_ +
         " rate=48000 channels=2 channel_map=front-left,front-right "
@@ -267,6 +302,32 @@ std::vector<AudioSink> pulseAudioSinks(std::string& error) {
 #else
   error = "PulseAudio support was unavailable at build time";
   return {};
+#endif
+}
+
+unsigned cleanupStaleSilentSinks(std::string& error) {
+#ifdef MISTERCAST_HAVE_PULSE
+  PulseConnection connection;
+  if (!connection.connect(error)) return 0;
+  std::vector<SinkModule> sinks;
+  if (!connection.wait(pa_context_get_sink_info_list(connection.context(),
+                                                     sinkModuleInfo, &sinks))) {
+    error = "cannot enumerate PulseAudio output sinks";
+    return 0;
+  }
+  unsigned removed = 0;
+  for (const auto& sink : sinks) {
+    if (!isStaleSilentSink(sink.name) || sink.module == PA_INVALID_INDEX)
+      continue;
+    bool unloaded = false;
+    connection.wait(pa_context_unload_module(connection.context(), sink.module,
+                                             successCallback, &unloaded));
+    if (unloaded) ++removed;
+  }
+  return removed;
+#else
+  error = "PulseAudio support was unavailable at build time";
+  return 0;
 #endif
 }
 
