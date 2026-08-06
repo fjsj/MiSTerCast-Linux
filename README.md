@@ -154,8 +154,8 @@ The Linux sender preserves the shared wire invariants: LZ4 when available, 1472-
 #### Windows behaviour not carried over
 
 Beyond the platform stacks replaced above, the following existed in the Windows
-tree and is intentionally absent here. Line references are against commit
-`59d42b2`, the last Windows-era commit, so each claim can be re-checked.
+tree and is intentionally absent here. Line references are against Shane Lynch's
+commit `b7493f9`, the last Windows-era commit, so each claim can be re-checked.
 
 **Never active in the Windows build.** These were capabilities of the bundled
 Groovy_MiSTer client library that MiSTerCast's own call sites could not reach,
