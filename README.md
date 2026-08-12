@@ -144,6 +144,10 @@ The picker is also the reason a Wayland stream starts a little differently: the
 handshake waits for a person, so the GUI blocks while the dialog is up, and the
 CLI prints a line telling you to answer it.
 
+The GUI itself is not a Wayland client. Qt draws it through XWayland while
+capture goes through the portal, which is why `DISPLAY` must be set even on a
+Wayland session. Nothing in MiSTerCast speaks the Wayland protocol.
+
 ### Window capture
 
 Under the portal, window capture is requested the same way but chosen in the

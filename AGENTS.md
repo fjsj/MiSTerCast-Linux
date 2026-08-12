@@ -44,6 +44,7 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
 | `pattern` | pattern parsing, generation, tone, and streaming | UDP 32100 |
 | `cli` | the built `mistercast` binary, one case per argument path | X11, UDP 32100 |
 | `gui` | `MainWindow` driven through its real widgets, offscreen | X11, UDP 32100 |
+| `gui-wayland` | the window starting, restarting and previewing a real portal stream | a Wayland session with a desktop portal, UDP 32100 |
 | `x11` | capture, display connection, and window catalog against a real X server | X11 |
 | `wayland` | the portal handshake, PipeWire negotiation, and delivered frames against a real portal | a Wayland session with a desktop portal |
 | `pulse-audio` | capture and silent-output routing against a private sound server | `pulseaudio` or `pipewire-pulse` |
@@ -61,9 +62,9 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
   anything that replies while `ctest -R session` runs. Fixing it properly means
   guarding all 47 `bindReceiver` call sites — with `if (IsSkipped()) return;`, or
   by moving the bind into a `SetUp()` where `GTEST_SKIP()` does stop the test.
-- `x11`, `wayland`, and `pulse-audio` exit 77 (a ctest skip) when there is no X
-  server, no Wayland session with a portal, or no sound server; everything else
-  must pass everywhere.
+- `x11`, `wayland`, `gui-wayland`, and `pulse-audio` exit 77 (a ctest skip) when
+  there is no X server, no Wayland session with a portal, or no sound server;
+  everything else must pass everywhere.
 - The `pulse-audio` suite runs against whichever sound server the machine has,
   because both implement the protocol the capture code speaks:
   `MISTERCAST_TEST_SOUND_SERVER=pulseaudio|pipewire` forces one. The

@@ -132,4 +132,11 @@ endif()
 if(Qt6_FOUND)
   mistercast_add_test_suite(gui LABEL integration TIMEOUT 900 XVFB PORT_LOCK
     SOURCE_TREE SOURCES gui/gui_tests.cpp LIBRARIES mistercast-gui)
+
+  # The window driving a real portal, which only the Wayland rig can host. Kept
+  # out of the `gui` suite because reaching a real portal captures the screen of
+  # whoever runs it; that is acceptable in the rig and nowhere else.
+  mistercast_add_test_suite(gui-wayland LABEL integration TIMEOUT 900 SKIP_77
+    PORT_LOCK SOURCE_TREE SOURCES gui/gui_portal_tests.cpp
+    LIBRARIES mistercast-gui)
 endif()
