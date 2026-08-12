@@ -2,9 +2,9 @@
 
 MiSTerCast captures an X11 monitor or individual application window, converts it to a selected low-resolution modeline, and streams video and system audio to the unmodified Groovy_MiSTer core over UDP port 32100.
 
-The first Linux release supports Ubuntu 22.04 x86-64 under **X11/Xorg only**. Native Wayland capture is intentionally unsupported. An XWayland display is usable only when it exposes the desktop content; otherwise log into an “Ubuntu on Xorg” session. The application does not discover a MiSTer: enter its IPv4 address or hostname explicitly.
+MiSTerCast supports Ubuntu 22.04 x86-64 under **X11/Xorg only**. It has no native Wayland capture. XWayland works only when it exposes the desktop content; otherwise, log into an “Ubuntu on Xorg” session. Enter the MiSTer's IPv4 address or hostname because MiSTerCast does not discover it automatically.
 
-## Build
+## Install and build
 
 Install Ninja, CMake, a C++17 compiler, Qt 6, XCB/RandR/SHM, PulseAudio, and LZ4 development packages:
 
@@ -16,18 +16,16 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Tests use GoogleTest, which CMake fetches from a pinned release unless a `GTest`
-package is installed; `-DMISTERCAST_USE_SYSTEM_GTEST=ON` requires the installed
-one and never uses the network. Suites that need an X server run under
-`xvfb-run` when it is available, and the X11 and PulseAudio suites report a
-ctest skip rather than a failure when no display or no `pulseaudio` binary is
-present. `ctest -L unit` runs only the suites that need neither. Branch coverage
-is measured with `gcovr`; see `AGENTS.md` for that and for the rest of the
-testing conventions.
+Tests use GoogleTest. CMake fetches a pinned release unless `GTest` is installed.
+Set `-DMISTERCAST_USE_SYSTEM_GTEST=ON` to require the installed package and avoid
+network access. Suites that need an X server use `xvfb-run` when available. The
+X11 and PulseAudio suites skip when no display or `pulseaudio` binary is present.
+Run `ctest -L unit` for suites that need neither. See `AGENTS.md` for `gcovr`
+branch coverage and the remaining test conventions.
 
 Qt is optional at configure time so headless/build-server installations can still build the CLI and core. Without Qt, invoking `mistercast` with no command reports how to enable the GUI.
 
-## Use
+## Usage
 
 Start the GUI with `mistercast`, or inspect and stream from a terminal:
 
@@ -42,21 +40,27 @@ mistercast pattern --target mister.local --content noise --tone \
   --modeline '12.336 640 662 720 784 480 488 494 525 1'
 ```
 
+### CLI options
+
 Use `mistercast stream --help` for all overrides. Overrides last for that run unless `--save` is supplied. Settings are written atomically to `$XDG_CONFIG_HOME/mistercast/config.json`, or `~/.config/mistercast/config.json`. Invalid/corrupt settings fall back to the bundled 320×240 ~60 Hz preset.
 
-`mistercast pattern` is a session-only, capture-independent protocol test. It never loads or changes saved capture settings and does not initialize X11 or PulseAudio. `--content bars` (the default) shows color bars, a flashing latency square, and a frame/field marker. `--content noise` generates deterministic changing low-compressibility pixels to exercise UDP pacing. `--tone` adds a continuous modest 440 Hz stereo S16LE tone paced from elapsed monotonic time. Pattern mode accepts `--target`, `--modeline`, the two interlace-buffer switches, and `--frame-delay 0..10`, and closes cleanly on SIGINT or SIGTERM.
+### Pattern test
 
-In the GUI, set **Source** to **Single window**, click **Choose Window…**, and
-select a visible X11 application window. The choice remains selected for the
-current run, so streaming still begins only when **Start Stream** is pressed.
-Because X11 window IDs are transient and can be reused by another application,
-the window must be selected again after restarting MiSTerCast or loading saved
-settings.
-Minimized or closed windows cannot be captured. Monitor selection is disabled
-in window mode; the normal crop, rotation, sampling, audio, and preview controls
-remain available because they operate on captured window pixels too.
+`mistercast pattern` tests the protocol without capture. It does not load or change saved capture settings or initialize X11 or PulseAudio. `--content bars` (the default) shows color bars, a flashing latency square, and a frame/field marker. `--content noise` generates deterministic, changing, low-compressibility pixels to exercise UDP pacing. `--tone` adds a continuous 440 Hz stereo S16LE tone paced by elapsed monotonic time. Pattern mode accepts `--target`, `--modeline`, both interlace-buffer switches, and `--frame-delay 0..10`. SIGINT and SIGTERM close it cleanly.
 
-### Settings reference
+### Window capture
+
+To capture a window in the GUI, set **Source** to **Single window**, click
+**Choose Window…**, and select a visible X11 application window. The selection
+lasts for the current run. Click **Start Stream** to begin streaming. Select the
+window again after restarting MiSTerCast or loading settings because X11 window
+IDs are temporary and may be reused by another application.
+
+MiSTerCast cannot capture minimized or closed windows. Window mode disables the
+monitor selector but keeps the crop, rotation, sampling, audio, and preview
+controls.
+
+### Configuration reference
 
 The GUI exposes every routine streaming setting except `syncRefresh`. The CLI accepts the overrides shown below; settings without a CLI flag can be changed in the GUI or configuration file.
 
@@ -81,60 +85,131 @@ The GUI exposes every routine streaming setting except `syncRefresh`. The CLI ac
 
 `Save Settings` writes the active GUI values. `Load Settings` reloads the file. CLI `--save` persists that invocation's overrides.
 
+## Audio
+
+Audio uses PulseAudio or `pipewire-pulse` and stereo S16LE. Capture prefers
+48 kHz, then falls back to 44.1 or 22.05 kHz if the selected sink rejects it.
+The GUI's default and named-output choices capture the selected sink's monitor
+while the PC continues playing normally.
+
+For CRT-only sound, choose **MiSTerCast silent output (CRT only)** before starting
+the stream. MiSTerCast creates a temporary null sink, makes it the default, and
+moves active playback into it. This sends audio to MiSTer without playing it
+through the PC speakers. When streaming stops, MiSTerCast restores the previous
+default and playback routes, then removes the temporary sink. Applications that
+select a hardware device directly can bypass the system default. Set those
+applications to the system/default output.
+
+## FAQ and troubleshooting
+
+### Why does MiSTerCast say `DISPLAY is not set`?
+
+Log into an Xorg session and run MiSTerCast from that session.
+
+### Why does the target not acknowledge `CMD_INIT`?
+
+Check the address, confirm that Groovy_MiSTer is running, and make sure UDP port
+32100 is not filtered.
+
+### Why is there no audio?
+
+Make sure PulseAudio or `pipewire-pulse` is running. If CRT-only mode cannot
+create a sink, confirm that the server permits `module-null-sink`, or select an
+existing output. A nonzero PCM level and `MiSTer audio on` confirm capture and
+core negotiation, but not the TV or receiver output route.
+
+### What should I do when a monitor disappears?
+
+Stop streaming, run `mistercast list-monitors`, select the current output, and
+restart the stream.
+
+### Why is there a moving or intermittent tear line?
+
+Keep `syncRefresh` enabled and leave `frameDelay` on automatic. Check that ACK
+misses do not keep increasing and that the sender and FPGA frame numbers remain
+adjacent. Also match the source monitor's refresh rate to the output modeline
+when possible. See [X11 source-display synchronization](#x11-source-display-synchronization)
+for the limits of X11 capture timing.
+
+### Why does interlaced line parity appear to change?
+
+Enable **Stable interlace (progressive framebuffer)**. If the artifact remains,
+it comes before the core framebuffer, such as an X11 source tear, or after it,
+such as display deinterlacing. It is not caused by alternating MiSTer field
+buffers.
+
+### What do `VRAM unsynced` and `VRAM synced/fb` mean?
+
+For `VRAM unsynced`, verify the modeline and route, then check capture FPS,
+stream FPS, and packet errors. `VRAM synced/fb` means the core used its
+non-volatile framebuffer fallback for that sample.
+
+### How should I configure direct Ethernet?
+
+Use a dedicated, non-overlapping subnet without a gateway or DNS. Run
+`ip route get TARGET` and confirm that it reports the Ethernet interface and its
+dedicated source address.
+
+## Technical reference
+
+The sections below describe timing, transport, interlacing, core options, and
+differences from the former Windows implementation. You do not need these
+details for a normal installation.
+
 ### Raster synchronization and diagnostics
 
-With `syncRefresh` enabled, MiSTerCast implements the Groovy_MiSTer client timing loop rather than free-running the PC and MiSTer clocks independently:
+With `syncRefresh` enabled, MiSTerCast uses Groovy_MiSTer's raster feedback to schedule each frame:
 
 1. It decodes the 13-byte ACK containing the echoed frame/scanline, current FPGA frame/scanline, VRAM synchronization and queue state, field, vblank, framebuffer fallback, and audio bit.
 2. Automatic frame delay converts measured capture/transform/network time plus a 1.5 ms safety margin into a nonzero target scanline.
 3. The ACK raster error corrects the next frame deadline without adding a queued frame.
 4. Interlaced streams rebase their frame number and choose the field from FPGA status before transforming pixels. A modeline switch invalidates the old field phase; fields alternate from the core's deterministic reset phase until a matching post-switch ACK locks the sender back to FPGA feedback.
-5. The capture worker takes one frame when requested by the corrected raster cycle; it does not free-run on a second independent refresh clock or flood full-resolution captures.
+5. The corrected raster cycle requests one frame from the capture worker.
 
-The CLI reports the requested sync line, current raster line, sender/FPGA frame numbers, correction, compression/submission/wire times, matched/missed ACKs, current VRAM/queue state, and unique unhealthy FPGA samples every five seconds. Transform timing is shown as a 1/8 EWMA plus the since-start maximum. Field-buffer interlace also reports the outgoing/FPGA field, whether phase is locked, and the number of feedback-driven realignments. The GUI splits its compact diagnostics across wrapping video, transport, and audio rows; percentages keep the layout bounded and tooltips expose raw counters. A small number of startup ACK misses, queue-empty samples, or audio underrun samples can occur while buffers start; counters that continue increasing indicate timing or transport pressure.
+Every five seconds, the CLI reports sync and raster lines, sender and FPGA frame numbers, correction, compression/submission/wire times, ACK counts, VRAM/queue state, and unique unhealthy FPGA samples. Transform timing includes a 1/8 EWMA and the maximum since startup. Field-buffer interlace also reports the outgoing and FPGA fields, phase lock, and feedback-driven realignments. The GUI divides these diagnostics into video, transport, and audio rows. Percentages keep the layout compact, and tooltips show raw counters. A few ACK misses, empty-queue samples, or audio underruns can occur while buffers start. Counters that keep increasing indicate timing or transport pressure.
 
-Video payloads larger than 32 UDP datagrams are released in batches of at most 32 at an average 950 Mb/s. The schedule charges each datagram's actual payload plus Ethernet/IP/UDP wire overhead, including a short final datagram. Commands and audio remain immediate. Positive partial submissions and temporary socket pressure are completed within the calculated wire duration plus a 5–100 ms modeline-derived grace period; failure after a blit command is fatal because another protocol command would otherwise be consumed as unfinished frame data. Status calls the `TIOCOUTQ` result an observed UDP queue high-water because Linux socket accounting is not exact wire-byte accounting.
+Video payloads larger than 32 UDP datagrams are sent in batches of at most 32, averaging 950 Mb/s. Scheduling includes each datagram's actual payload and Ethernet/IP/UDP overhead, including a short final datagram. Commands and audio are sent immediately. MiSTerCast retries partial submissions and temporary socket backpressure until the calculated wire duration plus a modeline-derived grace period of 5–100 ms expires. A failure after a blit command is fatal because the receiver would treat the next protocol command as unfinished frame data. Status labels the `TIOCOUTQ` result as an observed UDP queue high-water mark because Linux socket accounting does not equal the number of bytes on the wire.
 
-Every IPv4 candidate is configured with strict path-MTU enforcement (`IP_PMTUDISC_DO`) before any protocol command is sent. A known connected-route MTU below 1500 is rejected because the fixed 1472-byte UDP payload requires a 1500-byte IPv4 packet; later `EMSGSIZE` errors are reported as path-MTU failures rather than generic send errors. MiSTerCast intentionally does not introduce a second payload size or rely on IPv4 fragmentation. Tunnel, VPN, and interface MTU settings are the usual causes of a rejected route.
+MiSTerCast enables strict path-MTU enforcement (`IP_PMTUDISC_DO`) for every IPv4 candidate before sending protocol commands. It rejects a known connected-route MTU below 1500 because the fixed 1472-byte UDP payload requires a 1500-byte IPv4 packet. Later `EMSGSIZE` errors are reported as path-MTU failures. MiSTerCast neither changes the payload size nor relies on IPv4 fragmentation. Check tunnel, VPN, and interface MTU settings when a route is rejected.
 
-For repeatable CPU comparisons, explicitly build and run the optional transform benchmark:
+For repeatable CPU comparisons, build and run the optional transform benchmark:
 
 ```sh
 cmake --build build --target mistercast-transform-bench
 ./build/mistercast-transform-bench
 ```
 
-It reports median Point, Bilinear, and Line Blend transform times and deterministic checksums for 960×720, 1440×1080, and 2880×2160 sources targeting 320×240. Full two-dimensional Area sampling is intentionally deferred because its scalar cost does not fit the current render-thread critical path.
+It reports median Point, Bilinear, and Line Blend transform times and deterministic checksums for 960×720, 1440×1080, and 2880×2160 sources targeting 320×240. The benchmark does not include full two-dimensional Area sampling.
 
-Synchronization does not introduce a permanent full-frame buffer. Automatic mode deliberately keeps the 1.5 ms safety margin used by the upstream client. Manual frame delay changes sub-frame phase. ACK acquisition is bounded to 2 ms and is accounted inside the existing refresh-period wait.
+Synchronization adds no permanent full-frame buffer. Automatic mode keeps the upstream client's 1.5 ms safety margin. Manual frame delay changes the sub-frame phase. ACK polling has a guaranteed minimum of 2 ms and can continue across the remaining refresh-period wait.
 
-Alternating interlaced field buffers begin with a delivery reserve of half the vertical total. After phase is locked, automatic frame delay is selected, and 300 unique matching ACKs report synchronized VRAM, no framebuffer fallback, and a nonempty VRAM queue, the reserve shrinks by four protocol lines. It never goes below three-eighths of the vertical total. The first unhealthy unique ACK immediately restores the half-field reserve; a missed ACK clears progress toward the next step without moving an already reduced reserve. Duplicate, stale, nonmatching, and pre-switch ACKs do not advance adaptation. Mode switches, reconnects, manual delay, disabled synchronization, progressive output, and progressive-interlace buffering reset or bypass it. At perfect ACK delivery, reaching the floor takes roughly 85 seconds for a 525-line 60 Hz field stream and 120 seconds for a 625-line 50 Hz field stream.
+Alternating interlaced field buffers start with a delivery reserve equal to half the vertical total. The reserve shrinks by four protocol lines after 300 unique matching ACKs when phase is locked, frame delay is automatic, VRAM is synchronized, framebuffer fallback is inactive, and the VRAM queue is not empty. It cannot fall below three-eighths of the vertical total. The first unhealthy unique ACK restores the half-field reserve. A missed ACK clears progress toward the next reduction but does not increase an already reduced reserve. Duplicate, stale, nonmatching, and pre-switch ACKs do not count. Mode switches, reconnects, manual delay, disabled synchronization, progressive output, and progressive-interlace buffering reset or bypass the adjustment. With no missed ACKs, reaching the minimum takes about 85 seconds for a 525-line 60 Hz field stream and 120 seconds for a 625-line 50 Hz field stream.
 
 #### Stable interlaced framebuffer mode
 
-The optional `progressiveInterlaceBuffer` mode uses the receiver's documented `interlace=2` protocol. MiSTerCast transforms and transmits all `vActive` lines on every update, and Groovy_MiSTer stores them in one progressive framebuffer while retaining the interlaced output modeline. This guarantees that MiSTerCast and the core do not switch between two half-height field-buffer indexes during that stream; odd and even output fields are derived from the same line-address space.
+The optional `progressiveInterlaceBuffer` mode uses the receiver's documented `interlace=2` protocol. MiSTerCast transforms and sends all `vActive` lines on every update. Groovy_MiSTer stores them in one progressive framebuffer while retaining the interlaced output modeline. Odd and even output fields use the same line-address space instead of switching between two half-height field-buffer indexes.
 
-This mode roughly doubles the uncompressed video pixels transformed and transmitted per update. Compression can reduce the network increase, but transform/compression time and the automatically selected safe raster margin can grow, and framebuffer fallback can add latency. It does not synchronize X11 capture to the source monitor, repair a source frame that was already torn, or change flicker introduced by the display's deinterlacer. It has no effect on progressive modelines. Leave it off for minimum work/latency; enable it when stable interlaced line identity matters more.
+This mode roughly doubles the uncompressed video pixels transformed and transmitted per update. Compression can reduce the network increase, but transform time, compression time, and the automatic raster margin can grow. Framebuffer fallback can also add latency. The mode cannot synchronize X11 capture to the source monitor, repair an already torn source frame, or change flicker from the display's deinterlacer. It has no effect on progressive modelines. Leave it off for minimum work and latency. Enable it when stable interlaced line identity matters more.
 
 #### X11 source-display synchronization
 
-MiSTer raster feedback controls when MiSTerCast requests its next capture, but XCB image capture is not synchronized to the source monitor's vblank. The PC display and MiSTer therefore remain separate physical clocks. Their phase can drift until an XCB read overlaps a source presentation, producing an occasional source-side torn frame even when ACK timing and Ethernet delivery are healthy.
+MiSTer raster feedback controls when MiSTerCast requests its next capture. XCB image capture is not synchronized to the source monitor's vblank, so the PC display and MiSTer remain separate physical clocks. Their phases can drift until an XCB read overlaps a source presentation. This can produce an occasional torn source frame even when ACK timing and Ethernet delivery are healthy.
 
-When casting NTSC content to a CRT, set the PC/X11 source monitor to 59.94 Hz (60000/1001 Hz) and use a matching NTSC output modeline when possible. NTSC video is timed at this fractional rate, not exact 60.00 Hz; at 60.00 Hz the clocks differ enough to gain or lose about one frame every 17 seconds. The application or compositor must then periodically repeat or drop a frame, or MiSTerCast captures across an update, which can appear on the CRT as regular judder, a moving/intermittent tear line, uneven animation, or fluctuating input latency. Larger refresh mismatches produce the same problems more often. Matching the nominal rates minimizes the correction cadence, although it cannot phase-lock the independent PC and MiSTer oscillators or guarantee tear-free X11 capture.
+When casting NTSC content to a CRT, set the PC/X11 source monitor to 59.94 Hz (60000/1001 Hz) and use a matching NTSC output modeline when possible. NTSC video uses this fractional rate. At exactly 60.00 Hz, the clocks gain or lose about one frame every 17 seconds. The application or compositor must periodically repeat or drop a frame, or MiSTerCast may capture during an update. On the CRT, this can appear as regular judder, a moving or intermittent tear line, uneven animation, or changing input latency. Larger refresh mismatches cause these problems more often. Matching the nominal rates reduces corrections but cannot phase-lock the independent PC and MiSTer oscillators or guarantee tear-free X11 capture.
 
-For the lowest practical latency, enable the source application's low-latency VSync mode and keep its render queue at one frame if those controls are available. A compositor or application mode that uses double buffering can add anywhere from nearly zero to one source refresh of input latency depending on phase; triple buffering, prerendered-frame queues, and frame-generation features can add more. Cap the application close to the source monitor's actual refresh and avoid unbounded or multi-frame queues. If tearing is preferable to added source-side latency, leave application VSync off; MiSTerCast itself does not force it.
+For the lowest practical latency, enable the source application's low-latency VSync mode and limit its render queue to one frame when those controls are available. Double buffering can add up to one source refresh of input latency, depending on phase. Triple buffering, prerendered-frame queues, and frame generation can add more. Cap the application close to the source monitor's actual refresh and avoid unbounded or multi-frame queues. Leave application VSync off if you prefer tearing to added source-side latency. MiSTerCast does not force VSync.
 
-True source-vblank capture would require a different, X11-specific presentation/timing path (for example X Present/DRI integration) and would still need to handle the independent MiSTer clock. Such a mode should remain an explicit latency/tearing tradeoff rather than replacing the current immediate XCB capture path by default.
+Source-vblank capture would require a separate X11 presentation and timing path, such as X Present/DRI integration. It would still need to handle the independent MiSTer clock. This should be an optional latency-versus-tearing mode, not a replacement for immediate XCB capture.
 
 #### Running without raster correction
 
-Setting `syncRefresh` to `false` sends sync line zero and disables ACK-based raster deadline correction. It does not disable local modeline-rate pacing, capture backpressure, audio-before-video ordering, or status ACK collection. The local wait is relative and re-anchors after each completed cycle, so scheduler overshoot lengthens that cycle; the independent PC and MiSTer oscillator error is also left uncorrected. Phase drift and a moving or intermittent tear line are therefore expected over a long run.
+Setting `syncRefresh` to `false` sends sync line zero and disables ACK-based raster deadline correction. Local modeline-rate pacing, capture backpressure, audio-before-video ordering, and status ACK collection remain active. The relative local wait restarts after each completed cycle, so scheduler overshoot lengthens that cycle. It also leaves the difference between the PC and MiSTer oscillators uncorrected. Expect phase drift and a moving or intermittent tear line during long runs.
 
-Use this mode to diagnose receiver/raster-feedback behavior or to opt out deliberately, not as the normal low-tearing configuration. An absolute cumulative PC-side deadline could prevent scheduler overshoot from accumulating, but it could not lock the PC clock to the MiSTer clock without raster feedback. Keep `syncRefresh` at its default `true` for normal streaming.
+Use this mode to diagnose receiver or raster-feedback behavior. An absolute cumulative PC-side deadline could prevent scheduler overshoot from accumulating, but it could not lock the PC clock to the MiSTer clock without raster feedback. Keep the default `syncRefresh` value of `true` for normal streaming.
 
 ### Differences from the legacy Windows implementation
 
-This repository is a Linux replacement, not a cross-platform continuation of the removed WPF/DXGI application.
+MiSTerCast for Linux replaces the former WPF/DXGI application. It is Linux-only.
 
 | Area | Linux implementation | Legacy Windows implementation in repository history |
 | --- | --- | --- |
@@ -149,17 +224,16 @@ This repository is a Linux replacement, not a cross-platform continuation of the
 | Raster feedback | Full ACK decode, automatic sync-line calculation, FPGA frame/field alignment, and ACK-driven wait | Performed by the bundled Groovy_MiSTer `CmdBlit()`/`WaitSync()` client library |
 | Preview | Limited to roughly 10 FPS and scaled before entering Qt | Windows preview callback from captured frames |
 
-The Linux sender preserves the shared wire invariants: LZ4 when available, 1472-byte UDP payloads for an MTU of 1500, audio before its associated video frame, protocol-compatible modeline/frame commands, and `CMD_CLOSE` on orderly shutdown.
+The Linux sender preserves these protocol rules: use LZ4 when available, use 1472-byte UDP payloads for an MTU of 1500, send audio before its associated video frame, retain compatible modeline and frame commands, and send `CMD_CLOSE` on orderly shutdown.
 
 #### Windows behaviour not carried over
 
-Beyond the platform stacks replaced above, the following existed in the Windows
-tree and is intentionally absent here. Line references are against Shane Lynch's
-commit `b7493f9`, the last Windows-era commit, so each claim can be re-checked.
+The Windows tree also contained the features below. They are absent from the
+Linux implementation. Line references use Shane Lynch's commit `b7493f9`, the
+last Windows-era commit.
 
-**Never active in the Windows build.** These were capabilities of the bundled
-Groovy_MiSTer client library that MiSTerCast's own call sites could not reach,
-so nothing observable was lost:
+**Unreachable from the Windows application.** The bundled Groovy_MiSTer client
+library contained these features, but MiSTerCast had no active call path to them:
 
 | Feature | Why it never ran |
 | --- | --- |
@@ -168,7 +242,7 @@ so nothing observable was lost:
 | Registered I/O (RIO) socket path (`groovymister.cpp:22`) | Guarded by `#ifdef _WIN32`; a Windows-only API with no Linux equivalent. The ordinary non-blocking socket path is what both platforms used off Windows. |
 | Network ping measurement (`groovymister.cpp:470-486`) | The ten-sample averaging loop is commented out, leaving `m_network_ping = 0`. The Linux port measures round-trip continuously from real ACKs instead. |
 
-**Deliberately not restored.** These ran, but were inert or wrong:
+**Omitted from the Linux implementation.** These paths ran but had no useful effect:
 
 | Feature | Why it was dropped |
 | --- | --- |
@@ -177,8 +251,7 @@ so nothing observable was lost:
 | Pre-`CMD_CLOSE` flush wait (`renderer_nogpu.h:132`) | Intended one frame period, but `m_period * time_sleep` yields QPC ticks fed to a nanosecond `high_resolution_clock::duration`, giving about 0.17 ms rather than 16.7 ms. It was effectively a no-op. |
 | Fixed 2 ms ACK window | Replaced by polling the socket across the whole pacing wait, which is most of a frame period, so a late ACK still corrects its own frame instead of being counted as missed. |
 
-**Windows defects fixed rather than ported.** The Linux behaviour deliberately
-differs because the original was wrong:
+**Windows defects corrected in the Linux implementation:**
 
 | Defect | Effect |
 | --- | --- |
@@ -201,13 +274,7 @@ These are MiSTer-side options rather than MiSTerCast configuration:
 | PWM | Does not change Linux capture, UDP pacing, compression, or raster synchronization; select it for the intended MiSTer video/output hardware behavior. |
 | Audio | Must be enabled/routed on the core and output device if sound is wanted. `MiSTer audio on` in sender status confirms the ACK audio bit, not the TV/receiver output route. |
 
-## Audio
-
-Audio uses PulseAudio or `pipewire-pulse`, stereo S16LE at 48 kHz. The GUI's default and named-output choices capture that sink's monitor while the PC continues playing normally.
-
-For CRT-only sound, choose **MiSTerCast silent output (CRT only)** before starting the stream. MiSTerCast creates a temporary null sink, makes it the default, and moves active playback into it, so its audio is captured for MiSTer without reaching PC speakers. On stop, the prior default and active-stream routes are restored and the temporary sink is removed. Applications that explicitly force a hardware device can bypass the system default; set those applications to the system/default output.
-
-## Packages
+## Packaging
 
 Create a Debian package from a release build:
 
@@ -222,17 +289,13 @@ cmake --install build --prefix AppDir/usr
 ./packaging/build-appimage.sh AppDir
 ```
 
-## Troubleshooting and hardware validation
+## Release validation
 
-- `DISPLAY is not set`: log into Xorg and run from that session.
-- `target did not acknowledge CMD_INIT`: verify the address, Groovy_MiSTer is running, and UDP/32100 is not filtered.
-- Audio errors: ensure PulseAudio/pipewire-pulse is running. If CRT-only mode cannot create a sink, verify that the server permits `module-null-sink`; otherwise select an existing output.
-- Monitor disappeared: stop, run `list-monitors`, select the current output, and restart.
-- Moving or intermittent tear line: keep `syncRefresh` enabled and `frameDelay` at automatic first. Check that ACK misses do not keep increasing and that sender/FPGA frame numbers remain adjacent.
-- Interlaced line parity/index appears to change: enable `Stable interlace (progressive framebuffer)`. If the artifact remains, it originates before the core framebuffer (for example an X11 source tear) or after it (display deinterlacing), rather than from alternating MiSTer field buffers.
-- `VRAM unsynced`: verify the modeline and route, then check capture/stream FPS and packet errors. `VRAM synced/fb` means the core used its non-volatile framebuffer fallback for that sample.
-- Direct Ethernet: use a dedicated non-overlapping subnet without gateway or DNS, and confirm `ip route get TARGET` names the Ethernet interface and its dedicated source address.
-
-Before a release, validate primary and secondary monitors on real MiSTer hardware; progressive and interlaced presets; crop, offsets and rotations; preview; 48/44.1 kHz audio; resolution changes and unreachable-target recovery. Run continuously for at least 30 minutes, then confirm stop/restart and application termination always leave the core ready for another connection.
+Before a release, validate primary and secondary monitors on real MiSTer
+hardware. Cover progressive and interlaced presets, crop, offsets, rotations,
+preview, 48 and 44.1 kHz audio, resolution changes, and recovery from an
+unreachable target. Run continuously for at least 30 minutes. Then confirm that
+stopping, restarting, and exiting the application leave the core ready for
+another connection.
 
 The Groovy_MiSTer wire protocol portions retain their original BSD-3-Clause lineage from GroovyMAME/Groovy_MiSTer.
