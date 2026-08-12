@@ -82,6 +82,15 @@ is drawn by the host desktop as usual. The window itself is drawn through
 XWayland, so `DISPLAY` must be set even there: the image carries only Qt's `xcb`
 platform plugin, and no part of it speaks the Wayland protocol.
 
+That path also runs the container with `--security-opt apparmor=unconfined`, and
+only that path. Ubuntu's `dbus-daemon` enforces AppArmor D-Bus mediation and
+Docker's `docker-default` profile grants none of it, so without the flag the
+container's first D-Bus message is refused with `An AppArmor policy prevents
+this sender from sending this message` and every later call merely reports the
+connection as not connected. It is real confinement given up to reach the
+portal. A native install needs none of it, and is the better choice on a machine
+where that matters.
+
 ## Usage
 
 Start the GUI with `mistercast`, or inspect and stream from a terminal:
@@ -419,5 +428,11 @@ preview, 48 and 44.1 kHz audio, resolution changes, and recovery from an
 unreachable target. Run continuously for at least 30 minutes. Then confirm that
 stopping, restarting, and exiting the application leave the core ready for
 another connection.
+
+Validate both capture backends, because they fail differently. Compare `capture`
+against `video` in the counters: on the portal backend they should track each
+other, and a `capture` rate well below `video` means frames are reaching the
+MiSTer stale. Also confirm that the first stream shows the desktop's dialog, the
+second does not, and that deleting `portal-token` brings the dialog back.
 
 The Groovy_MiSTer wire protocol portions retain their original BSD-3-Clause lineage from GroovyMAME/Groovy_MiSTer.

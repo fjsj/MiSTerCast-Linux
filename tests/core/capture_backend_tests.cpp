@@ -114,6 +114,12 @@ TEST(SessionEnvironment, ReportsAnUnsetVariableAsEmptyRatherThanCrashing) {
 // than on a type keeps the backends free of accessors that exist only for tests.
 TEST(MakeVideoCapture, BuildsTheBackendItWasAskedFor) {
   const ScopedEnvironment display("DISPLAY", "");
+  // No reachable portal, on purpose: with one, and with a grant already stored,
+  // this would start a real capture of the screen of whoever is running the
+  // suite. Which backend was built is still observable, because only the X11 one
+  // has anything to say about DISPLAY.
+  const ScopedEnvironment bus("DBUS_SESSION_BUS_ADDRESS",
+                              "unix:path=/nonexistent/no-such-bus");
   std::optional<SessionError> x11Error;
   auto x11 = makeVideoCapture(CaptureBackend::X11);
   ASSERT_TRUE(x11);
@@ -125,13 +131,8 @@ TEST(MakeVideoCapture, BuildsTheBackendItWasAskedFor) {
   std::optional<SessionError> portalError;
   auto portal = makeVideoCapture(CaptureBackend::Portal);
   ASSERT_TRUE(portal);
-  // With a real portal reachable this succeeds, which on its own proves the
-  // portal backend was built: no X11 capture can start without a DISPLAY.
-  if (portal->start(MonitorCaptureSource{},
-                    [&](SessionError error) { portalError = error; })) {
-    portal->stop();
-    return;
-  }
+  EXPECT_FALSE(portal->start(MonitorCaptureSource{},
+                             [&](SessionError error) { portalError = error; }));
   ASSERT_TRUE(portalError);
   EXPECT_THAT(portalError->message, testing::Not(testing::HasSubstr("DISPLAY")));
 }

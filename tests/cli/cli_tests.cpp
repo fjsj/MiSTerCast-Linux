@@ -143,25 +143,29 @@ TEST(Cli, CheckReportsCaptureHealthAndTheConfigurationPath) {
 
 // Asking for the portal exercises the whole Wayland start path short of the
 // portal itself: the backend resolves, the stored grant is looked for, and the
-// dialog notice is printed before anything can fail. What it fails with depends
-// on the build, and both answers have to name something the user can act on.
+// dialog notice is printed before anything can fail.
+//
+// The session bus is pointed at nothing on purpose. On a developer's own desktop
+// this would otherwise reach the real portal, and with a grant already stored it
+// would succeed -- starting an actual screen capture of whoever is running the
+// suite, and taking the full run to time out. Tests do not get to look at the
+// screen, for the same reason the audio suite runs its own sound server.
 TEST(Cli, StreamingThroughThePortalReportsWhyItCouldNotStart) {
   const TemporaryDirectory directory("cli-portal-stream");
-  const auto result =
-      run({"stream", "--target", "127.0.0.1", "--backend", "portal",
-           "--no-audio"},
-          withEnvironment({{"XDG_CONFIG_HOME", directory.path().string()}},
-                          std::chrono::seconds(20)));
+  const auto result = run(
+      {"stream", "--target", "127.0.0.1", "--backend", "portal", "--no-audio"},
+      withEnvironment(
+          {{"XDG_CONFIG_HOME", directory.path().string()},
+           {"DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/no-such-bus"}},
+          std::chrono::seconds(20)));
   EXPECT_TRUE(result.exitedWith(1)) << result.out;
   EXPECT_THAT(result.err, HasSubstr("screen-sharing dialog"))
       << "the first run has to say that something is waiting to be answered";
 #ifdef MISTERCAST_HAVE_PORTAL
-  // No portal is reachable from the test environment, so the handshake is what
-  // fails; which step it names depends on what is running.
-  EXPECT_THAT(result.err, HasSubstr("Start failed"));
+  EXPECT_THAT(result.err, HasSubstr("session bus"));
+  EXPECT_THAT(result.err, HasSubstr("Hint:")) << "the hint is the actionable half";
 #else
   EXPECT_THAT(result.err, HasSubstr("no Wayland screen capture"));
-  // The hint names the packages to install, which is the only actionable half.
   EXPECT_THAT(result.err, HasSubstr("libpipewire"));
 #endif
 }

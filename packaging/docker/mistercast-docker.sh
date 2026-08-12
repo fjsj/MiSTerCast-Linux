@@ -85,6 +85,17 @@ fi
 # same way it would natively. Neither the Wayland socket nor a Wayland Qt plugin
 # is involved.
 if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = wayland ]; then
+  # Ubuntu's dbus-daemon enforces AppArmor D-Bus mediation, and Docker's
+  # docker-default profile grants none: without this the container's very first
+  # Hello is refused with "An AppArmor policy prevents this sender from sending
+  # this message", every later call reports the connection as simply not
+  # connected, and nothing about that names AppArmor. It is confinement given up
+  # to reach the portal, so it is applied only on the Wayland path, and only
+  # because there is no narrower option -- a profile that is docker-default plus
+  # dbus rules would need installing as root before the first run. The container
+  # already shares this session's bus, X11 socket, network, and IPC namespace; a
+  # native install is the way to avoid all of that.
+  set -- --security-opt apparmor=unconfined "$@"
   bus_path=${DBUS_SESSION_BUS_ADDRESS#unix:path=}
   bus_path=${bus_path%%,*}
   if [ -S "${bus_path:-/nonexistent}" ]; then

@@ -525,9 +525,17 @@ class PortalCapture final : public IVideoCapture {
   bool next(Frame& out, std::chrono::milliseconds timeout) override {
     if (!running_) return false;
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait_for(lock, timeout, [this] {
-      return failure_.has_value() || pendingCount_ > deliveredCount_;
-    });
+    // Only the first frame is worth waiting for. Once one is held, waiting for a
+    // newer one spends the caller's whole timeout before handing back what was
+    // already available -- and on real hardware that showed up as capture
+    // running at 24 fps against a 60 Hz stream, every frame up to 100 ms stale,
+    // because a compositor emits nothing at all while the screen is still. The
+    // raster cycle is what paces these calls, so returning immediately cannot
+    // spin.
+    if (!pendingCount_)
+      cv_.wait_for(lock, timeout, [this] {
+        return failure_.has_value() || pendingCount_ > 0;
+      });
     if (failure_) {
       const auto reported = *failure_;
       failure_.reset();

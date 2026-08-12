@@ -180,9 +180,28 @@ bool PortalScreenCast::ensureBus(SessionError& error) {
              "DBUS_SESSION_BUS_ADDRESS points at it."};
     return false;
   }
+  // sd_bus_open_user() may return before the connection has finished
+  // authenticating, and until it has, there is no unique name to ask for. One
+  // round trip forces it: without this, the name comes back empty on some
+  // bus/libsystemd combinations, every Request path is built as
+  // ".../request//token" -- an invalid object path -- and the first
+  // sd_bus_match_signal fails for a reason that names nothing.
+  sd_bus_error pingFailure = SD_BUS_ERROR_NULL;
+  sd_bus_call_method(bus_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                     "org.freedesktop.DBus.Peer", "Ping", &pingFailure, nullptr,
+                     "");
+  sd_bus_error_free(&pingFailure);
   const char* unique = nullptr;
-  sd_bus_get_unique_name(bus_, &unique);
-  senderToken_ = senderToken(unique);
+  const int named = sd_bus_get_unique_name(bus_, &unique);
+  senderToken_ = named >= 0 ? senderToken(unique) : std::string{};
+  if (senderToken_.empty()) {
+    error = {"video",
+             std::string("the desktop session bus gave this process no name: ") +
+                 std::strerror(named < 0 ? -named : EINVAL),
+             "Check that DBUS_SESSION_BUS_ADDRESS points at your own session "
+             "bus and that the socket is readable."};
+    return false;
+  }
   return true;
 }
 
@@ -239,10 +258,14 @@ bool PortalScreenCast::call(
   resultParser_ = &results;
   sd_bus_slot_unref(responseSlot_);
   responseSlot_ = nullptr;
-  if (sd_bus_match_signal(bus_, &responseSlot_, kService, expected.c_str(),
-                          kRequest, "Response", PortalScreenCast::onResponseSignal, this) < 0) {
-    error = {"video", std::string("cannot watch the portal ") + method +
-                          " request",
+  const int watched =
+      sd_bus_match_signal(bus_, &responseSlot_, kService, expected.c_str(),
+                          kRequest, "Response",
+                          PortalScreenCast::onResponseSignal, this);
+  if (watched < 0) {
+    error = {"video",
+             std::string("cannot watch the portal ") + method + " request: " +
+                 std::strerror(watched < 0 ? -watched : EINVAL),
              "Check that the desktop session bus is still running."};
     return false;
   }
