@@ -22,6 +22,7 @@ Some Windows behaviour is absent on purpose because it was unreachable, inert, o
   ```
 
 - Run ASan/UBSan for changes affecting buffers, pixel conversion, queues, audio, or lifecycle. LeakSanitizer may need `ASAN_OPTIONS=detect_leaks=0` in ptrace-based sandboxes.
+- `packaging/docker/` holds the container distribution (`Dockerfile`, `mistercast-docker.sh`, `smoke-test.sh`; usage in `README.md`), published as `ghcr.io/fjsj/mistercast-linux` by `.github/workflows/docker.yml`. When the build or runtime dependencies in `CMakeLists.txt` change, update the Dockerfile's apt lists to match.
 - Keep `git diff --check` clean. Preserve unrelated user changes and do not commit generated build/package artifacts.
 
 ## Tests

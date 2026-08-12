@@ -25,6 +25,36 @@ branch coverage and the remaining test conventions.
 
 Qt is optional at configure time so headless/build-server installations can still build the CLI and core. Without Qt, invoking `mistercast` with no command reports how to enable the GUI.
 
+## Run with Docker
+
+Run MiSTerCast without the build dependencies. Docker and an X11/Xorg
+session are all that is required:
+
+```sh
+./packaging/docker/mistercast-docker.sh                         # GUI
+./packaging/docker/mistercast-docker.sh stream --target 192.168.1.50
+./packaging/docker/mistercast-docker.sh pattern --target 192.168.1.50 --tone
+```
+
+The script pulls `ghcr.io/fjsj/mistercast-linux:latest` on every launch, so
+published updates arrive automatically. When the pull fails it runs the local
+copy, or builds the image inside a source checkout. Set `MISTERCAST_BUILD=1`
+to force a local build, or `MISTERCAST_IMAGE` to run a different image.
+Without a checkout, download just the script:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/fjsj/MiSTerCast-Linux/main/packaging/docker/mistercast-docker.sh
+chmod +x mistercast-docker.sh
+./mistercast-docker.sh
+```
+
+The container shares the host network (UDP port 32100 and the required
+1500-byte path MTU), the host IPC namespace (MIT-SHM capture), the X11
+socket, and the PulseAudio or `pipewire-pulse` socket, and it runs as the
+invoking user. Settings persist in the same `mistercast/config.json` under
+`$XDG_CONFIG_HOME` or `~/.config` as a native install. Enter the MiSTer's
+IPv4 address because `.local` mDNS names do not resolve inside the container.
+
 ## Usage
 
 Start the GUI with `mistercast`, or inspect and stream from a terminal:

@@ -1,0 +1,11 @@
+# Keep local build artifacts and VCS data out of the Docker build context.
+.git
+.github
+.claude
+build*
+out
+AppDir
+package-root
+_CPack_Packages
+*.deb
+*.AppImage
