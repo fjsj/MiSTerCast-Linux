@@ -313,6 +313,10 @@ int PortalScreenCast::onClosedSignal(sd_bus_message*, void* userdata,
 bool PortalScreenCast::open(const Request& request, PortalStream& out,
                             SessionError& error) {
   if (!ensureBus(error)) return false;
+  // Cleared before the first call rather than after CreateSession: a previous
+  // session's closure would otherwise make this handshake's very first wait
+  // return as though the new session had already ended.
+  sessionClosed_ = false;
   uint32_t version = 1;
   const bool haveVersion = portalProperty(bus_, "version", version);
   uint32_t cursorModes = 0;

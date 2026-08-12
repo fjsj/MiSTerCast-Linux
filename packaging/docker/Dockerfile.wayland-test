@@ -1,0 +1,44 @@
+# Test rig for the Wayland capture backend. It carries a whole miniature
+# Wayland desktop -- a headless compositor, PipeWire, and a desktop portal --
+# because the portal path cannot be faked usefully: what is worth testing is the
+# real CreateSession/SelectSources/Start handshake and a real PipeWire buffer.
+#
+# Built by packaging/docker/wayland-test.sh, which also runs the suite. Not
+# published: the shipping image is packaging/docker/Dockerfile.
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+ARG DEBIAN_FRONTEND=noninteractive
+
+# libgl1-mesa-dev is required for find_package(Qt6) to succeed: Qt6Gui's CMake
+# config needs OpenGL, and Qt is only QUIET-optional in CMakeLists.txt.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build pkg-config libgl1-mesa-dev \
+      qt6-base-dev libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev \
+      libxcb-shm0-dev libpulse-dev liblz4-dev \
+      libpipewire-0.3-dev libsystemd-dev \
+      libgtest-dev libgmock-dev ca-certificates \
+      qt6-qpa-plugins fontconfig fonts-dejavu-core xvfb \
+      sway wlr-randr \
+      libgl1-mesa-dri libegl1 libgles2 libgbm1 \
+      pipewire pipewire-pulse wireplumber pulseaudio-utils \
+      xdg-desktop-portal xdg-desktop-portal-wlr \
+      dbus dbus-x11 systemd \
+    && apt-get clean
+
+# chooser_type=none makes the portal grant the request without a picker, which is
+# what lets an unattended run exercise Start at all. It is a property of this rig
+# only; a real desktop always asks.
+RUN mkdir -p /root/.config/xdg-desktop-portal-wlr \
+    && printf '[screencast]\nchooser_type=none\nmax_fps=60\n' \
+       > /root/.config/xdg-desktop-portal-wlr/config
+
+# Sway with nothing in it: no bar, no terminal, no keybindings that could grab a
+# device the headless backend does not have, and no XWayland, whose binary is not
+# installed and whose failure to start is only noise here.
+RUN mkdir -p /root/.config/sway \
+    && printf 'default_border none\nfont pango:monospace 8\nxwayland disable\n' \
+       > /root/.config/sway/config
+
+COPY packaging/docker/wayland-test-session.sh /usr/local/bin/wayland-test-session
+RUN chmod +x /usr/local/bin/wayland-test-session
+ENTRYPOINT ["/usr/local/bin/wayland-test-session"]

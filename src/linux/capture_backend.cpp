@@ -1,5 +1,6 @@
 #include <cstdlib>
 
+#include "mistercast/config.hpp"
 #include "mistercast/interfaces.hpp"
 
 namespace mistercast {
@@ -24,6 +25,20 @@ CaptureBackend resolveCaptureBackend(CaptureBackend requested,
   // answer than the portal: its "DISPLAY is not set" failure names the one
   // thing the user can act on, where a portal failure would blame D-Bus.
   return CaptureBackend::X11;
+}
+
+PortalCaptureOptions portalOptionsFromTokenFile(
+    const std::string& tokenPath,
+    std::function<void(const std::string&)> onWarning) {
+  PortalCaptureOptions options;
+  options.restoreToken = loadPortalRestoreToken(tokenPath);
+  options.onRestoreToken = [tokenPath, warn = std::move(onWarning)](
+                               const std::string& token) {
+    std::string error;
+    if (savePortalRestoreToken(token, tokenPath, error) || !warn) return;
+    warn("Cannot remember the screen-sharing permission: " + error);
+  };
+  return options;
 }
 
 std::unique_ptr<IVideoCapture> makeVideoCapture(CaptureBackend requested,

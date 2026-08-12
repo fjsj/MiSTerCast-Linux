@@ -114,11 +114,18 @@ install(FILES data/mistercast.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hic
 
 set(CPACK_GENERATOR "DEB")
 set(CPACK_PACKAGE_CONTACT "MiSTerCast maintainers")
+set(MISTERCAST_DEB_DEPENDS
+  "libxcb1, libxcb-composite0, libxcb-shm0, libpulse0, liblz4-1")
 if(Qt6_FOUND)
-  set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6widgets6 (>= 6.2), libxcb1, libxcb-composite0, libxcb-randr0, libxcb-shm0, libpulse0, liblz4-1")
-else()
-  set(CPACK_DEBIAN_PACKAGE_DEPENDS "libxcb1, libxcb-composite0, libxcb-shm0, libpulse0, liblz4-1")
+  string(APPEND MISTERCAST_DEB_DEPENDS
+    ", libqt6widgets6 (>= 6.2), libxcb-randr0")
 endif()
+# The Wayland backend's runtime halves. Listed only when it was built, so a
+# package from a host without the development files does not claim to need them.
+if(PIPEWIRE_FOUND AND SDBUS_FOUND)
+  string(APPEND MISTERCAST_DEB_DEPENDS ", libpipewire-0.3-0, libsystemd0")
+endif()
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "${MISTERCAST_DEB_DEPENDS}")
 set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 include(CPack)
 

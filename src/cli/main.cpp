@@ -70,26 +70,27 @@ int main(int argc, char** argv) {
     const auto backend = activeBackend(loadGroovyConfig(configPath())
                                            .source.captureBackend);
     if (backend == CaptureBackend::Portal) {
-      if (!portalCaptureAvailable()) {
-        std::cerr << "This is a Wayland session, but this build has no Wayland "
-                     "capture.\nRebuild with libpipewire-0.3-dev and "
-                     "libsystemd-dev, or log into an Xorg session.\n";
-        return 1;
-      }
       // Enumerating outputs is not part of the ScreenCast portal: the desktop's
       // own dialog owns that choice, which is the point of the portal.
       std::cout << "Capture backend: portal (Wayland)\nMonitors are chosen in "
                    "the desktop's screen-sharing dialog, so there is nothing "
                    "to list and --monitor has no effect.\n";
-      if (command == "check")
-        std::cout << "Configuration: " << configPath()
-                  << "\nSaved portal permission: "
-                  << (loadPortalRestoreToken(portalRestoreTokenPath()).empty()
-                          ? "none; the dialog will ask on the next stream"
-                          : std::string("yes (") +
-                                portalRestoreTokenPath().string() + ")")
+      if (command != "check") return 0;
+      std::cout << "Configuration: " << configPath() << "\n";
+      if (loadPortalRestoreToken(portalRestoreTokenPath()).empty())
+        std::cout << "Saved portal permission: none; the dialog will ask on "
+                     "the next stream\n";
+      else
+        std::cout << "Saved portal permission: " << portalRestoreTokenPath()
                   << "\n";
-      return 0;
+      // Reported after the rest, and only by check, whose job is to say whether
+      // this machine can actually stream. list-monitors still explains who picks
+      // the source, because that is true of any build.
+      if (portalCaptureAvailable()) return 0;
+      std::cerr << "This build has no Wayland capture. Rebuild with "
+                   "libpipewire-0.3-dev and libsystemd-dev, or log into an "
+                   "Xorg session.\n";
+      return 1;
     }
     std::string e;
     auto ms = x11Monitors(e);
@@ -244,19 +245,14 @@ int main(int argc, char** argv) {
                  "at roughly 3-5x the bandwidth.\n";
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
-  const auto backend = activeBackend(c.source.captureBackend);
   PortalCaptureOptions portal;
-  if (backend == CaptureBackend::Portal) {
-    portal.restoreToken = loadPortalRestoreToken(portalRestoreTokenPath());
-    portal.onRestoreToken = [](const std::string& token) {
-      // Written whenever the portal issues one, so the next run streams without
-      // a dialog. It is cached permission state, not a setting, so --save has no
-      // say in it.
-      std::string tokenError;
-      if (!savePortalRestoreToken(token, portalRestoreTokenPath(), tokenError))
-        std::cerr << "Cannot remember the screen-sharing permission: "
-                  << tokenError << "\n";
-    };
+  if (activeBackend(c.source.captureBackend) == CaptureBackend::Portal) {
+    // The grant is remembered as soon as the portal issues one, so only the
+    // first run has to be answered. It is cached permission state rather than a
+    // setting, so --save has no say in it.
+    portal = portalOptionsFromTokenFile(
+        portalRestoreTokenPath(),
+        [](const std::string& warning) { std::cerr << warning << "\n"; });
     if (portal.restoreToken.empty())
       std::cerr << "Waiting for the desktop screen-sharing dialog; choose a "
                    "screen and allow sharing.\n";
@@ -267,9 +263,14 @@ int main(int argc, char** argv) {
   if (!session.start(
           c, MonitorCaptureSource{c.source.monitor},
           [](SessionState s, const std::optional<SessionError>& x) {
-            if (x)
+            if (x) {
               std::cerr << x->component << ": " << x->message << "\n";
-            else if (s == SessionState::Streaming)
+              // The hint is the half the user can act on, and it was being
+              // dropped: a missing portal, a vanished monitor, and a sound
+              // server that will not load a null sink all report what to do
+              // next only here. The GUI has always shown it.
+              if (!x->hint.empty()) std::cerr << "Hint: " << x->hint << "\n";
+            } else if (s == SessionState::Streaming)
               std::cerr << "Streaming; press Ctrl-C to stop.\n";
           },
           &e)) {

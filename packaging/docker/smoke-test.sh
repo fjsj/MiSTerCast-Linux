@@ -10,4 +10,10 @@ docker run --rm "$image" list-modelines >/dev/null
 # binary exits 2 immediately, so this check fails closed.
 docker run --rm -e QT_QPA_PLATFORM=offscreen -e HOME=/tmp --entrypoint sh "$image" \
   -c 'timeout 3 mistercast; test "$?" -eq 124'
+# Told it is on a Wayland session, the image must reach for the portal backend
+# rather than an X server. An image built without libpipewire or libsystemd fails
+# here instead of shipping and failing on a user's desktop -- which is the one
+# platform this cannot be tested on afterwards.
+docker run --rm -e WAYLAND_DISPLAY=wayland-0 -e XDG_SESSION_TYPE=wayland \
+  -e HOME=/tmp "$image" check | grep -q 'backend: portal'
 echo "smoke test passed: $image"

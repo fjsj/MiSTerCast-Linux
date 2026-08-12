@@ -197,7 +197,7 @@ TEST(SaveGroovyConfig, ReportsAnUnwritableDirectory) {
   std::filesystem::permissions(nested, std::filesystem::perms::owner_all);
   if (::geteuid() == 0) GTEST_SKIP() << "root ignores directory permissions";
   EXPECT_FALSE(saved);
-  EXPECT_EQ(error, "cannot create temporary configuration");
+  EXPECT_EQ(error, "cannot create temporary file");
 }
 
 TEST(SaveGroovyConfig, ReportsAFailedAtomicReplacement) {
@@ -234,7 +234,7 @@ TEST(SaveGroovyConfig, ReportsAWriteThatCannotBeCompleted) {
   ASSERT_EQ(::setrlimit(RLIMIT_FSIZE, &original), 0);
   ASSERT_EQ(::sigaction(SIGXFSZ, &previous, nullptr), 0);
   EXPECT_FALSE(saved);
-  EXPECT_EQ(error, "failed writing configuration");
+  EXPECT_EQ(error, "failed writing file");
   EXPECT_TRUE(std::filesystem::is_empty(directory.path()))
       << "neither the configuration nor the temporary file may remain";
 }
@@ -371,8 +371,11 @@ TEST(PortalRestoreToken, RoundTripsAndIsReadableOnlyByItsOwner) {
   const TemporaryDirectory directory("portal-token");
   const auto path = directory.path() / "portal-token";
   std::string error;
-  ASSERT_TRUE(savePortalRestoreToken("abc123-DEF", path, error)) << error;
-  EXPECT_EQ(loadPortalRestoreToken(path), "abc123-DEF");
+  // A UUID, because that is the only shape a portal issues and the only shape
+  // that is passed back to one.
+  constexpr const char* token = "6b1f2c3d-4e5a-6789-abcd-ef0123456789";
+  ASSERT_TRUE(savePortalRestoreToken(token, path, error)) << error;
+  EXPECT_EQ(loadPortalRestoreToken(path), token);
   // A capture-permission handle must not be left group- or world-readable.
   const auto permissions = std::filesystem::status(path).permissions();
   EXPECT_EQ(permissions & (std::filesystem::perms::group_all |
@@ -390,22 +393,25 @@ TEST(PortalRestoreToken, IsAbsentRatherThanEmptyWhenNeverWritten) {
               IsEmpty());
 }
 
-// Portals mint printable identifiers. A file holding anything else was not
-// written by this code, and forwarding it would only produce a confusing
-// SelectSources failure instead of the picker the user expects.
-TEST(PortalRestoreToken, RejectsATokenThatCannotHaveComeFromAPortal) {
+// xdg-desktop-portal requires a restore token to be a UUID and answers
+// SelectSources with an error rather than a picker when it is not, so a file that
+// cannot hold one is treated as absent: an edited or truncated file should cost a
+// dialog, not a failed stream.
+TEST(PortalRestoreToken, RejectsATokenNoPortalCouldHaveIssued) {
   const TemporaryDirectory directory("portal-token-invalid");
-  EXPECT_THAT(loadPortalRestoreToken(
-                  directory.write("spaces", "has a space\n")),
-              IsEmpty());
-  EXPECT_THAT(loadPortalRestoreToken(
-                  directory.write("control", std::string("tab\there\n"))),
-              IsEmpty());
-  EXPECT_THAT(loadPortalRestoreToken(directory.write(
-                  "long", std::string(600, 'a') + "\n")),
-              IsEmpty());
-  EXPECT_THAT(loadPortalRestoreToken(directory.write("empty", "\n")),
-              IsEmpty());
+  const auto rejected = [&](const char* name, const std::string& contents) {
+    EXPECT_THAT(loadPortalRestoreToken(directory.write(name, contents)),
+                IsEmpty())
+        << name;
+  };
+  rejected("empty", "\n");
+  rejected("spaces", "has a space\n");
+  rejected("control", std::string("6b1f2c3d-4e5a-6789-abcd-ef012345678\t\n"));
+  rejected("short", "6b1f2c3d-4e5a-6789-abcd-ef0123456\n");
+  rejected("long", std::string(600, 'a') + "\n");
+  rejected("not-hex", "6b1f2c3d-4e5a-6789-abcd-ef012345678z\n");
+  rejected("misplaced-dashes", "6b1f2c3d4-e5a-6789-abcd-ef0123456789\n");
+  rejected("no-dashes", "6b1f2c3d4e5a6789abcdef01234567890000\n");
 }
 
 TEST(LoadGroovyConfig, AnUnknownSamplingModeFallsBackToSafeDefaults) {

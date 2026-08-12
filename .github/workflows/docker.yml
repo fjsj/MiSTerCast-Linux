@@ -26,6 +26,9 @@ jobs:
           file: packaging/docker/Dockerfile
           load: true
           tags: mistercast-smoke
+          # Named rather than left to the Dockerfile's default, so the published
+          # base is visible here and a change to it is a change to this file.
+          build-args: BASE=ubuntu:24.04
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test

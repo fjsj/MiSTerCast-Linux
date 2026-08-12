@@ -44,6 +44,18 @@ ProcessOptions withEnvironment(
   return options;
 }
 
+// The monitor commands describe the X11 backend, and backend selection reads the
+// session environment, so the X11 cases pin that environment instead of
+// inheriting whatever session the suite runs in -- the Wayland test rig in
+// packaging/docker/ runs this suite too, and there the inherited answer is the
+// portal.
+ProcessOptions inX11Session(
+    std::vector<std::pair<std::string, std::string>> variables = {}) {
+  variables.insert(variables.begin(), {{"WAYLAND_DISPLAY", ""},
+                                       {"XDG_SESSION_TYPE", "x11"}});
+  return withEnvironment(std::move(variables));
+}
+
 bool displayAvailable() {
   const char* display = ::getenv("DISPLAY");
   return display && *display;
@@ -94,7 +106,7 @@ TEST(Cli, ListsTheBundledModelinesWithoutNeedingADisplay) {
 
 TEST(Cli, ListMonitorsAndCheckExplainAMissingDisplay) {
   for (const char* command : {"list-monitors", "check"}) {
-    const auto result = run({command}, withEnvironment({{"DISPLAY", ""}}));
+    const auto result = run({command}, inX11Session({{"DISPLAY", ""}}));
     EXPECT_TRUE(result.exitedWith(1)) << command;
     EXPECT_THAT(result.err, HasSubstr("DISPLAY"));
   }
@@ -102,7 +114,7 @@ TEST(Cli, ListMonitorsAndCheckExplainAMissingDisplay) {
 
 TEST(Cli, ListsMonitorsOnTheCurrentDisplay) {
   if (!displayAvailable()) GTEST_SKIP() << "no X11 display available";
-  const auto result = run({"list-monitors"});
+  const auto result = run({"list-monitors"}, inX11Session());
   ASSERT_TRUE(result.exitedWith(0)) << result.err;
   // name<TAB>WIDTHxHEIGHT+X+Y, one line per monitor. Whether any is flagged
   // primary depends on the server, so only the shape is asserted.
@@ -121,12 +133,90 @@ TEST(Cli, ListsMonitorsOnTheCurrentDisplay) {
 TEST(Cli, CheckReportsCaptureHealthAndTheConfigurationPath) {
   if (!displayAvailable()) GTEST_SKIP() << "no X11 display available";
   const TemporaryDirectory directory("cli-check");
-  const auto result =
-      run({"check"}, withEnvironment({{"XDG_CONFIG_HOME", directory.path().string()}}));
+  const auto result = run(
+      {"check"}, inX11Session({{"XDG_CONFIG_HOME", directory.path().string()}}));
   ASSERT_TRUE(result.exitedWith(0)) << result.err;
   EXPECT_THAT(result.out, HasSubstr("X11 capture: OK"));
   EXPECT_THAT(result.out,
               HasSubstr((directory.path() / "mistercast/config.json").string()));
+}
+
+// Asking for the portal exercises the whole Wayland start path short of the
+// portal itself: the backend resolves, the stored grant is looked for, and the
+// dialog notice is printed before anything can fail. What it fails with depends
+// on the build, and both answers have to name something the user can act on.
+TEST(Cli, StreamingThroughThePortalReportsWhyItCouldNotStart) {
+  const TemporaryDirectory directory("cli-portal-stream");
+  const auto result =
+      run({"stream", "--target", "127.0.0.1", "--backend", "portal",
+           "--no-audio"},
+          withEnvironment({{"XDG_CONFIG_HOME", directory.path().string()}},
+                          std::chrono::seconds(20)));
+  EXPECT_TRUE(result.exitedWith(1)) << result.out;
+  EXPECT_THAT(result.err, HasSubstr("screen-sharing dialog"))
+      << "the first run has to say that something is waiting to be answered";
+#ifdef MISTERCAST_HAVE_PORTAL
+  // No portal is reachable from the test environment, so the handshake is what
+  // fails; which step it names depends on what is running.
+  EXPECT_THAT(result.err, HasSubstr("Start failed"));
+#else
+  EXPECT_THAT(result.err, HasSubstr("no Wayland screen capture"));
+  // The hint names the packages to install, which is the only actionable half.
+  EXPECT_THAT(result.err, HasSubstr("libpipewire"));
+#endif
+}
+
+TEST(Cli, RejectsABackendItDoesNotHave) {
+  const auto result = run({"stream", "--target", "127.0.0.1", "--backend",
+                           "xorg"},
+                          inX11Session());
+  EXPECT_TRUE(result.exitedWith(2)) << result.out;
+  EXPECT_THAT(result.err, HasSubstr("auto, x11, or portal"));
+}
+
+TEST(Cli, ListMonitorsAndCheckExplainThePickerOnAWaylandSession) {
+  const TemporaryDirectory directory("cli-wayland-check");
+  // DISPLAY is left set on purpose: a Wayland session exports XWayland's, and the
+  // point is that it does not win. No portal has to be reachable, because neither
+  // command starts a capture.
+  const auto session = std::vector<std::pair<std::string, std::string>>{
+      {"WAYLAND_DISPLAY", "wayland-0"},
+      {"XDG_SESSION_TYPE", "wayland"},
+      {"XDG_CONFIG_HOME", directory.path().string()}};
+  for (const char* command : {"list-monitors", "check"}) {
+    const auto result = run({command}, withEnvironment(session));
+    // Who picks the source is true of any build, so both commands say it.
+    EXPECT_THAT(result.out, HasSubstr("portal")) << command;
+    EXPECT_THAT(result.out, HasSubstr("screen-sharing dialog")) << command;
+    EXPECT_THAT(result.out, testing::Not(HasSubstr("X11 capture: OK")))
+        << command << " must not claim an X11 capture it never tried";
+    EXPECT_THAT(result.err, testing::Not(HasSubstr("DISPLAY")))
+        << command << " must not blame a display it never opened";
+  }
+  const auto listed = run({"list-monitors"}, withEnvironment(session));
+  EXPECT_TRUE(listed.exitedWith(0)) << listed.err;
+
+  // check is the one that answers "can this machine stream", so it is the one
+  // that fails when the backend the session needs was not built.
+  const auto checked = run({"check"}, withEnvironment(session));
+  EXPECT_THAT(checked.out, HasSubstr("Saved portal permission: none"));
+  if (portalCaptureAvailable()) {
+    EXPECT_TRUE(checked.exitedWith(0)) << checked.err;
+  } else {
+    EXPECT_TRUE(checked.exitedWith(1)) << checked.out;
+    EXPECT_THAT(checked.err, HasSubstr("no Wayland capture"));
+    EXPECT_THAT(checked.err, HasSubstr("libpipewire"));
+  }
+
+  // A stored grant is reported as one, so a user can tell why no dialog appears.
+  std::string tokenError;
+  ASSERT_TRUE(savePortalRestoreToken("6b1f2c3d-4e5a-6789-abcd-ef0123456789",
+                                     directory.path() / "mistercast/portal-token",
+                                     tokenError))
+      << tokenError;
+  const auto stored = run({"check"}, withEnvironment(session));
+  EXPECT_THAT(stored.out, HasSubstr("Saved portal permission: "));
+  EXPECT_THAT(stored.out, testing::Not(HasSubstr("permission: none")));
 }
 
 // ------------------------------------------------------- stream argument errors
@@ -138,15 +228,15 @@ TEST(Cli, MarksThePrimaryMonitorWhenTheServerReportsOne) {
   if (!nested.ready()) GTEST_SKIP() << "a nested Xvfb could not be started";
 
   const auto result =
-      run({"list-monitors"}, withEnvironment({{"DISPLAY", nested.display()}}));
+      run({"list-monitors"}, inX11Session({{"DISPLAY", nested.display()}}));
   ASSERT_TRUE(result.exitedWith(0)) << result.err;
   EXPECT_THAT(result.out, HasSubstr("X11-screen-0\t112x84+0+0 (primary)"));
 
   const TemporaryDirectory directory("cli-primary-check");
   const auto checked =
-      run({"check"}, withEnvironment({{"DISPLAY", nested.display()},
-                                      {"XDG_CONFIG_HOME",
-                                       directory.path().string()}}));
+      run({"check"}, inX11Session({{"DISPLAY", nested.display()},
+                                   {"XDG_CONFIG_HOME",
+                                    directory.path().string()}}));
   EXPECT_TRUE(checked.exitedWith(0)) << checked.err;
   EXPECT_THAT(checked.out, HasSubstr("X11 capture: OK"));
 }
@@ -315,8 +405,12 @@ TEST(Cli, StreamsToAListeningTargetAndShutsDownCleanlyOnInterrupt) {
   options.environment = {{"XDG_CONFIG_HOME", directory.path().string()}};
   options.interruptAfter = std::chrono::seconds(2);
   options.timeout = std::chrono::seconds(30);
+  // --backend x11 rather than the session's answer: this case captures for real,
+  // and the suite also runs inside the Wayland rig, where the default would be
+  // the portal.
   const auto result = run({"stream", "--target", "127.0.0.1", "--no-audio",
-                           "--crop", "1x", "--frame-delay", "0"},
+                           "--backend", "x11", "--crop", "1x",
+                           "--frame-delay", "0"},
                           options);
   EXPECT_TRUE(result.interruptDelivered) << "the stream ended before SIGINT";
   EXPECT_TRUE(result.exitedWith(0)) << result.err;
@@ -339,7 +433,8 @@ TEST(Cli, StreamPrintsPeriodicCounters) {
   options.interruptAfter = std::chrono::milliseconds(6500);
   options.timeout = std::chrono::seconds(40);
   const auto result =
-      run({"stream", "--target", "127.0.0.1", "--no-audio", "--crop", "1x",
+      run({"stream", "--target", "127.0.0.1", "--no-audio", "--backend", "x11",
+           "--crop", "1x",
            "--modeline", "12.336 640 662 720 784 480 488 494 525 1"},
           options);
   EXPECT_TRUE(result.exitedWith(0)) << result.err;
@@ -365,7 +460,8 @@ TEST(Cli, StreamReportsAnUnhealthyReceiverInItsCounters) {
   options.interruptAfter = std::chrono::milliseconds(6500);
   options.timeout = std::chrono::seconds(40);
   const auto result = run({"stream", "--target", "127.0.0.1", "--no-audio",
-                           "--crop", "1x", "--progressive-interlace-buffer"},
+                           "--backend", "x11", "--crop", "1x",
+                           "--progressive-interlace-buffer"},
                           options);
   EXPECT_TRUE(result.exitedWith(0)) << result.err;
   EXPECT_THAT(result.err, HasSubstr("/fallback"));

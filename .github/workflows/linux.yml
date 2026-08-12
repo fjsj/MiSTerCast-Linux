@@ -7,6 +7,12 @@ env:
     ninja-build qt6-base-dev libxcb1-dev libxcb-composite0-dev
     libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev xvfb
     pulseaudio x11-xserver-utils
+  # The Wayland backend's build halves, kept separate because the coverage job
+  # deliberately leaves them out: the portal path can only be exercised where
+  # there is a compositor and a desktop portal, and the coverage job has neither,
+  # so compiling it in there would only push the branch floor down for code no
+  # runner can reach. The wayland job covers it instead.
+  MISTERCAST_WAYLAND_APT: 'libpipewire-0.3-dev libsystemd-dev'
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -14,7 +20,7 @@ jobs:
       matrix: {build_type: [Debug, Release]}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y $MISTERCAST_APT
+      - run: sudo apt-get update && sudo apt-get install -y $MISTERCAST_APT $MISTERCAST_WAYLAND_APT
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
@@ -23,11 +29,47 @@ jobs:
         run: cpack --config build/CPackConfig.cmake -G DEB
       - if: matrix.build_type == 'Release'
         run: mkdir package-root && dpkg-deb -x MiSTerCast-*.deb package-root && test -x package-root/usr/bin/mistercast
+
+  # The distributions MiSTerCast targets, in containers rather than on runner
+  # labels, so the matrix does not depend on which images GitHub happens to
+  # offer. This is where a compiler or library change in a newer release shows
+  # up: gcc 13 stopped including <array> transitively, and nothing on 22.04
+  # noticed.
+  distributions:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ['24.04', '26.04']
+    container: ubuntu:${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends
+          build-essential cmake pkg-config libgl1-mesa-dev ca-certificates
+          $MISTERCAST_APT $MISTERCAST_WAYLAND_APT
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build
+      # The Wayland suite skips here: a container has no compositor and no
+      # desktop portal. The wayland job below is what covers it.
+      - run: ctest --test-dir build --output-on-failure
+      - run: xvfb-run -a ./build/mistercast check
+
+  # The Wayland capture backend against a real compositor, a real PipeWire and a
+  # real desktop portal, all inside the rig image. Nothing else can cover the
+  # portal handshake or the buffers it hands over.
+  wayland:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./packaging/docker/wayland-test.sh 26.04
+
   sanitizers:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y $MISTERCAST_APT
+      - run: sudo apt-get update && sudo apt-get install -y $MISTERCAST_APT $MISTERCAST_WAYLAND_APT
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
       - run: cmake --build build && ctest --test-dir build --output-on-failure
   coverage:

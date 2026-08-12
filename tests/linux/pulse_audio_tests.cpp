@@ -28,22 +28,66 @@ using testing::HasSubstr;
 
 namespace {
 
-// These tests talk to a real PulseAudio server, because the behaviour they check
-// — which source a sink maps to, what rate the server grants, how large a read
+// These tests talk to a real sound server, because the behaviour they check —
+// which source a sink maps to, what rate the server grants, how large a read
 // comes back, what happens to playback routing — only exists in a real server.
+// Either implementation of the protocol will do: PulseAudio, or PipeWire's
+// replacement for it, which is what Ubuntu 24.04 and later actually run. See
+// chooseServer.
 //
 // The server is a private one started by this binary with a single null sink, so
 // the silent-output tests can move the default sink and live streams around
-// without disturbing whoever is using the desktop. When pulseaudio cannot be
+// without disturbing whoever is using the desktop. When no server can be
 // started the whole binary exits 77 and CTest records a skip.
 std::unique_ptr<TemporaryDirectory> serverDirectory;
 std::unique_ptr<PrivatePulseServer> server;
+std::unique_ptr<PrivatePipeWirePulseServer> pipeWireServer;
+
+bool programExists(const char* program) {
+  const auto command = std::string("command -v ") + program + " >/dev/null 2>&1";
+  return std::system(command.c_str()) == 0;
+}
+
+// Which sound server the suite runs against. Both implement the protocol the
+// capture code speaks, and the tests are identical either way, so the choice is
+// whatever this machine has: PulseAudio on a 22.04-era desktop, pipewire-pulse on
+// 24.04 and later. MISTERCAST_TEST_SOUND_SERVER forces one, which is how CI
+// covers the other on a machine that has both.
+const char* chooseServer() {
+  if (const char* forced = std::getenv("MISTERCAST_TEST_SOUND_SERVER"))
+    return forced;
+  if (programExists("pulseaudio")) return "pulseaudio";
+  if (programExists("pipewire-pulse")) return "pipewire";
+  return "none";
+}
+
+// Takes down whichever server was started. Both flavours stop their protocol
+// daemon first, which is what "the server went away" means to a client.
+void stopPrivateServer() {
+  server.reset();
+  pipeWireServer.reset();
+}
 
 bool startPrivateServer() {
+  const std::string choice = chooseServer();
   serverDirectory = std::make_unique<TemporaryDirectory>("pulse-server");
-  server = std::make_unique<PrivatePulseServer>(serverDirectory->path());
-  if (!server->ready()) return false;
-  ::setenv("PULSE_SERVER", server->address().c_str(), 1);
+  if (choice == "pipewire") {
+    if (!programExists("pactl")) {
+      std::fputs("pipewire-pulse needs pactl to plant the test sink\n", stderr);
+      return false;
+    }
+    pipeWireServer =
+        std::make_unique<PrivatePipeWirePulseServer>(serverDirectory->path());
+    if (!pipeWireServer->ready()) return false;
+    ::setenv("PULSE_SERVER", pipeWireServer->address().c_str(), 1);
+  } else if (choice == "pulseaudio") {
+    server = std::make_unique<PrivatePulseServer>(serverDirectory->path());
+    if (!server->ready()) return false;
+    ::setenv("PULSE_SERVER", server->address().c_str(), 1);
+  } else {
+    return false;
+  }
+  std::fprintf(stderr, "sound server under test: %s\n", choice.c_str());
   std::string error;
   pulseAudioSinks(error);
   return error.empty();
@@ -437,7 +481,7 @@ TEST_F(Pulse, ZzReportsTheServerGoingAway) {
   PcmBlock block;
   ASSERT_TRUE(capture->next(block, std::chrono::milliseconds(200)));
 
-  server.reset();  // terminates the daemon
+  stopPrivateServer();  // terminates the daemon
 
   // A read from a dead server has to be reported through the callback, not
   // silently retried forever.
@@ -486,7 +530,7 @@ int main(int argc, char** argv) {
     return 77;
   }
   const int result = RUN_ALL_TESTS();
-  server.reset();  // a no-op when the last test already stopped it
+  stopPrivateServer();  // a no-op when the last test already stopped it
   serverDirectory.reset();
   return result;
 #endif

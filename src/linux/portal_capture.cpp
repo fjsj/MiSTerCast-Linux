@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 
@@ -11,9 +14,17 @@
 #ifdef MISTERCAST_HAVE_PORTAL
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "portal_screencast.hpp"
+
+// SPA_DATA_FLAG_MAPPABLE arrived after PipeWire 0.3.48, the version Ubuntu 22.04
+// ships. The value is fixed by the ABI, and an SPA that old has no producer that
+// sets it, so on 22.04 the DmaBuf branch this guards simply never matches.
+#ifndef SPA_DATA_FLAG_MAPPABLE
+#define SPA_DATA_FLAG_MAPPABLE (1u << 3)
+#endif
 #endif
 
 namespace mistercast {
@@ -103,6 +114,49 @@ const spa_pod* buildEnumFormat(spa_pod_builder& builder) {
                       0);
   return static_cast<const spa_pod*>(spa_pod_builder_pop(&builder, &object));
 }
+
+// One buffer's pixels, mapped by this code rather than by PipeWire.
+//
+// PW_STREAM_FLAG_MAP_BUFFERS is the obvious way to get here and it is the wrong
+// one: PipeWire derives the mapping's protection from the producer's
+// SPA_DATA_FLAG_READABLE/WRITABLE, and xdg-desktop-portal-wlr publishes screen
+// capture buffers with neither -- only SPA_DATA_FLAG_MAPPABLE. The result maps
+// successfully and then faults with SEGV_ACCERR on the first read, from inside
+// the copy, on a pointer that looks perfectly valid. Mapping the descriptor here
+// with PROT_READ says what this side actually needs and does not depend on a
+// producer getting its flags right.
+struct MappedBuffer {
+  void* base{};
+  size_t length{};
+  // Where the frame starts, which is the mapping plus the data's map offset.
+  const uint8_t* pixels{};
+
+  ~MappedBuffer() {
+    if (base) ::munmap(base, length);
+  }
+  bool map(const spa_data& data) {
+    if (data.type == SPA_DATA_MemPtr) {
+      // Already a pointer into this process; there is nothing to map.
+      pixels = static_cast<const uint8_t*>(data.data);
+      return pixels != nullptr;
+    }
+    if (data.type != SPA_DATA_MemFd && data.type != SPA_DATA_DmaBuf)
+      return false;
+    if (data.type == SPA_DATA_DmaBuf && !(data.flags & SPA_DATA_FLAG_MAPPABLE))
+      return false;
+    if (data.fd < 0) return false;
+    length = size_t(data.mapoffset) + data.maxsize;
+    void* mapped = ::mmap(nullptr, length, PROT_READ, MAP_SHARED,
+                          int(data.fd), 0);
+    if (mapped == MAP_FAILED) {
+      length = 0;
+      return false;
+    }
+    base = mapped;
+    pixels = static_cast<const uint8_t*>(base) + data.mapoffset;
+    return true;
+  }
+};
 }  // namespace
 
 // Wayland desktop capture: the ScreenCast portal grants a source and hands back
@@ -117,6 +171,9 @@ class PortalCapture final : public IVideoCapture {
   pw_stream* stream_{};
   spa_hook streamListener_{};
   bool listening_{};
+  // Touched only by the PipeWire thread while the loop runs, and by
+  // teardownPipeWire once it has stopped.
+  std::map<const pw_buffer*, std::unique_ptr<MappedBuffer>> mappings_;
 
   mutable std::mutex mutex_;
   std::condition_variable cv_;
@@ -181,21 +238,46 @@ class PortalCapture final : public IVideoCapture {
       self.negotiated_ = true;
       self.cv_.notify_all();
     }
-    // Only mappable memory is accepted, matching the format request above.
-    uint8_t buffer[512];
-    spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    const spa_pod* params[2];
-    params[0] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
-        &builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
-        SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) |
-                                 (1 << SPA_DATA_MemPtr))));
-    params[1] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
-        &builder, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type,
-        SPA_POD_Id(SPA_META_Header), SPA_PARAM_META_size,
-        SPA_POD_Int(sizeof(spa_meta_header))));
-    pw_stream_update_params(self.stream_, params, 2);
+    // Deliberately no pw_stream_update_params reply. A consumer may answer a
+    // format with its own SPA_PARAM_Buffers, and restricting dataType to
+    // MemFd/MemPtr there looked like the way to keep buffers mappable -- but the
+    // reply renegotiates, which reallocates buffers, which fires param_changed
+    // again, and the churn was reaching consume() with buffer metadata that did
+    // not describe the mapping any more. Nothing is needed from it either:
+    // omitting SPA_FORMAT_VIDEO_modifier from the EnumFormat already keeps the
+    // producer on memory buffers, and PW_STREAM_FLAG_MAP_BUFFERS maps them.
+  }
+
+  // Buffers are mapped once when PipeWire announces them, not once per frame:
+  // an mmap and munmap per frame at the modeline refresh would be pure overhead,
+  // and the announcement is also the only point where a mapping failure can be
+  // reported before pixels are expected.
+  static void onAddBuffer(void* data, pw_buffer* buffer) {
+    auto& self = *static_cast<PortalCapture*>(data);
+    auto mapping = std::make_unique<MappedBuffer>();
+    if (!buffer->buffer->n_datas ||
+        !mapping->map(buffer->buffer->datas[0])) {
+      std::lock_guard<std::mutex> lock(self.mutex_);
+      if (!self.failure_)
+        self.failure_ = SessionError{
+            "video", "cannot read the compositor's capture buffers",
+            "Report the compositor and PipeWire versions; MiSTerCast needs "
+            "shared-memory screen capture buffers."};
+      self.cv_.notify_all();
+      return;
+    }
+    // Owned here rather than by user_data alone, so teardown frees the mappings
+    // whether or not PipeWire announced their removal first. A stream that went
+    // away without a remove_buffer for each buffer would otherwise leak a whole
+    // screen's worth of mapping per start/stop cycle.
+    buffer->user_data = mapping.get();
+    self.mappings_.emplace(buffer, std::move(mapping));
+  }
+
+  static void onRemoveBuffer(void* data, pw_buffer* buffer) {
+    auto& self = *static_cast<PortalCapture*>(data);
+    buffer->user_data = nullptr;
+    self.mappings_.erase(buffer);
   }
 
   static void onProcess(void* data) {
@@ -208,29 +290,39 @@ class PortalCapture final : public IVideoCapture {
       newest = buffer;
     }
     if (!newest) return;
-    self.consume(*newest->buffer);
+    self.consume(*newest);
     pw_stream_queue_buffer(self.stream_, newest);
   }
 
-  void consume(const spa_buffer& buffer) {
-    if (!buffer.n_datas) return;
-    const auto& data = buffer.datas[0];
-    if (!data.data || !data.chunk || !data.chunk->size) return;
+  void consume(const pw_buffer& buffer) {
+    const auto* mapping = static_cast<const MappedBuffer*>(buffer.user_data);
+    if (!mapping || !mapping->pixels) return;
+    if (!buffer.buffer->n_datas) return;
+    const auto& data = buffer.buffer->datas[0];
+    if (!data.chunk || !data.chunk->size) return;
     if (data.chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) return;
+    if (data.chunk->offset > data.maxsize) return;
+    // chunk->size describes what the producer wrote and maxsize the buffer it was
+    // written into, so the copy is bounded by both: a buffer whose metadata does
+    // not match the negotiated format then fails cropToBgra's own bounds check
+    // and is skipped rather than read past.
+    const size_t available = data.maxsize - data.chunk->offset;
+    const size_t size = std::min<size_t>(data.chunk->size, available);
     std::lock_guard<std::mutex> lock(mutex_);
     if (!sourceHeight_) return;
-    const uint32_t stride =
-        data.chunk->stride > 0 ? uint32_t(data.chunk->stride)
-                               : uint32_t(data.chunk->size) / sourceHeight_;
+    const uint32_t stride = data.chunk->stride > 0
+                                ? uint32_t(data.chunk->stride)
+                                : uint32_t(size / sourceHeight_);
     std::string error;
-    if (cropToBgra(static_cast<const uint8_t*>(data.data) + data.chunk->offset,
-                   data.chunk->size, sourceWidth_, sourceHeight_, stride,
-                   order_, region_, pending_, error)) {
+    if (cropToBgra(mapping->pixels + data.chunk->offset, size, sourceWidth_,
+                   sourceHeight_, stride, order_, region_, pending_, error)) {
       ++pendingCount_;
       cv_.notify_all();
     }
   }
 
+  // Safe to touch mappings_ only after the loop has stopped, which is the point
+  // at which the PipeWire thread -- their only other user -- is gone.
   void teardownPipeWire() noexcept {
     if (loop_) pw_thread_loop_stop(loop_);
     if (stream_) {
@@ -253,6 +345,7 @@ class PortalCapture final : public IVideoCapture {
       pw_thread_loop_destroy(loop_);
       loop_ = nullptr;
     }
+    mappings_.clear();
   }
 
   bool startPipeWire(const PortalStream& granted, SessionError& error) {
@@ -265,6 +358,8 @@ class PortalCapture final : public IVideoCapture {
       events.version = PW_VERSION_STREAM_EVENTS;
       events.state_changed = onStateChanged;
       events.param_changed = onParamChanged;
+      events.add_buffer = onAddBuffer;
+      events.remove_buffer = onRemoveBuffer;
       events.process = onProcess;
     });
     loop_ = pw_thread_loop_new("mistercast-pw", nullptr);
@@ -308,8 +403,9 @@ class PortalCapture final : public IVideoCapture {
     const spa_pod* params[1] = {buildEnumFormat(builder)};
     const int connected = pw_stream_connect(
         stream_, PW_DIRECTION_INPUT, granted.nodeId,
-        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT |
-                                     PW_STREAM_FLAG_MAP_BUFFERS),
+        // No PW_STREAM_FLAG_MAP_BUFFERS: see MappedBuffer for why the mapping
+        // is done here instead.
+        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT),
         params, 1);
     pw_thread_loop_unlock(loop_);
     if (connected < 0) {
@@ -358,8 +454,19 @@ class PortalCapture final : public IVideoCapture {
     PortalStream granted;
     SessionError error;
     if (!portal_.open(request, granted, error)) {
-      if (callback) callback(error);
-      return false;
+      // A stored grant the portal will not honour any more has to cost a dialog,
+      // not the stream. Retried once, with the token dropped, so a token that is
+      // somehow always refused cannot loop.
+      if (request.restoreToken.empty()) {
+        if (callback) callback(error);
+        return false;
+      }
+      portal_.close();
+      request.restoreToken.clear();
+      if (!portal_.open(request, granted, error)) {
+        if (callback) callback(error);
+        return false;
+      }
     }
     if (options_.onRestoreToken && !granted.restoreToken.empty())
       options_.onRestoreToken(granted.restoreToken);
@@ -395,13 +502,24 @@ class PortalCapture final : public IVideoCapture {
 
   void setRegion(const CropRect& region) override {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!region.width || !region.height ||
-        uint64_t(region.x) + region.width > sourceWidth_ ||
-        uint64_t(region.y) + region.height > sourceHeight_) {
-      region_ = {};
+    const bool usable = region.width && region.height &&
+                        uint64_t(region.x) + region.width <= sourceWidth_ &&
+                        uint64_t(region.y) + region.height <= sourceHeight_;
+    // A region that cannot fit the source would read past the buffer; capturing
+    // the whole frame is the safe reading of it, and the session narrows the
+    // region again once it sees the geometry that made this one impossible.
+    const CropRect wanted = usable ? region : CropRect{};
+    if (wanted.x == region_.x && wanted.y == region_.y &&
+        wanted.width == region_.width && wanted.height == region_.height)
       return;
-    }
-    region_ = region;
+    region_ = wanted;
+    // The held frame was cropped the old way, and the caller changed the region
+    // because it now expects the new geometry -- after a live modeline switch,
+    // its crop and this frame would disagree. Dropping it makes next() wait for
+    // a frame that matches instead of handing back one that does not. Only on a
+    // real change, so a session that re-asserts the same region every cycle is
+    // not starved.
+    pendingCount_ = deliveredCount_ = 0;
   }
 
   bool next(Frame& out, std::chrono::milliseconds timeout) override {

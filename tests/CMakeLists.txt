@@ -101,10 +101,22 @@ target_compile_definitions(mistercast-cli-tests PRIVATE
 if(Qt6_FOUND)
   target_compile_definitions(mistercast-cli-tests PRIVATE MISTERCAST_HAVE_QT=1)
 endif()
+if(PIPEWIRE_FOUND AND SDBUS_FOUND)
+  # The monitor commands answer differently on a Wayland session depending on
+  # whether the portal backend was built, so the suite has to know which.
+  target_compile_definitions(mistercast-cli-tests PRIVATE
+    MISTERCAST_HAVE_PORTAL=1)
+endif()
 add_dependencies(mistercast-cli-tests mistercast)
 
 mistercast_add_test_suite(x11 LABEL integration TIMEOUT 900 XVFB SKIP_77
   SOURCE_TREE SOURCES linux/x11_tests.cpp)
+
+# Needs a Wayland session with a desktop portal, which no CI runner and no build
+# machine has by default. packaging/docker/wayland-test.sh brings one up; without
+# it the suite exits 77 and CTest records a skip.
+mistercast_add_test_suite(wayland LABEL integration TIMEOUT 900 SKIP_77
+  SOURCE_TREE SOURCES linux/portal_capture_tests.cpp)
 
 mistercast_add_test_suite(pulse-audio LABEL integration TIMEOUT 900 SKIP_77
   SOURCES linux/pulse_audio_tests.cpp)

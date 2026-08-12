@@ -72,6 +72,15 @@ struct PortalCaptureOptions {
   bool embedCursor{false};
 };
 std::unique_ptr<IVideoCapture> makePortalCapture(PortalCaptureOptions = {});
+// Portal options wired to a token file: the stored grant is offered to the
+// portal, and a newly issued one is written back the moment it arrives. Lives
+// here rather than in each frontend because the CLI and the GUI want exactly the
+// same behaviour and only differ in where a warning goes. onWarning is called
+// with a ready-made message when the token cannot be stored, which costs a
+// dialog on the next run and nothing else.
+PortalCaptureOptions portalOptionsFromTokenFile(
+    const std::string& tokenPath,
+    std::function<void(const std::string&)> onWarning);
 // The backend-aware factory. Resolves the backend against the current session
 // and builds the matching capture; the returned object has not touched the
 // display server, portal, or PipeWire yet, so constructing it is free of

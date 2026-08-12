@@ -510,16 +510,12 @@ void MainWindow::toggleStream() {
   const bool portal = portalSelected();
   PortalCaptureOptions portalOptions;
   if (portal) {
-    portalOptions.restoreToken =
-        loadPortalRestoreToken(portalRestoreTokenPath());
-    portalOptions.onRestoreToken = [this](const std::string& token) {
-      // Cached permission state, not a setting: written straight through rather
-      // than waiting for Save Settings, which would also persist unrelated
-      // unsaved edits.
-      std::string tokenError;
-      if (!savePortalRestoreToken(token, portalRestoreTokenPath(), tokenError))
-        append("Cannot remember the screen-sharing permission: " + tokenError);
-    };
+    // Cached permission state, not a setting: written straight through rather
+    // than waiting for Save Settings, which would also persist unrelated
+    // unsaved edits.
+    portalOptions = portalOptionsFromTokenFile(
+        portalRestoreTokenPath(),
+        [this](const std::string& warning) { append(warning); });
     if (portalOptions.restoreToken.empty())
       append(QStringLiteral(
           "Waiting for the desktop screen-sharing dialog; choose a screen and "
