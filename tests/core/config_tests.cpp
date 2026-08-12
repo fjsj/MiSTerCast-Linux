@@ -329,6 +329,85 @@ TEST(LoadGroovyConfig, AnUnknownCaptureModeFallsBackToSafeDefaults) {
   EXPECT_THAT(warning, HasSubstr("capture mode"));
 }
 
+TEST(LoadGroovyConfig, RoundTripsTheCaptureBackend) {
+  const TemporaryDirectory directory("config-backend");
+  for (const auto backend : {CaptureBackend::Auto, CaptureBackend::X11,
+                             CaptureBackend::Portal}) {
+    AppConfig config;
+    config.target = "mister.local";
+    config.source.captureBackend = backend;
+    const auto path = directory.path() / (toString(backend) + ".json");
+    std::string error;
+    ASSERT_TRUE(saveGroovyConfig(config, path, error)) << error;
+    EXPECT_EQ(loadGroovyConfig(path).source.captureBackend, backend)
+        << toString(backend);
+  }
+}
+
+TEST(LoadGroovyConfig, AnUnknownCaptureBackendFallsBackToSafeDefaults) {
+  const TemporaryDirectory directory("config-backend-invalid");
+  const auto path = directory.write(
+      "config.json",
+      R"({"version":1,"target":"must-not-load","captureBackend":"xorg"})");
+  std::string warning;
+  const auto loaded = loadGroovyConfig(path, &warning);
+  EXPECT_THAT(loaded.target, IsEmpty());
+  EXPECT_EQ(loaded.source.captureBackend, CaptureBackend::Auto);
+  EXPECT_THAT(warning, HasSubstr("capture backend"));
+}
+
+// A configuration written before the backend existed must keep loading, and land
+// on Auto rather than being rejected as invalid.
+TEST(LoadGroovyConfig, AConfigWithoutABackendKeyLoadsAsAutomatic) {
+  const TemporaryDirectory directory("config-backend-absent");
+  const auto path = directory.write(
+      "config.json", R"({"version":1,"target":"mister.local"})");
+  const auto loaded = loadGroovyConfig(path);
+  EXPECT_EQ(loaded.target, "mister.local");
+  EXPECT_EQ(loaded.source.captureBackend, CaptureBackend::Auto);
+}
+
+TEST(PortalRestoreToken, RoundTripsAndIsReadableOnlyByItsOwner) {
+  const TemporaryDirectory directory("portal-token");
+  const auto path = directory.path() / "portal-token";
+  std::string error;
+  ASSERT_TRUE(savePortalRestoreToken("abc123-DEF", path, error)) << error;
+  EXPECT_EQ(loadPortalRestoreToken(path), "abc123-DEF");
+  // A capture-permission handle must not be left group- or world-readable.
+  const auto permissions = std::filesystem::status(path).permissions();
+  EXPECT_EQ(permissions & (std::filesystem::perms::group_all |
+                           std::filesystem::perms::others_all),
+            std::filesystem::perms::none);
+  // The rename is the only thing that should be left behind.
+  EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory.path()),
+                          std::filesystem::directory_iterator{}),
+            1);
+}
+
+TEST(PortalRestoreToken, IsAbsentRatherThanEmptyWhenNeverWritten) {
+  const TemporaryDirectory directory("portal-token-missing");
+  EXPECT_THAT(loadPortalRestoreToken(directory.path() / "portal-token"),
+              IsEmpty());
+}
+
+// Portals mint printable identifiers. A file holding anything else was not
+// written by this code, and forwarding it would only produce a confusing
+// SelectSources failure instead of the picker the user expects.
+TEST(PortalRestoreToken, RejectsATokenThatCannotHaveComeFromAPortal) {
+  const TemporaryDirectory directory("portal-token-invalid");
+  EXPECT_THAT(loadPortalRestoreToken(
+                  directory.write("spaces", "has a space\n")),
+              IsEmpty());
+  EXPECT_THAT(loadPortalRestoreToken(
+                  directory.write("control", std::string("tab\there\n"))),
+              IsEmpty());
+  EXPECT_THAT(loadPortalRestoreToken(directory.write(
+                  "long", std::string(600, 'a') + "\n")),
+              IsEmpty());
+  EXPECT_THAT(loadPortalRestoreToken(directory.write("empty", "\n")),
+              IsEmpty());
+}
+
 TEST(LoadGroovyConfig, AnUnknownSamplingModeFallsBackToSafeDefaults) {
   const TemporaryDirectory directory("config-sampling");
   const auto path = directory.write(

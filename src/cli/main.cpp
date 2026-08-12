@@ -16,18 +16,25 @@ static std::atomic<bool> interrupted{false};
 static void signalHandler(int) { interrupted = true; }
 static void usage() {
   std::cout
-      << "MiSTerCast for Linux (X11 only)\n\nUsage:\n  mistercast\n  "
+      << "MiSTerCast for Linux (X11/Xorg and Wayland)\n\nUsage:\n  mistercast\n  "
          "mistercast stream --target HOST [options]\n  mistercast "
          "pattern --target HOST [--tone] [--content bars|noise]\n  mistercast "
          "list-monitors\n  mistercast list-modelines\n  mistercast "
-         "check\n\nStream options: --monitor NAME --modeline 'TIMINGS' --audio "
-         "--no-audio\n  --crop custom|1x|2x|3x|4x|5x|4:3|5:4 --size WxH "
+         "check\n\nStream options: --backend auto|x11|portal --monitor NAME "
+         "--modeline 'TIMINGS' --audio --no-audio\n  "
+         "--crop custom|1x|2x|3x|4x|5x|4:3|5:4 --size WxH "
          "--offset X,Y\n  --alignment POSITION --rotation none|cw90|ccw90|180 "
          "--sampling point|bilinear|line-blend --frame-delay 0..10\n  "
          "--progressive-interlace-buffer "
          "--interlaced-field-buffer --save\n\nPattern options: --modeline "
          "'TIMINGS' --content bars|noise --tone --frame-delay 0..10\n  "
          "--progressive-interlace-buffer --interlaced-field-buffer\n";
+}
+// The portal picks the source through its own dialog, so --monitor and
+// list-monitors have nothing to name on Wayland. Saying so beats reporting an
+// X11 connection failure the user cannot act on.
+static CaptureBackend activeBackend(CaptureBackend requested) {
+  return resolveCaptureBackend(requested, SessionEnvironment::current());
 }
 static bool value(int& i, int n, char** v, std::string& o) {
   if (++i >= n) {
@@ -60,6 +67,30 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (command == "list-monitors" || command == "check") {
+    const auto backend = activeBackend(loadGroovyConfig(configPath())
+                                           .source.captureBackend);
+    if (backend == CaptureBackend::Portal) {
+      if (!portalCaptureAvailable()) {
+        std::cerr << "This is a Wayland session, but this build has no Wayland "
+                     "capture.\nRebuild with libpipewire-0.3-dev and "
+                     "libsystemd-dev, or log into an Xorg session.\n";
+        return 1;
+      }
+      // Enumerating outputs is not part of the ScreenCast portal: the desktop's
+      // own dialog owns that choice, which is the point of the portal.
+      std::cout << "Capture backend: portal (Wayland)\nMonitors are chosen in "
+                   "the desktop's screen-sharing dialog, so there is nothing "
+                   "to list and --monitor has no effect.\n";
+      if (command == "check")
+        std::cout << "Configuration: " << configPath()
+                  << "\nSaved portal permission: "
+                  << (loadPortalRestoreToken(portalRestoreTokenPath()).empty()
+                          ? "none; the dialog will ask on the next stream"
+                          : std::string("yes (") +
+                                portalRestoreTokenPath().string() + ")")
+                  << "\n";
+      return 0;
+    }
     std::string e;
     auto ms = x11Monitors(e);
     if (ms.empty()) {
@@ -70,7 +101,8 @@ int main(int argc, char** argv) {
       std::cout << m.name << "\t" << m.width << "x" << m.height << "+" << m.x
                 << "+" << m.y << (m.primary ? " (primary)" : "") << "\n";
     if (command == "check")
-      std::cout << "X11 capture: OK\nConfiguration: " << configPath() << "\n";
+      std::cout << "Capture backend: x11\nX11 capture: OK\nConfiguration: "
+                << configPath() << "\n";
     return 0;
   }
   if (command == "pattern") {
@@ -114,6 +146,12 @@ int main(int argc, char** argv) {
       if (!value(i, argc, argv, c.target)) return 2;
     } else if (a == "--monitor") {
       if (!value(i, argc, argv, c.source.monitor)) return 2;
+    } else if (a == "--backend") {
+      if (!value(i, argc, argv, x) ||
+          !parseCaptureBackend(x, c.source.captureBackend)) {
+        std::cerr << "Backend must be auto, x11, or portal\n";
+        return 2;
+      }
     } else if (a == "--modeline") {
       if (!value(i, argc, argv, x)) return 2;
       std::string e;
@@ -206,7 +244,25 @@ int main(int argc, char** argv) {
                  "at roughly 3-5x the bandwidth.\n";
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
-  StreamSession session;
+  const auto backend = activeBackend(c.source.captureBackend);
+  PortalCaptureOptions portal;
+  if (backend == CaptureBackend::Portal) {
+    portal.restoreToken = loadPortalRestoreToken(portalRestoreTokenPath());
+    portal.onRestoreToken = [](const std::string& token) {
+      // Written whenever the portal issues one, so the next run streams without
+      // a dialog. It is cached permission state, not a setting, so --save has no
+      // say in it.
+      std::string tokenError;
+      if (!savePortalRestoreToken(token, portalRestoreTokenPath(), tokenError))
+        std::cerr << "Cannot remember the screen-sharing permission: "
+                  << tokenError << "\n";
+    };
+    if (portal.restoreToken.empty())
+      std::cerr << "Waiting for the desktop screen-sharing dialog; choose a "
+                   "screen and allow sharing.\n";
+  }
+  StreamSession session(makeVideoCapture(c.source.captureBackend,
+                                         std::move(portal)));
   std::string e;
   if (!session.start(
           c, MonitorCaptureSource{c.source.monitor},

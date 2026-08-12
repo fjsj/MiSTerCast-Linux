@@ -75,6 +75,10 @@ std::string toString(SamplingMode v) {
   static const char* n[] = {"point", "bilinear", "line-blend"};
   return enumString(v, n, 3);
 }
+std::string toString(CaptureBackend v) {
+  static const char* n[] = {"auto", "x11", "portal"};
+  return enumString(v, n, 3);
+}
 template <class E>
 static bool parseEnum(const std::string& s, E& out, const char* const* names,
                       size_t n) {
@@ -102,6 +106,16 @@ bool parseRotation(const std::string& s, Rotation& o) {
 }
 bool parseSamplingMode(const std::string& s, SamplingMode& o) {
   static const char* n[] = {"point", "bilinear", "line-blend"};
+  return parseEnum(s, o, n, 3);
+}
+bool parseCaptureBackend(const std::string& s, CaptureBackend& o) {
+  static const char* n[] = {"auto", "x11", "portal"};
+  // "wayland" is what users call the session, not the protocol MiSTerCast
+  // speaks, and it is the name they will reach for first.
+  if (s == "wayland") {
+    o = CaptureBackend::Portal;
+    return true;
+  }
   return parseEnum(s, o, n, 3);
 }
 bool parseModeline(const std::string& text, Modeline& out, std::string& error) {

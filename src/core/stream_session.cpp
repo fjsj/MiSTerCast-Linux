@@ -33,6 +33,13 @@ StreamSession::StreamSession(std::unique_ptr<IVideoCapture> v,
                              std::unique_ptr<IAudioCapture> a)
     : video_(std::move(v)), audio_(std::move(a)) {}
 StreamSession::~StreamSession() { stop(); }
+bool StreamSession::setVideoCapture(std::unique_ptr<IVideoCapture> video) {
+  if (!video) return false;
+  if (state_ != SessionState::Idle && state_ != SessionState::Error)
+    return false;
+  video_ = std::move(video);
+  return true;
+}
 SessionStats StreamSession::stats() const {
   SessionStats result;
   result.capturedFrames = captured_;

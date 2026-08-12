@@ -764,4 +764,125 @@ TEST(NormalizeToBgra, ReusesTheCallersBufferWithoutReallocatingPerFrame) {
   EXPECT_EQ(frame.sequence, 0u) << "normalize resets the sequence number";
 }
 
+// ----------------------------------------------------------------- cropToBgra
+
+// A source whose every pixel encodes its own position, so a crop that reads the
+// wrong rectangle produces recognisably wrong values rather than plausible ones.
+// Bytes are laid out B,G,R,A, which is what PipeWire calls BGRA/BGRx.
+std::vector<uint8_t> positionCodedSource(uint32_t width, uint32_t height,
+                                         uint32_t stride) {
+  std::vector<uint8_t> pixels(size_t(stride) * height, 0xee);
+  for (uint32_t y = 0; y < height; ++y)
+    for (uint32_t x = 0; x < width; ++x) {
+      auto* pixel = &pixels[size_t(y) * stride + size_t(x) * 4];
+      pixel[0] = uint8_t(x);
+      pixel[1] = uint8_t(y);
+      pixel[2] = 0x40;
+      pixel[3] = 0xff;
+    }
+  return pixels;
+}
+
+TEST(CropToBgra, CopiesTheWholeSourceForAnEmptyRegion) {
+  const auto pixels = positionCodedSource(2, 2, 8);
+  Frame frame;
+  std::string error;
+  ASSERT_TRUE(cropToBgra(pixels.data(), pixels.size(), 2, 2, 8,
+                         PixelOrder::Bgra, {}, frame, error))
+      << error;
+  EXPECT_EQ(frame.width, 2u);
+  EXPECT_EQ(frame.height, 2u);
+  EXPECT_EQ(frame.stride, 8u);
+  EXPECT_THAT(frame.bgra, ElementsAre(0, 0, 0x40, 0xff, 1, 0, 0x40, 0xff, 0, 1,
+                                      0x40, 0xff, 1, 1, 0x40, 0xff));
+}
+
+TEST(CropToBgra, TakesTheRequestedSubRectangle) {
+  const auto pixels = positionCodedSource(8, 8, 8 * 4);
+  Frame frame;
+  std::string error;
+  ASSERT_TRUE(cropToBgra(pixels.data(), pixels.size(), 8, 8, 8 * 4,
+                         PixelOrder::Bgra, {3, 5, 2, 2}, frame, error))
+      << error;
+  EXPECT_EQ(frame.width, 2u);
+  EXPECT_EQ(frame.height, 2u);
+  EXPECT_EQ(frame.stride, 8u);
+  // Column 3-4 of rows 5-6, in the source's own coordinates.
+  EXPECT_THAT(frame.bgra, ElementsAre(3, 5, 0x40, 0xff, 4, 5, 0x40, 0xff, 3, 6,
+                                      0x40, 0xff, 4, 6, 0x40, 0xff));
+}
+
+// A PipeWire producer is free to pad rows, and screen-capture producers commonly
+// do. Reading the crop at the source's own stride is what keeps a padded frame
+// from shearing.
+TEST(CropToBgra, HonoursAPaddedSourceStride) {
+  const auto pixels = positionCodedSource(4, 3, 4 * 4 + 12);
+  Frame frame;
+  std::string error;
+  ASSERT_TRUE(cropToBgra(pixels.data(), pixels.size(), 4, 3, 4 * 4 + 12,
+                         PixelOrder::Bgra, {1, 1, 2, 2}, frame, error))
+      << error;
+  EXPECT_THAT(frame.bgra, ElementsAre(1, 1, 0x40, 0xff, 2, 1, 0x40, 0xff, 1, 2,
+                                      0x40, 0xff, 2, 2, 0x40, 0xff));
+}
+
+TEST(CropToBgra, SwapsRedAndBlueForAnRgbaProducer) {
+  const uint8_t pixels[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+  Frame frame;
+  std::string error;
+  ASSERT_TRUE(cropToBgra(pixels, sizeof(pixels), 2, 1, 8, PixelOrder::Rgba, {},
+                         frame, error))
+      << error;
+  EXPECT_THAT(frame.bgra, ElementsAre(0x33, 0x22, 0x11, 0x44, 0x77, 0x66, 0x55,
+                                      0x88));
+}
+
+TEST(CropToBgra, RejectsATruncatedBuffer) {
+  const std::vector<uint8_t> pixels(size_t(4) * 4 * 2 - 1, 0);
+  Frame frame;
+  std::string error;
+  EXPECT_FALSE(cropToBgra(pixels.data(), pixels.size(), 4, 2, 4 * 4,
+                          PixelOrder::Bgra, {}, frame, error));
+  EXPECT_THAT(error, HasSubstr("truncated PipeWire pixel buffer"));
+}
+
+TEST(CropToBgra, RejectsAStrideNarrowerThanTheSource) {
+  const std::vector<uint8_t> pixels(64, 0);
+  Frame frame;
+  std::string error;
+  EXPECT_FALSE(cropToBgra(pixels.data(), pixels.size(), 4, 2, 8,
+                          PixelOrder::Bgra, {}, frame, error));
+  EXPECT_THAT(error, HasSubstr("unsupported or truncated"));
+}
+
+// A renegotiation can shrink the source while a crop computed for the old size
+// is still installed. Refusing beats reading past the end of the mapped buffer.
+TEST(CropToBgra, RejectsARegionOutsideTheFrame) {
+  const auto pixels = positionCodedSource(4, 4, 4 * 4);
+  Frame frame;
+  std::string error;
+  EXPECT_FALSE(cropToBgra(pixels.data(), pixels.size(), 4, 4, 4 * 4,
+                          PixelOrder::Bgra, {3, 0, 2, 2}, frame, error));
+  EXPECT_THAT(error, HasSubstr("outside the captured frame"));
+  EXPECT_FALSE(cropToBgra(pixels.data(), pixels.size(), 4, 4, 4 * 4,
+                          PixelOrder::Bgra, {0, 3, 2, 2}, frame, error));
+  EXPECT_THAT(error, HasSubstr("outside the captured frame"));
+}
+
+TEST(CropToBgra, ReusesTheCallersBufferWithoutReallocatingPerFrame) {
+  const auto pixels = positionCodedSource(64, 64, 64 * 4);
+  Frame frame;
+  std::string error;
+  ASSERT_TRUE(cropToBgra(pixels.data(), pixels.size(), 64, 64, 64 * 4,
+                         PixelOrder::Bgra, {}, frame, error));
+  const auto* data = frame.bgra.data();
+  const auto capacity = frame.bgra.capacity();
+  frame.sequence = 99;
+  ASSERT_TRUE(cropToBgra(pixels.data(), pixels.size(), 64, 64, 64 * 4,
+                         PixelOrder::Bgra, {}, frame, error));
+  EXPECT_EQ(frame.bgra.data(), data) << "a same-sized frame must not reallocate";
+  EXPECT_EQ(frame.bgra.capacity(), capacity);
+  EXPECT_EQ(frame.sequence, 0u) << "the crop copy resets the sequence number";
+}
+
 }  // namespace

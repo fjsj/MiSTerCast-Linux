@@ -11,6 +11,11 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-shm xcb-composite)
 pkg_check_modules(XCB_RANDR IMPORTED_TARGET xcb-randr)
 pkg_check_modules(PULSE IMPORTED_TARGET libpulse-simple)
+# Wayland capture needs both halves: sd-bus to talk to the ScreenCast portal and
+# PipeWire to read the pixels it grants. Neither alone is usable, so they are
+# checked as one optional feature.
+pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
+pkg_check_modules(SDBUS IMPORTED_TARGET libsystemd)
 find_library(LZ4_LIBRARY lz4)
 find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
 
@@ -36,6 +41,7 @@ add_library(mistercast-core
   src/core/audio_ring.cpp src/core/audio_pacer.cpp src/linux/x11_display.cpp
   src/linux/x11_capture.cpp
   src/linux/x11_source_catalog.cpp src/linux/pulse_audio.cpp
+  src/linux/capture_backend.cpp src/linux/portal_capture.cpp
   src/core/udp_pacing.cpp src/core/adaptive_timing.cpp
   src/core/groovy_transport.cpp src/core/stream_session.cpp)
 add_library(MiSTerCast::core ALIAS mistercast-core)
@@ -51,6 +57,19 @@ endif()
 if(PULSE_FOUND)
   target_link_libraries(mistercast-core PRIVATE PkgConfig::PULSE)
   target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_PULSE=1)
+endif()
+if(PIPEWIRE_FOUND AND SDBUS_FOUND)
+  # The portal client includes <systemd/sd-bus.h> unguarded, so it is added with
+  # the feature rather than compiled to nothing without it.
+  target_sources(mistercast-core PRIVATE src/linux/portal_screencast.cpp)
+  target_link_libraries(mistercast-core
+    PRIVATE PkgConfig::PIPEWIRE PkgConfig::SDBUS)
+  target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_PORTAL=1)
+else()
+  message(WARNING
+    "libpipewire-0.3 or libsystemd was not found: Wayland capture through the "
+    "ScreenCast portal is disabled, leaving X11/Xorg as the only capture "
+    "backend. Install libpipewire-0.3-dev and libsystemd-dev and reconfigure.")
 endif()
 if(LZ4_LIBRARY)
   target_link_libraries(mistercast-core PRIVATE ${LZ4_LIBRARY})

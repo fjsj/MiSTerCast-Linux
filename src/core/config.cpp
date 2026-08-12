@@ -19,6 +19,69 @@ std::filesystem::path configPath() {
   return std::filesystem::current_path() / "config.json";
 }
 
+std::filesystem::path portalRestoreTokenPath() {
+  return configPath().parent_path() / "portal-token";
+}
+
+std::string loadPortalRestoreToken(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  if (!file) return {};
+  std::string token;
+  std::getline(file, token);
+  // Tokens are portal-generated identifiers. Anything with whitespace or
+  // control characters in it did not come from a portal, and passing it on
+  // would only produce a confusing SelectSources failure.
+  if (token.size() > 512) return {};
+  for (const unsigned char character : token)
+    if (character < 0x21 || character > 0x7e) return {};
+  return token;
+}
+
+bool savePortalRestoreToken(const std::string& token,
+                            const std::filesystem::path& path,
+                            std::string& error) {
+  std::error_code filesystemError;
+  std::filesystem::create_directories(path.parent_path(), filesystemError);
+  if (filesystemError) {
+    error = filesystemError.message();
+    return false;
+  }
+  auto temporary = path;
+  temporary += ".tmp." + std::to_string(::getpid());
+  std::ofstream file(temporary, std::ios::trunc);
+  if (!file) {
+    error = "cannot create temporary portal token";
+    return false;
+  }
+  file << token << "\n";
+  file.flush();
+  if (!file) {
+    error = "failed writing portal token";
+    file.close();
+    std::filesystem::remove(temporary);
+    return false;
+  }
+  file.close();
+  // Written before the rename so the token is never briefly readable by others.
+  std::filesystem::permissions(temporary,
+                               std::filesystem::perms::owner_read |
+                                   std::filesystem::perms::owner_write,
+                               std::filesystem::perm_options::replace,
+                               filesystemError);
+  if (filesystemError) {
+    error = filesystemError.message();
+    std::filesystem::remove(temporary);
+    return false;
+  }
+  std::filesystem::rename(temporary, path, filesystemError);
+  if (filesystemError) {
+    error = filesystemError.message();
+    std::filesystem::remove(temporary);
+    return false;
+  }
+  return true;
+}
+
 static std::string escape(const std::string& value) {
   std::string result;
   for (char character : value) {
@@ -147,6 +210,12 @@ AppConfig loadGroovyConfig(const std::filesystem::path& path,
       return AppConfig{};
     }
   }
+  std::string captureBackend;
+  if (stringValue(json, "captureBackend", captureBackend) &&
+      !parseCaptureBackend(captureBackend, config.source.captureBackend)) {
+    if (warning) *warning = "invalid capture backend; safe defaults loaded";
+    return AppConfig{};
+  }
   stringValue(json, "audioSink", config.source.audioSink);
   stringValue(json, "modelineName", config.modeline.name);
   auto number = [&](const char* key, auto& value) {
@@ -220,6 +289,8 @@ std::string serializeGroovyConfig(const AppConfig& config) {
                ? "window"
                : "monitor")
        << "\",\n"
+       << "  \"captureBackend\": \""
+       << toString(config.source.captureBackend) << "\",\n"
        << "  \"audioSink\": \"" << escape(config.source.audioSink) << "\",\n"
        << "  \"syncRefresh\": "
        << (config.source.syncRefresh ? "true" : "false") << ",\n"
