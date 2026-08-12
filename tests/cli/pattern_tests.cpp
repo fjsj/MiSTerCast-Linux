@@ -102,6 +102,15 @@ TEST(ParsePatternOptions, ReportsAMissingValueForEveryOptionThatTakesOne) {
   }
 }
 
+TEST(ParsePatternOptions, AcceptsBarsContentExplicitly) {
+  PatternOptions options;
+  std::string error;
+  ASSERT_TRUE(parsePatternOptions({"--target", "host", "--content", "bars"},
+                                  options, error))
+      << error;
+  EXPECT_EQ(options.content, PatternContent::Bars);
+}
+
 TEST(ParsePatternOptions, RejectsUnknownContent) {
   PatternOptions options;
   std::string error;
@@ -418,6 +427,42 @@ TEST(StreamGeneratedPattern, SendsNoAudioWhenTheCoreReportsAudioOff) {
   endpoint.stop();
   EXPECT_GE(blits.load(), 4u);
   EXPECT_EQ(audioCommands.load(), 0u);
+}
+
+TEST(StreamGeneratedPattern, PeriodicStatsDescribeAnUnhealthyReceiver) {
+  std::atomic<bool> stop{false};
+  std::atomic<unsigned> blits{0};
+  FakeGroovyEndpoint endpoint([&](auto& peer, const auto& packet) {
+    if (packet.empty()) return;
+    if (packet[0] == kInit) {
+      peer.replyVersion();
+    } else if (isGroovyCommand(packet[0], packet.size(), kBlit)) {
+      if (++blits >= 3) stop = true;
+      // Frameskip with nothing synced or queued: a receiver that is not
+      // keeping up, which the periodic status line has to spell out.
+      peer.replyAck({packetU32(packet, 1), packetU16(packet, 6),
+                     packetU32(packet, 1), packetU16(packet, 6), kFrameskip});
+    }
+  });
+  ASSERT_TRUE(endpoint.valid());
+  auto options = patternFor(runnerMode());
+  options.statsInterval = std::chrono::seconds(0);
+  std::ostringstream status;
+  std::string error;
+  GroovyTransport transport;
+  ASSERT_TRUE(transport.open(options.target, std::nullopt, error,
+                             endpoint.port()))
+      << error;
+  ASSERT_TRUE(streamGeneratedPattern(options, transport, stop, status, error))
+      << error;
+  transport.close();
+  endpoint.stop();
+  const auto text = status.str();
+  EXPECT_THAT(text, HasSubstr("unsynced"));
+  EXPECT_THAT(text, HasSubstr("/fallback"));
+  EXPECT_THAT(text, HasSubstr("queue empty"));
+  EXPECT_THAT(text, HasSubstr("reserve/latest"))
+      << "a field-buffer interlaced mode reports its adaptive margin";
 }
 
 TEST(StreamGeneratedPattern, StopsAndReportsWhenAFrameCannotBeSent) {

@@ -410,6 +410,132 @@ TEST(RasterCorrection, IsPositiveWhenTheFpgaRasterTrailsTheRequest) {
   EXPECT_GT(transport.stats().rasterCorrectionUs, 0);
 }
 
+TEST(WaitSync, BeforeTheFirstBlitPacesWithoutCountingAMiss) {
+  FakeGroovyEndpoint endpoint(acknowledgeInit());
+  ASSERT_TRUE(endpoint.valid());
+  GroovyTransport transport;
+  std::string error;
+  ASSERT_TRUE(transport.open("localhost", 48000, error, endpoint.port()));
+  ASSERT_TRUE(transport.switchMode(tinyMode(false), false, error));
+  // No blit is outstanding yet, so there is no acknowledgement to miss; the
+  // call must only pace one frame period.
+  transport.waitSync();
+  EXPECT_EQ(transport.stats().missedAcks, 0u);
+}
+
+TEST(WaitSync, AnEchoOfAFutureFrameMatchesItWithoutBiasingTheRoundTrip) {
+  // The receiver acknowledges only the first blit, echoing a frame that has
+  // not been sent yet. That echo may not match frame one, and when frame two
+  // matches it later the acknowledgement predates the send, so it must be
+  // rejected as a round-trip sample rather than poisoning the estimate.
+  std::atomic<bool> acked{false};
+  FakeGroovyEndpoint endpoint([&](auto& peer, const auto& packet) {
+    if (packet.empty()) return;
+    if (packet[0] == kInit)
+      peer.replyVersion();
+    else if (isGroovyCommand(packet[0], packet.size(), kBlit) &&
+             !acked.exchange(true))
+      peer.replyAck({packetU32(packet, 1) + 1, 1, packetU32(packet, 1) + 1, 1,
+                     kHealthy});
+  });
+  ASSERT_TRUE(endpoint.valid());
+  GroovyTransport transport;
+  std::string error;
+  ASSERT_TRUE(transport.open("localhost", 48000, error, endpoint.port()));
+  ASSERT_TRUE(transport.switchMode(tinyMode(false), false, error));
+  const std::vector<uint8_t> pixels(12, 42);
+  ASSERT_TRUE(transport.sendFrame(1, 0, pixels, error));
+  ASSERT_TRUE(endpoint.waitForHandledCommand(kBlit));
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  transport.waitSync();
+  const auto rttBefore = transport.stats().networkRttUs;
+  ASSERT_TRUE(transport.sendFrame(2, 0, pixels, error));
+  transport.waitSync();
+  const auto stats = transport.stats();
+  EXPECT_EQ(stats.missedAcks, 1u) << "an echo of frame two is not frame one";
+  EXPECT_EQ(stats.acknowledgedFrames, 1u);
+  EXPECT_EQ(stats.networkRttUs, rttBefore)
+      << "an acknowledgement that predates the send is not a plausible sample";
+}
+
+TEST(SwitchMode, ConfiguresTheAutomaticMarginFromTheSyncOptionsInForce) {
+  FakeGroovyEndpoint endpoint([](auto& peer, const auto& packet) {
+    if (packet.empty()) return;
+    if (packet[0] == kInit)
+      peer.replyVersion();
+    else if (isGroovyCommand(packet[0], packet.size(), kBlit))
+      acknowledgeBlit(peer, packet, packetU32(packet, 1), 1, kHealthy);
+  });
+  ASSERT_TRUE(endpoint.valid());
+  GroovyTransport transport;
+  std::string error;
+  ASSERT_TRUE(transport.open("localhost", 48000, error, endpoint.port()));
+  // Sync-to-refresh with no frame delay set before the switch arms the
+  // adaptive margin for the interlaced field buffer the switch selects.
+  transport.setSyncOptions(true, 0);
+  ASSERT_TRUE(transport.switchMode(tinyMode(), false, error));
+  const std::vector<uint8_t> pixels(6, 42);
+  for (uint32_t frame = 1; frame <= 5; ++frame) {
+    ASSERT_TRUE(transport.sendFrame(frame, 0, pixels, error)) << error;
+    transport.waitSync();
+    if (transport.stats().adaptiveTimingEligible) break;
+  }
+  EXPECT_TRUE(transport.stats().adaptiveTimingEligible);
+
+  // A manual frame delay in force at the next switch turns automation off.
+  transport.setSyncOptions(true, 5);
+  ASSERT_TRUE(transport.switchMode(tinyMode(), false, error));
+  EXPECT_FALSE(transport.stats().adaptiveTimingEligible);
+}
+
+TEST(AlignFrame, TheFirstAlignmentAfterPhaseLockIsNotARealignment) {
+  FakeGroovyEndpoint endpoint([](auto& peer, const auto& packet) {
+    if (packet.empty()) return;
+    if (packet[0] == kInit)
+      peer.replyVersion();
+    else if (isGroovyCommand(packet[0], packet.size(), kBlit))
+      acknowledgeBlit(peer, packet, packetU32(packet, 1), 1, kHealthy);
+  });
+  ASSERT_TRUE(endpoint.valid());
+  GroovyTransport transport;
+  std::string error;
+  ASSERT_TRUE(transport.open("localhost", 48000, error, endpoint.port()));
+  ASSERT_TRUE(transport.switchMode(tinyMode(), false, error));
+  const std::vector<uint8_t> pixels(6, 42);
+  // Establish FPGA phase from acknowledged blits that were sent without any
+  // alignment, the way a caller that reconnects mid-stream would.
+  for (uint32_t frame = 1; frame <= 5; ++frame) {
+    ASSERT_TRUE(transport.sendFrame(frame, 0, pixels, error)) << error;
+    transport.waitSync();
+    if (transport.stats().acknowledgedFrames) break;
+  }
+  ASSERT_GT(transport.stats().acknowledgedFrames, 0u);
+  uint32_t frame = 6;
+  uint8_t field = 0;
+  transport.alignFrame(frame, field);
+  EXPECT_EQ(transport.stats().fieldRealignments, 0u)
+      << "with no previous alignment there is no continuity to have broken";
+}
+
+TEST(DrainStatus, SurvivesTheReceiverDisappearingWithoutReportingAMatch) {
+  FakeGroovyEndpoint endpoint(acknowledgeInit());
+  ASSERT_TRUE(endpoint.valid());
+  GroovyTransport transport;
+  std::string error;
+  ASSERT_TRUE(transport.open("localhost", 48000, error, endpoint.port()));
+  endpoint.stop();
+  // Sending into the closed port draws an ICMP error that the socket reports
+  // on the next receive; draining must swallow it rather than crash or spin.
+  ASSERT_TRUE(transport.switchMode(tinyMode(false), false, error));
+  for (int attempt = 0; attempt < 25; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    GroovyTransportTestPeer::drainPendingStatus(transport, 1);
+  }
+  EXPECT_EQ(transport.stats().fpgaStatusSamples, 0u);
+  EXPECT_TRUE(transport.connected())
+      << "a drain failure is not a disconnect; the next send reports it";
+}
+
 TEST(DrainStatus, OnAClosedTransportReportsNoMatch) {
   GroovyTransport transport;
   // No socket at all: draining must simply say nothing matched.

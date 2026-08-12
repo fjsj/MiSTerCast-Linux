@@ -1,6 +1,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <signal.h>
+#include <sys/resource.h>
+
 #include <filesystem>
 #include <string>
 
@@ -207,6 +210,80 @@ TEST(SaveGroovyConfig, ReportsAFailedAtomicReplacement) {
   std::string error;
   EXPECT_FALSE(saveGroovyConfig(AppConfig{}, path, error));
   EXPECT_THAT(error, testing::Not(IsEmpty()));
+}
+
+TEST(SaveGroovyConfig, ReportsAWriteThatCannotBeCompleted) {
+  // A zero file-size limit makes every write fail after the temporary file was
+  // created, which is the only way to reach the flush failure without a full
+  // disk. SIGXFSZ must be ignored first or it would kill the process before
+  // write(2) can return the error.
+  const TemporaryDirectory directory("config-write-fails");
+  rlimit original{};
+  ASSERT_EQ(::getrlimit(RLIMIT_FSIZE, &original), 0);
+  struct sigaction ignore{}, previous{};
+  ignore.sa_handler = SIG_IGN;
+  ASSERT_EQ(::sigaction(SIGXFSZ, &ignore, &previous), 0);
+  rlimit limited = original;
+  limited.rlim_cur = 0;
+  ASSERT_EQ(::setrlimit(RLIMIT_FSIZE, &limited), 0);
+
+  std::string error;
+  const bool saved =
+      saveGroovyConfig(AppConfig{}, directory.file("config.json"), error);
+
+  ASSERT_EQ(::setrlimit(RLIMIT_FSIZE, &original), 0);
+  ASSERT_EQ(::sigaction(SIGXFSZ, &previous, nullptr), 0);
+  EXPECT_FALSE(saved);
+  EXPECT_EQ(error, "failed writing configuration");
+  EXPECT_TRUE(std::filesystem::is_empty(directory.path()))
+      << "neither the configuration nor the temporary file may remain";
+}
+
+TEST(LoadGroovyConfig, RejectionsAreSilentWithoutAWarningPointer) {
+  const TemporaryDirectory directory("config-silent-rejections");
+  EXPECT_EQ(loadGroovyConfig(
+                directory.write(
+                    "capture.json",
+                    R"({"version":1,"target":"a","captureMode":"desktop"})"))
+                .target,
+            "");
+  EXPECT_EQ(loadGroovyConfig(
+                directory.write(
+                    "sampling.json",
+                    R"({"version":1,"target":"a","sampling":"cubic"})"))
+                .target,
+            "");
+  EXPECT_EQ(loadGroovyConfig(directory.write(
+                                 "timings.json",
+                                 R"({"version":1,"target":"a","vTotal":1})"))
+                .target,
+            "");
+}
+
+TEST(LoadGroovyConfig, BracketsInsideStringsDoNotConfuseScoping) {
+  const TemporaryDirectory directory("config-string-brackets");
+  const auto path = directory.write("config.json", R"({
+  "version": 1,
+  "monitor": "array [ inside ] and object { inside } too",
+  "target": "real.local"
+})");
+  std::string warning;
+  const auto loaded = loadGroovyConfig(path, &warning);
+  EXPECT_THAT(warning, IsEmpty());
+  EXPECT_EQ(loaded.target, "real.local");
+  EXPECT_EQ(loaded.source.monitor, "array [ inside ] and object { inside } too");
+}
+
+TEST(LoadGroovyConfig, ACustomModelinesKeyWithoutAnArrayIsHarmless) {
+  const TemporaryDirectory directory("config-customs-no-array");
+  std::string warning;
+  const auto loaded = loadGroovyConfig(
+      directory.write("config.json",
+                      R"({"version":1,"target":"a","customModelines": 5})"),
+      &warning);
+  EXPECT_THAT(warning, IsEmpty());
+  EXPECT_EQ(loaded.target, "a");
+  EXPECT_THAT(loaded.customModelines, IsEmpty());
 }
 
 TEST(LoadGroovyConfig, AMissingFileYieldsDefaultsWithoutAWarning) {

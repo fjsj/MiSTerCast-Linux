@@ -112,6 +112,35 @@ TEST(TransportOpen, ReportsThatNoSocketCouldBeCreatedAtAll) {
   EXPECT_FALSE(transport.connected());
 }
 
+TEST(TransportOpen, ReportsACandidateThatRefusesTheConnection) {
+  // The IPv4 broadcast address resolves, but a plain UDP socket may not
+  // connect to it, so every candidate fails after its socket was created.
+  // That failure has to surface with the reason, not the generic fallback.
+  GroovyTransport transport;
+  std::string error;
+  EXPECT_FALSE(transport.open("255.255.255.255", std::nullopt, error, 32100));
+  EXPECT_THAT(error, HasSubstr("cannot connect UDP target"));
+  EXPECT_FALSE(transport.connected());
+}
+
+TEST(TransportOpen, RefusesARouteWhoseMtuCannotCarryThePayload) {
+  FakeGroovyEndpoint endpoint(acknowledgeInit());
+  ASSERT_TRUE(endpoint.valid());
+  // Even loopback's 64 KiB MTU cannot carry this payload in one datagram, so
+  // the candidate must be rejected before CMD_INIT is ever sent.
+  auto transport =
+      GroovyTransportTestPeer::withVideoConfig({70000, 210000, 42});
+  std::string error;
+  EXPECT_FALSE(
+      transport->open("localhost", std::nullopt, error, endpoint.port()));
+  EXPECT_THAT(error, HasSubstr("MTU"));
+  EXPECT_FALSE(transport->connected());
+  endpoint.stop();
+  for (const auto& packet : endpoint.packets())
+    EXPECT_TRUE(packet.empty() || packet[0] != kInit)
+        << "nothing may be sent over a route that would fragment";
+}
+
 TEST(TransportOpen, EnforcesStrictIpv4PathMtuDiscovery) {
   FakeGroovyEndpoint endpoint(acknowledgeInit());
   ASSERT_TRUE(endpoint.valid());
