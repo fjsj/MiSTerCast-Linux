@@ -22,6 +22,9 @@ enum class CropMode : uint8_t { Custom, X1, X2, X3, X4, X5, Full43, Full54 };
 enum class Rotation : uint8_t { None, CW90, CCW90, Flip180 };
 enum class SamplingMode : uint8_t { Point, Bilinear, LineBlend };
 enum class CapturePreference : uint8_t { Monitor, Window };
+// Which desktop capture implementation to use. Auto picks Portal on a Wayland
+// session and X11 otherwise; see resolveCaptureBackend.
+enum class CaptureBackend : uint8_t { Auto, X11, Portal };
 enum class SessionState : uint8_t {
   Idle,
   Starting,
@@ -67,6 +70,7 @@ struct SourceOptions {
   std::string monitor;
   // Persisted GUI preference. The runtime CaptureSource is supplied separately.
   CapturePreference capturePreference{CapturePreference::Monitor};
+  CaptureBackend captureBackend{CaptureBackend::Auto};
   std::string audioSink;
   bool syncRefresh{true}, progressiveInterlaceBuffer{false}, audio{true},
       preview{true};
@@ -119,6 +123,8 @@ std::string toString(Alignment value);
 std::string toString(CropMode value);
 std::string toString(Rotation value);
 std::string toString(SamplingMode value);
+std::string toString(CaptureBackend value);
+bool parseCaptureBackend(const std::string&, CaptureBackend&);
 bool parseAlignment(const std::string&, Alignment&);
 bool parseCropMode(const std::string&, CropMode&);
 bool parseRotation(const std::string&, Rotation&);

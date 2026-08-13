@@ -11,6 +11,21 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-shm xcb-composite)
 pkg_check_modules(XCB_RANDR IMPORTED_TARGET xcb-randr)
 pkg_check_modules(PULSE IMPORTED_TARGET libpulse-simple)
+# Wayland capture needs both halves: sd-bus to talk to the ScreenCast portal and
+# PipeWire to read the pixels it grants. Neither alone is usable, so they are
+# checked as one optional feature.
+#
+# OFF is what the coverage job passes. Its exclusion used to rest on the packages
+# merely being absent from the runner, which fails the branch floor the moment a
+# runner has them installed -- the portal path cannot be exercised without a
+# compositor, so instrumenting it only measures code the job cannot reach.
+option(MISTERCAST_ENABLE_WAYLAND
+  "Build Wayland capture through the ScreenCast portal, when its libraries exist"
+  ON)
+if(MISTERCAST_ENABLE_WAYLAND)
+  pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
+  pkg_check_modules(SDBUS IMPORTED_TARGET libsystemd)
+endif()
 find_library(LZ4_LIBRARY lz4)
 find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
 
@@ -33,9 +48,11 @@ endfunction()
 
 add_library(mistercast-core
   src/core/types.cpp src/core/groovy_protocol.cpp src/core/config.cpp src/core/transform.cpp
-  src/core/audio_ring.cpp src/core/audio_pacer.cpp src/linux/x11_display.cpp
+  src/core/audio_ring.cpp src/core/audio_pacer.cpp src/core/frame_slot.cpp
+  src/linux/x11_display.cpp
   src/linux/x11_capture.cpp
   src/linux/x11_source_catalog.cpp src/linux/pulse_audio.cpp
+  src/linux/capture_backend.cpp src/linux/portal_capture.cpp
   src/core/udp_pacing.cpp src/core/adaptive_timing.cpp
   src/core/groovy_transport.cpp src/core/stream_session.cpp)
 add_library(MiSTerCast::core ALIAS mistercast-core)
@@ -51,6 +68,19 @@ endif()
 if(PULSE_FOUND)
   target_link_libraries(mistercast-core PRIVATE PkgConfig::PULSE)
   target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_PULSE=1)
+endif()
+if(PIPEWIRE_FOUND AND SDBUS_FOUND)
+  # The portal client includes <systemd/sd-bus.h> unguarded, so it is added with
+  # the feature rather than compiled to nothing without it.
+  target_sources(mistercast-core PRIVATE src/linux/portal_screencast.cpp)
+  target_link_libraries(mistercast-core
+    PRIVATE PkgConfig::PIPEWIRE PkgConfig::SDBUS)
+  target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_PORTAL=1)
+elseif(MISTERCAST_ENABLE_WAYLAND)
+  message(WARNING
+    "libpipewire-0.3 or libsystemd was not found: Wayland capture through the "
+    "ScreenCast portal is disabled, leaving X11/Xorg as the only capture "
+    "backend. Install libpipewire-0.3-dev and libsystemd-dev and reconfigure.")
 endif()
 if(LZ4_LIBRARY)
   target_link_libraries(mistercast-core PRIVATE ${LZ4_LIBRARY})
@@ -95,11 +125,18 @@ install(FILES data/mistercast.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hic
 
 set(CPACK_GENERATOR "DEB")
 set(CPACK_PACKAGE_CONTACT "MiSTerCast maintainers")
+set(MISTERCAST_DEB_DEPENDS
+  "libxcb1, libxcb-composite0, libxcb-shm0, libpulse0, liblz4-1")
 if(Qt6_FOUND)
-  set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6widgets6 (>= 6.2), libxcb1, libxcb-composite0, libxcb-randr0, libxcb-shm0, libpulse0, liblz4-1")
-else()
-  set(CPACK_DEBIAN_PACKAGE_DEPENDS "libxcb1, libxcb-composite0, libxcb-shm0, libpulse0, liblz4-1")
+  string(APPEND MISTERCAST_DEB_DEPENDS
+    ", libqt6widgets6 (>= 6.2), libxcb-randr0")
 endif()
+# The Wayland backend's runtime halves. Listed only when it was built, so a
+# package from a host without the development files does not claim to need them.
+if(PIPEWIRE_FOUND AND SDBUS_FOUND)
+  string(APPEND MISTERCAST_DEB_DEPENDS ", libpipewire-0.3-0, libsystemd0")
+endif()
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "${MISTERCAST_DEB_DEPENDS}")
 set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 include(CPack)
 

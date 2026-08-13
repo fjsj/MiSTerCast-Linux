@@ -3,8 +3,10 @@
 
 #include <unistd.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <system_error>
@@ -17,6 +19,84 @@ std::filesystem::path configPath() {
   if (const char* home = std::getenv("HOME"); home && *home)
     return std::filesystem::path(home) / ".config/mistercast/config.json";
   return std::filesystem::current_path() / "config.json";
+}
+
+// Writes contents through a temporary file and a rename, so no reader ever sees a
+// half-written document and a failed write leaves the previous one in place.
+// Permissions, when given, are applied before the rename: a file that must not be
+// group-readable must not be briefly readable either.
+static bool writeFileAtomically(const std::filesystem::path& path,
+                                const std::string& contents,
+                                std::optional<std::filesystem::perms> permissions,
+                                std::string& error) {
+  std::error_code filesystemError;
+  std::filesystem::create_directories(path.parent_path(), filesystemError);
+  if (filesystemError) {
+    error = filesystemError.message();
+    return false;
+  }
+  auto temporary = path;
+  temporary += ".tmp." + std::to_string(::getpid());
+  std::ofstream file(temporary, std::ios::trunc);
+  if (!file) {
+    error = "cannot create temporary file";
+    return false;
+  }
+  file << contents;
+  file.flush();
+  if (!file) {
+    error = "failed writing file";
+    file.close();
+    std::filesystem::remove(temporary);
+    return false;
+  }
+  file.close();
+  if (permissions)
+    std::filesystem::permissions(temporary, *permissions,
+                                 std::filesystem::perm_options::replace,
+                                 filesystemError);
+  if (!filesystemError)
+    std::filesystem::rename(temporary, path, filesystemError);
+  if (filesystemError) {
+    error = filesystemError.message();
+    std::filesystem::remove(temporary);
+    return false;
+  }
+  return true;
+}
+
+std::filesystem::path portalRestoreTokenPath() {
+  return configPath().parent_path() / "portal-token";
+}
+
+std::string loadPortalRestoreToken(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  if (!file) return {};
+  std::string token;
+  std::getline(file, token);
+  // xdg-desktop-portal requires a restore token to be a UUID string and answers
+  // SelectSources with an error rather than a picker when it is not, so a file
+  // that cannot hold one is treated as absent. Checked here so that an edited or
+  // truncated file costs a dialog rather than a failed stream.
+  if (token.size() != 36) return {};
+  for (size_t index = 0; index < token.size(); ++index) {
+    const unsigned char character = token[index];
+    const bool separator = index == 8 || index == 13 || index == 18 ||
+                           index == 23;
+    if (separator != (character == '-')) return {};
+    if (separator) continue;
+    if (!std::isxdigit(character)) return {};
+  }
+  return token;
+}
+
+bool savePortalRestoreToken(const std::string& token,
+                            const std::filesystem::path& path,
+                            std::string& error) {
+  return writeFileAtomically(path, token + "\n",
+                             std::filesystem::perms::owner_read |
+                                 std::filesystem::perms::owner_write,
+                             error);
 }
 
 static std::string escape(const std::string& value) {
@@ -147,6 +227,12 @@ AppConfig loadGroovyConfig(const std::filesystem::path& path,
       return AppConfig{};
     }
   }
+  std::string captureBackend;
+  if (stringValue(json, "captureBackend", captureBackend) &&
+      !parseCaptureBackend(captureBackend, config.source.captureBackend)) {
+    if (warning) *warning = "invalid capture backend; safe defaults loaded";
+    return AppConfig{};
+  }
   stringValue(json, "audioSink", config.source.audioSink);
   stringValue(json, "modelineName", config.modeline.name);
   auto number = [&](const char* key, auto& value) {
@@ -220,6 +306,8 @@ std::string serializeGroovyConfig(const AppConfig& config) {
                ? "window"
                : "monitor")
        << "\",\n"
+       << "  \"captureBackend\": \""
+       << toString(config.source.captureBackend) << "\",\n"
        << "  \"audioSink\": \"" << escape(config.source.audioSink) << "\",\n"
        << "  \"syncRefresh\": "
        << (config.source.syncRefresh ? "true" : "false") << ",\n"
@@ -274,34 +362,7 @@ bool saveGroovyConfig(const AppConfig& config,
     error = *validation;
     return false;
   }
-  std::error_code filesystemError;
-  std::filesystem::create_directories(path.parent_path(), filesystemError);
-  if (filesystemError) {
-    error = filesystemError.message();
-    return false;
-  }
-  auto temporary = path;
-  temporary += ".tmp." + std::to_string(::getpid());
-  std::ofstream file(temporary, std::ios::trunc);
-  if (!file) {
-    error = "cannot create temporary configuration";
-    return false;
-  }
-  file << serializeGroovyConfig(config);
-  file.flush();
-  if (!file) {
-    error = "failed writing configuration";
-    file.close();
-    std::filesystem::remove(temporary);
-    return false;
-  }
-  file.close();
-  std::filesystem::rename(temporary, path, filesystemError);
-  if (filesystemError) {
-    error = filesystemError.message();
-    std::filesystem::remove(temporary);
-    return false;
-  }
-  return true;
+  return writeFileAtomically(path, serializeGroovyConfig(config), std::nullopt,
+                             error);
 }
 }  // namespace mistercast

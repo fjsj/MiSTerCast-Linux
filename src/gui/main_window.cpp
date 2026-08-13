@@ -7,6 +7,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QEventLoop>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -76,14 +77,43 @@ void MainWindow::clearWindowSelection() {
   windowSelection_->setToolTip({});
 }
 
+bool MainWindow::portalSelected() const {
+  return resolveCaptureBackend(CaptureBackend(backend_->currentIndex()),
+                               SessionEnvironment::current()) ==
+         CaptureBackend::Portal;
+}
+
+// Monitor names come from the X server, so the list is empty and meaningless
+// under the portal. The placeholder says who does own the choice rather than
+// leaving an empty combo that looks like a failure.
+void MainWindow::refreshMonitorChoices() {
+  const auto previous = monitor_->currentText();
+  const QSignalBlocker blocker(monitor_);
+  monitor_->clear();
+  if (portalSelected()) {
+    monitor_->addItem(QStringLiteral("Chosen in the desktop dialog"));
+    return;
+  }
+  std::string monitorError;
+  for (auto& monitor : x11Monitors(monitorError))
+    monitor_->addItem(QString::fromStdString(monitor.name));
+  if (!monitorError.empty()) append(monitorError);
+  const auto restored = monitor_->findText(previous);
+  if (restored >= 0) monitor_->setCurrentIndex(restored);
+}
+
 void MainWindow::refreshStartEnabled() {
   const auto state = session_.state();
   const bool busy =
       state == SessionState::Starting || state == SessionState::Stopping;
+  // Under the portal there is no window to pre-select: its dialog chooses one
+  // when the stream starts, so window mode is ready without a selection here.
+  const bool sourceReady = captureMode_->currentIndex() == 0 ||
+                           selectedWindow_ || portalSelected();
   const bool valid = !target_->text().trimmed().isEmpty() &&
                      validateGroovyModeline(modelineFromControls()) ==
                          std::nullopt &&
-                     (captureMode_->currentIndex() == 0 || selectedWindow_);
+                     sourceReady;
   streamButton_->setEnabled(!busy &&
                             (state == SessionState::Streaming || valid));
 }
@@ -99,8 +129,14 @@ void MainWindow::refreshConfigurationEnabled(SessionState state) {
       windowMode ? static_cast<QWidget*>(chooseWindowButton_) : monitorLabel_);
   chooserFieldStack_->setCurrentWidget(
       windowMode ? static_cast<QWidget*>(windowSelection_) : monitor_);
-  monitor_->setEnabled(enabled && !windowMode);
-  chooseWindowButton_->setEnabled(enabled && windowMode);
+  // Neither chooser applies under the portal: it shows its own picker at start,
+  // and there is no way to enumerate or name a Wayland output or window.
+  const bool portal = portalSelected();
+  monitor_->setEnabled(enabled && !windowMode && !portal);
+  chooseWindowButton_->setEnabled(enabled && windowMode && !portal);
+  if (portal)
+    windowSelection_->setText(
+        QStringLiteral("Chosen in the desktop dialog"));
   if (enabled) audioSink_->setEnabled(audio_->isChecked());
   // Size describes the custom crop rectangle and every other crop mode
   // computes it itself; offset nudges the crop position in every mode
@@ -372,6 +408,7 @@ void MainWindow::configFromControls() {
   config_.source.capturePreference =
       captureMode_->currentIndex() == 1 ? CapturePreference::Window
                                         : CapturePreference::Monitor;
+  config_.source.captureBackend = CaptureBackend(backend_->currentIndex());
   config_.source.audioSink =
       audioSink_->currentData().toString().toStdString();
   config_.source.audio = audio_->isChecked();
@@ -392,6 +429,8 @@ void MainWindow::configFromControls() {
 
 void MainWindow::controlsFromConfig() {
   target_->setText(QString::fromStdString(config_.target));
+  backend_->setCurrentIndex(int(config_.source.captureBackend));
+  refreshMonitorChoices();
   auto monitorIndex =
       monitor_->findText(QString::fromStdString(config_.source.monitor));
   if (monitorIndex >= 0) monitor_->setCurrentIndex(monitorIndex);
@@ -468,9 +507,37 @@ void MainWindow::toggleStream() {
 
   showState(SessionState::Starting);
   std::string error;
+  const bool portal = portalSelected();
+  PortalCaptureOptions portalOptions;
+  if (portal) {
+    // Cached permission state, not a setting: written straight through rather
+    // than waiting for Save Settings, which would also persist unrelated
+    // unsaved edits.
+    portalOptions = portalOptionsFromTokenFile(
+        portalRestoreTokenPath(),
+        [this](const std::string& warning) { append(warning); });
+    if (portalOptions.restoreToken.empty())
+      append(QStringLiteral(
+          "Waiting for the desktop screen-sharing dialog; choose a screen and "
+          "allow sharing."));
+    // The portal handshake blocks this thread until the dialog is answered, so
+    // the Starting… transition and the line above are flushed to the screen
+    // first. User input stays excluded so a second click cannot re-enter here.
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+  }
+  if (!session_.setVideoCapture(makeVideoCapture(
+          portal ? CaptureBackend::Portal : CaptureBackend::X11,
+          std::move(portalOptions)))) {
+    showState(SessionState::Error);
+    append(QStringLiteral("Cannot switch the capture backend while streaming."));
+    return;
+  }
+  // A zero window id means "no window chosen": the portal asks in its own dialog,
+  // and X11 capture refuses it with a message naming what to do.
   const CaptureSource source =
       captureMode_->currentIndex() == 1
-          ? CaptureSource{WindowCaptureSource{selectedWindow_->id}}
+          ? CaptureSource{WindowCaptureSource{
+                selectedWindow_ ? selectedWindow_->id : 0}}
           : CaptureSource{MonitorCaptureSource{
                 monitor_->currentText().toStdString()}};
   const bool started = session_.start(
@@ -704,6 +771,13 @@ MainWindow::MainWindow() {
   auto* sourceLayout = new QHBoxLayout(sourceBox);
   auto* sourceControls = new QWidget;
   auto* sourceGrid = new QGridLayout(sourceControls);
+  // Index order matches CaptureBackend, so the two convert by cast.
+  backend_ = named(new QComboBox, "backend");
+  backend_->addItems({"Automatic", "X11 / Xorg", "Wayland (desktop portal)"});
+  backend_->setToolTip(
+      "Automatic captures through the desktop portal on a Wayland session and "
+      "through X11 otherwise. The portal shows its own dialog to choose what "
+      "to share.");
   captureMode_ = named(new QComboBox, "captureMode");
   captureMode_->addItems({"Entire monitor", "Single window"});
   monitor_ = named(new QComboBox, "monitor");
@@ -745,8 +819,10 @@ MainWindow::MainWindow() {
   audio_ = named(new QCheckBox("Enable Audio"), "audio");
   preview_ = named(new QCheckBox("Enable Preview"), "preview");
   monitorLabel_ = named(new QLabel("Monitor"), "monitorLabel");
-  sourceGrid->addWidget(new QLabel("Source"), 0, 0);
-  sourceGrid->addWidget(captureMode_, 0, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Backend"), 0, 0);
+  sourceGrid->addWidget(backend_, 0, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Source"), 1, 0);
+  sourceGrid->addWidget(captureMode_, 1, 1, 1, 2);
   // The monitor chooser and the window chooser occupy the same row; the
   // capture mode decides which stack page shows. Stacking one widget per grid
   // cell keeps the row spacing regular, which two widgets overlapping in one
@@ -757,30 +833,30 @@ MainWindow::MainWindow() {
   chooserFieldStack_ = new QStackedWidget;
   chooserFieldStack_->addWidget(monitor_);
   chooserFieldStack_->addWidget(windowSelection_);
-  sourceGrid->addWidget(chooserLabelStack_, 1, 0);
-  sourceGrid->addWidget(chooserFieldStack_, 1, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Audio output"), 2, 0);
-  sourceGrid->addWidget(audioSink_, 2, 1, 1, 2);
+  sourceGrid->addWidget(chooserLabelStack_, 2, 0);
+  sourceGrid->addWidget(chooserFieldStack_, 2, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Audio output"), 3, 0);
+  sourceGrid->addWidget(audioSink_, 3, 1, 1, 2);
   // Crop sits directly above the size and offset it controls.
-  sourceGrid->addWidget(new QLabel("Crop"), 3, 0);
-  sourceGrid->addWidget(crop_, 3, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Size"), 4, 0);
-  sourceGrid->addWidget(width_, 4, 1);
-  sourceGrid->addWidget(height_, 4, 2);
-  sourceGrid->addWidget(new QLabel("Offset"), 5, 0);
-  sourceGrid->addWidget(xOffset_, 5, 1);
-  sourceGrid->addWidget(yOffset_, 5, 2);
-  sourceGrid->addWidget(new QLabel("Alignment"), 6, 0);
-  sourceGrid->addWidget(alignment_, 6, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Rotation"), 7, 0);
-  sourceGrid->addWidget(rotation_, 7, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Sampling"), 8, 0);
-  sourceGrid->addWidget(sampling_, 8, 1, 1, 2);
-  sourceGrid->addWidget(new QLabel("Frame delay"), 9, 0);
-  sourceGrid->addWidget(frameDelay_, 9, 1, 1, 2);
-  sourceGrid->addWidget(progressiveInterlaceBuffer_, 10, 0, 1, 3);
-  sourceGrid->addWidget(audio_, 11, 0, 1, 3);
-  sourceGrid->addWidget(preview_, 12, 0, 1, 3);
+  sourceGrid->addWidget(new QLabel("Crop"), 4, 0);
+  sourceGrid->addWidget(crop_, 4, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Size"), 5, 0);
+  sourceGrid->addWidget(width_, 5, 1);
+  sourceGrid->addWidget(height_, 5, 2);
+  sourceGrid->addWidget(new QLabel("Offset"), 6, 0);
+  sourceGrid->addWidget(xOffset_, 6, 1);
+  sourceGrid->addWidget(yOffset_, 6, 2);
+  sourceGrid->addWidget(new QLabel("Alignment"), 7, 0);
+  sourceGrid->addWidget(alignment_, 7, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Rotation"), 8, 0);
+  sourceGrid->addWidget(rotation_, 8, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Sampling"), 9, 0);
+  sourceGrid->addWidget(sampling_, 9, 1, 1, 2);
+  sourceGrid->addWidget(new QLabel("Frame delay"), 10, 0);
+  sourceGrid->addWidget(frameDelay_, 10, 1, 1, 2);
+  sourceGrid->addWidget(progressiveInterlaceBuffer_, 11, 0, 1, 3);
+  sourceGrid->addWidget(audio_, 12, 0, 1, 3);
+  sourceGrid->addWidget(preview_, 13, 0, 1, 3);
   sourceGrid->setColumnStretch(1, 1);
   sourceGrid->setColumnStretch(2, 1);
   sourceLayout->addWidget(sourceControls, 1);
@@ -820,10 +896,11 @@ MainWindow::MainWindow() {
   setCentralWidget(central);
   resize(840, 680);
 
-  std::string monitorError;
-  for (auto& monitor : x11Monitors(monitorError))
-    monitor_->addItem(QString::fromStdString(monitor.name));
-  if (!monitorError.empty()) append(monitorError);
+  // Populated from the loaded backend rather than unconditionally from X11: on a
+  // Wayland session an X server probe would only log a failure the user cannot
+  // act on. controlsFromConfig() below refills it once the backend is applied.
+  backend_->setCurrentIndex(int(config_.source.captureBackend));
+  refreshMonitorChoices();
   audioSink_->addItem("Default output (PC audio remains on)", QString());
   audioSink_->addItem("MiSTerCast silent output (CRT only)",
                       QString::fromLatin1(SilentAudioSink));
@@ -864,7 +941,7 @@ MainWindow::MainWindow() {
 
   // Timings stay editable while streaming: they are switched live, as the
   // Windows GUI did, which locked only the capture source and audio.
-  streamLockedControls_ = {loadButton_, target_, captureMode_, monitor_,
+  streamLockedControls_ = {loadButton_, target_, backend_, captureMode_, monitor_,
                            chooseWindowButton_, audioSink_,
                            crop_,       alignment_, rotation_, sampling_,
                            width_,
@@ -914,6 +991,14 @@ MainWindow::MainWindow() {
     if (mode == 0) {
       clearWindowSelection();
     }
+    refreshConfigurationEnabled(session_.state());
+    refreshStartEnabled();
+  });
+  connect(backend_, &QComboBox::currentIndexChanged, this, [this] {
+    // A window picked from the X server cannot be handed to the portal, and the
+    // monitor list belongs to whichever backend is now selected.
+    clearWindowSelection();
+    refreshMonitorChoices();
     refreshConfigurationEnabled(session_.state());
     refreshStartEnabled();
   });

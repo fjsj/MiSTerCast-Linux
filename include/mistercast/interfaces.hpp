@@ -41,6 +41,51 @@ std::unique_ptr<IVideoCapture> makeX11Capture(X11CaptureOptions);
 // Window discovery has a separate lifetime and concern from frame capture.
 std::vector<Monitor> x11Monitors(std::string& error);
 std::vector<CaptureWindow> x11CaptureWindows(std::string& error);
+
+// The desktop session as backend selection sees it. Passed in rather than read
+// from the environment inside resolveCaptureBackend, so the rules are testable
+// without mutating the process environment.
+struct SessionEnvironment {
+  std::string sessionType;     // XDG_SESSION_TYPE
+  std::string waylandDisplay;  // WAYLAND_DISPLAY
+  std::string display;         // DISPLAY
+  static SessionEnvironment current();
+};
+// Resolves Auto against the session and returns the requested backend
+// unchanged otherwise. Never returns Auto. A Wayland session wins over a set
+// DISPLAY, because that DISPLAY is XWayland's: it accepts a connection and then
+// hands out a black or empty root window instead of the desktop.
+CaptureBackend resolveCaptureBackend(CaptureBackend requested,
+                                     const SessionEnvironment&);
+// Whether this build has the ScreenCast portal and PipeWire backend compiled
+// in. False means makePortalCapture() still returns a capture object, but
+// start() fails with a message naming the missing build dependencies.
+bool portalCaptureAvailable() noexcept;
+struct PortalCaptureOptions {
+  // A token from a previous grant. When the portal accepts it, capture starts
+  // without a picker dialog; when it rejects it, the picker is shown instead.
+  std::string restoreToken;
+  // Called with the token the portal issued for this grant, from start(), so
+  // the caller can persist it. Empty when the portal granted none.
+  std::function<void(const std::string&)> onRestoreToken;
+};
+std::unique_ptr<IVideoCapture> makePortalCapture(PortalCaptureOptions = {});
+// Portal options wired to a token file: the stored grant is offered to the
+// portal, and a newly issued one is written back the moment it arrives. Lives
+// here rather than in each frontend because the CLI and the GUI want exactly the
+// same behaviour and only differ in where a warning goes. onWarning is called
+// with a ready-made message when the token cannot be stored, which costs a
+// dialog on the next run and nothing else.
+PortalCaptureOptions portalOptionsFromTokenFile(
+    const std::string& tokenPath,
+    std::function<void(const std::string&)> onWarning);
+// The backend-aware factory. Resolves the backend against the current session
+// and builds the matching capture; the returned object has not touched the
+// display server, portal, or PipeWire yet, so constructing it is free of
+// side effects.
+std::unique_ptr<IVideoCapture> makeVideoCapture(
+    CaptureBackend requested = CaptureBackend::Auto,
+    PortalCaptureOptions portal = {});
 std::unique_ptr<IAudioCapture> makePulseAudioCapture();
 std::vector<AudioSink> pulseAudioSinks(std::string& error);
 inline constexpr const char* SilentAudioSink = "@mistercast-silent";

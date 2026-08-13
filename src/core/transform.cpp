@@ -424,4 +424,48 @@ bool normalizeToBgra(const uint8_t* s, size_t n, uint32_t w, uint32_t h,
   }
   return true;
 }
+bool cropToBgra(const uint8_t* s, size_t n, uint32_t sw, uint32_t sh,
+                uint32_t stride, PixelOrder order, const CropRect& region,
+                Frame& o, std::string& e) {
+  if (!s || !sw || !sh || stride < uint64_t(sw) * 4 ||
+      n < uint64_t(stride) * (sh - 1) + uint64_t(sw) * 4) {
+    e = "unsupported or truncated PipeWire pixel buffer";
+    return false;
+  }
+  const uint32_t w = region.width ? region.width : sw;
+  const uint32_t h = region.height ? region.height : sh;
+  if (uint64_t(region.x) + w > sw || uint64_t(region.y) + h > sh) {
+    e = "crop region falls outside the captured frame";
+    return false;
+  }
+  o.width = w;
+  o.height = h;
+  o.stride = w * 4;
+  o.sequence = 0;
+  o.bgra.resize(size_t(w) * h * 4);
+  const uint8_t* row = s + size_t(region.y) * stride + size_t(region.x) * 4;
+  // BGRA is what the rest of the pipeline consumes, so the negotiated-first
+  // layout is a straight row copy and never touches a pixel individually. Only
+  // an RGBA producer pays for the channel swap.
+  if (order == PixelOrder::Bgra) {
+    if (stride == o.stride && !region.x && w == sw)
+      std::memcpy(o.bgra.data(), row, size_t(o.stride) * h);
+    else
+      for (uint32_t y = 0; y < h; ++y)
+        std::memcpy(o.bgra.data() + size_t(y) * o.stride,
+                    row + size_t(y) * stride, size_t(w) * 4);
+    return true;
+  }
+  for (uint32_t y = 0; y < h; ++y) {
+    const uint8_t* p = row + size_t(y) * stride;
+    uint8_t* d = o.bgra.data() + size_t(y) * o.stride;
+    for (uint32_t x = 0; x < w; ++x, p += 4, d += 4) {
+      d[0] = p[2];
+      d[1] = p[1];
+      d[2] = p[0];
+      d[3] = p[3];
+    }
+  }
+  return true;
+}
 }  // namespace mistercast

@@ -39,8 +39,8 @@ bool X11DisplayConnection::connect(std::string& error) {
   if (!connection_ || xcb_connection_has_error(connection_)) {
     reset();
     error =
-        "cannot connect to X11 display; native Wayland capture is not "
-        "supported";
+        "cannot connect to X11 display; on a Wayland session use the portal "
+        "capture backend instead";
     return false;
   }
   auto screens = xcb_setup_roots_iterator(xcb_get_setup(connection_));

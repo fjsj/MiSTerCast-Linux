@@ -197,7 +197,7 @@ TEST(SaveGroovyConfig, ReportsAnUnwritableDirectory) {
   std::filesystem::permissions(nested, std::filesystem::perms::owner_all);
   if (::geteuid() == 0) GTEST_SKIP() << "root ignores directory permissions";
   EXPECT_FALSE(saved);
-  EXPECT_EQ(error, "cannot create temporary configuration");
+  EXPECT_EQ(error, "cannot create temporary file");
 }
 
 TEST(SaveGroovyConfig, ReportsAFailedAtomicReplacement) {
@@ -234,7 +234,7 @@ TEST(SaveGroovyConfig, ReportsAWriteThatCannotBeCompleted) {
   ASSERT_EQ(::setrlimit(RLIMIT_FSIZE, &original), 0);
   ASSERT_EQ(::sigaction(SIGXFSZ, &previous, nullptr), 0);
   EXPECT_FALSE(saved);
-  EXPECT_EQ(error, "failed writing configuration");
+  EXPECT_EQ(error, "failed writing file");
   EXPECT_TRUE(std::filesystem::is_empty(directory.path()))
       << "neither the configuration nor the temporary file may remain";
 }
@@ -327,6 +327,91 @@ TEST(LoadGroovyConfig, AnUnknownCaptureModeFallsBackToSafeDefaults) {
   std::string warning;
   EXPECT_THAT(loadGroovyConfig(path, &warning).target, IsEmpty());
   EXPECT_THAT(warning, HasSubstr("capture mode"));
+}
+
+TEST(LoadGroovyConfig, RoundTripsTheCaptureBackend) {
+  const TemporaryDirectory directory("config-backend");
+  for (const auto backend : {CaptureBackend::Auto, CaptureBackend::X11,
+                             CaptureBackend::Portal}) {
+    AppConfig config;
+    config.target = "mister.local";
+    config.source.captureBackend = backend;
+    const auto path = directory.path() / (toString(backend) + ".json");
+    std::string error;
+    ASSERT_TRUE(saveGroovyConfig(config, path, error)) << error;
+    EXPECT_EQ(loadGroovyConfig(path).source.captureBackend, backend)
+        << toString(backend);
+  }
+}
+
+TEST(LoadGroovyConfig, AnUnknownCaptureBackendFallsBackToSafeDefaults) {
+  const TemporaryDirectory directory("config-backend-invalid");
+  const auto path = directory.write(
+      "config.json",
+      R"({"version":1,"target":"must-not-load","captureBackend":"xorg"})");
+  std::string warning;
+  const auto loaded = loadGroovyConfig(path, &warning);
+  EXPECT_THAT(loaded.target, IsEmpty());
+  EXPECT_EQ(loaded.source.captureBackend, CaptureBackend::Auto);
+  EXPECT_THAT(warning, HasSubstr("capture backend"));
+}
+
+// A configuration written before the backend existed must keep loading, and land
+// on Auto rather than being rejected as invalid.
+TEST(LoadGroovyConfig, AConfigWithoutABackendKeyLoadsAsAutomatic) {
+  const TemporaryDirectory directory("config-backend-absent");
+  const auto path = directory.write(
+      "config.json", R"({"version":1,"target":"mister.local"})");
+  const auto loaded = loadGroovyConfig(path);
+  EXPECT_EQ(loaded.target, "mister.local");
+  EXPECT_EQ(loaded.source.captureBackend, CaptureBackend::Auto);
+}
+
+TEST(PortalRestoreToken, RoundTripsAndIsReadableOnlyByItsOwner) {
+  const TemporaryDirectory directory("portal-token");
+  const auto path = directory.path() / "portal-token";
+  std::string error;
+  // A UUID, because that is the only shape a portal issues and the only shape
+  // that is passed back to one.
+  constexpr const char* token = "6b1f2c3d-4e5a-6789-abcd-ef0123456789";
+  ASSERT_TRUE(savePortalRestoreToken(token, path, error)) << error;
+  EXPECT_EQ(loadPortalRestoreToken(path), token);
+  // A capture-permission handle must not be left group- or world-readable.
+  const auto permissions = std::filesystem::status(path).permissions();
+  EXPECT_EQ(permissions & (std::filesystem::perms::group_all |
+                           std::filesystem::perms::others_all),
+            std::filesystem::perms::none);
+  // The rename is the only thing that should be left behind.
+  EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory.path()),
+                          std::filesystem::directory_iterator{}),
+            1);
+}
+
+TEST(PortalRestoreToken, IsAbsentRatherThanEmptyWhenNeverWritten) {
+  const TemporaryDirectory directory("portal-token-missing");
+  EXPECT_THAT(loadPortalRestoreToken(directory.path() / "portal-token"),
+              IsEmpty());
+}
+
+// xdg-desktop-portal requires a restore token to be a UUID and answers
+// SelectSources with an error rather than a picker when it is not, so a file that
+// cannot hold one is treated as absent: an edited or truncated file should cost a
+// dialog, not a failed stream.
+TEST(PortalRestoreToken, RejectsATokenNoPortalCouldHaveIssued) {
+  const TemporaryDirectory directory("portal-token-invalid");
+  const auto rejected = [&](const char* name, const std::string& contents) {
+    EXPECT_THAT(loadPortalRestoreToken(directory.write(name, contents)),
+                IsEmpty())
+        << name;
+  };
+  rejected("empty", "\n");
+  rejected("spaces", "has a space\n");
+  rejected("control", std::string("6b1f2c3d-4e5a-6789-abcd-ef012345678\t\n"));
+  rejected("short", "6b1f2c3d-4e5a-6789-abcd-ef0123456\n");
+  rejected("long", std::string(600, 'a') + "\n");
+  rejected("not-hex", "6b1f2c3d-4e5a-6789-abcd-ef012345678z\n");
+  rejected("misplaced-dashes", "6b1f2c3d4-e5a-6789-abcd-ef0123456789\n");
+  rejected("no-dashes", "6b1f2c3d4e5a6789abcdef01234567890000\n");
 }
 
 TEST(LoadGroovyConfig, AnUnknownSamplingModeFallsBackToSafeDefaults) {

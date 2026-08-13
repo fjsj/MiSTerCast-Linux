@@ -121,6 +121,69 @@ TEST_F(Gui, RestoresWindowCaptureModeWithoutRestoringTheWindow) {
       << "window mode without a selection cannot start";
 }
 
+// Under the portal there is nothing for MiSTerCast to enumerate or name: its
+// dialog chooses the source when the stream starts. The controls that exist to
+// make that choice have to say so instead of sitting there empty and disabled.
+TEST_F(Gui, AdaptsToTheWaylandPortalBackend) {
+  build();
+  // A target, so that what the assertions below turn on is the capture source
+  // rather than the address field.
+  find<QLineEdit>("target")->setText("127.0.0.1");
+  auto* backend = find<QComboBox>("backend");
+  ASSERT_EQ(backend->count(), 3);
+  backend->setCurrentIndex(int(CaptureBackend::Portal));
+
+  auto* monitor = find<QComboBox>("monitor");
+  EXPECT_EQ(monitor->count(), 1);
+  EXPECT_EQ(monitor->currentText(), "Chosen in the desktop dialog");
+  EXPECT_FALSE(monitor->isEnabled());
+  EXPECT_FALSE(find<QPushButton>("chooseWindowButton")->isEnabled());
+
+  // Window mode can start without a pre-selected window, which is the whole
+  // difference from X11: there is no window to select until the portal asks.
+  find<QComboBox>("captureMode")->setCurrentIndex(1);
+  EXPECT_EQ(find<QLabel>("windowSelection")->text(),
+            "Chosen in the desktop dialog");
+  EXPECT_TRUE(find<QPushButton>("streamButton")->isEnabled());
+
+  // And going back to X11 restores the requirement rather than leaving the
+  // portal's answer behind.
+  backend->setCurrentIndex(int(CaptureBackend::X11));
+  EXPECT_EQ(find<QLabel>("windowSelection")->text(), "No window selected");
+  EXPECT_FALSE(find<QPushButton>("streamButton")->isEnabled());
+  EXPECT_TRUE(find<QPushButton>("chooseWindowButton")->isEnabled());
+}
+
+// Starting through the portal has to reach the same reporting path as any other
+// capture failure: the button returns to Idle-or-Error and the log says why,
+// rather than the window sitting in Starting… forever.
+TEST_F(Gui, ReportsAPortalStartFailureInTheLog) {
+  if (portalCaptureAvailable())
+    GTEST_SKIP() << "a real portal may be reachable; this covers the stub";
+  build();
+  find<QLineEdit>("target")->setText("127.0.0.1");
+  find<QComboBox>("backend")->setCurrentIndex(int(CaptureBackend::Portal));
+  find<QPushButton>("streamButton")->click();
+  // Capture errors reach the log through the event loop, so this waits rather
+  // than reading straight after the click.
+  EXPECT_TRUE(pumpUntil([&] {
+    return log().toStdString().find("no Wayland screen capture") !=
+           std::string::npos;
+  }));
+  EXPECT_EQ(find<QLabel>("status")->text(), "Error");
+  EXPECT_THAT(log().toStdString(), HasSubstr("Hint:"));
+  EXPECT_THAT(log().toStdString(), HasSubstr("libpipewire"));
+}
+
+TEST_F(Gui, PersistsTheChosenCaptureBackend) {
+  build();
+  find<QComboBox>("backend")->setCurrentIndex(int(CaptureBackend::Portal));
+  find<QPushButton>("saveButton")->click();
+  EXPECT_EQ(loadGroovyConfig(directory->path() / "mistercast/config.json")
+                .source.captureBackend,
+            CaptureBackend::Portal);
+}
+
 TEST_F(Gui, ReportsACorruptConfigurationInTheLog) {
   const auto path = directory->path() / "mistercast/config.json";
   std::filesystem::create_directories(path.parent_path());
@@ -1158,6 +1221,13 @@ TEST_F(Gui, PreviewFramesReachTheLabelWhilePreviewIsEnabled) {
 
 int main(int argc, char** argv) {
   ::setenv("QT_QPA_PLATFORM", "offscreen", 1);
+  // The window adapts to the capture backend, and backend selection reads the
+  // session environment, so the session is pinned rather than inherited: the
+  // Wayland test rig in packaging/docker/ runs this suite too, and the cases
+  // below describe the X11 backend. AdaptsToTheWaylandPortalBackend covers the
+  // other one by choosing it explicitly, which works on any session.
+  ::setenv("XDG_SESSION_TYPE", "x11", 1);
+  ::unsetenv("WAYLAND_DISPLAY");
   ::testing::InitGoogleTest(&argc, argv);
   QApplication application(argc, argv);
   return RUN_ALL_TESTS();

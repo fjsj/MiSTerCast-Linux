@@ -1,16 +1,23 @@
 # MiSTerCast for Linux
 
-MiSTerCast captures an X11 monitor or individual application window, converts it to a selected low-resolution modeline, and streams video and system audio to the unmodified Groovy_MiSTer core over UDP port 32100.
+MiSTerCast captures a monitor or individual application window, converts it to a selected low-resolution modeline, and streams video and system audio to the unmodified Groovy_MiSTer core over UDP port 32100.
 
-MiSTerCast supports Ubuntu 22.04 x86-64 under **X11/Xorg only**. It has no native Wayland capture. XWayland works only when it exposes the desktop content; otherwise, log into an “Ubuntu on Xorg” session. Enter the MiSTer's IPv4 address or hostname because MiSTerCast does not discover it automatically.
+MiSTerCast supports Ubuntu 22.04, 24.04, and 26.04 on x86-64, under both X11/Xorg
+and Wayland. It chooses a capture backend from the session automatically: XCB on
+an Xorg session, and the [desktop ScreenCast portal](#wayland-capture) on a
+Wayland one, where an application cannot read the screen directly. Enter the
+MiSTer's IPv4 address or hostname because MiSTerCast does not discover it
+automatically.
 
 ## Install and build
 
-Install Ninja, CMake, a C++17 compiler, Qt 6, XCB/RandR/SHM, PulseAudio, and LZ4 development packages:
+Install Ninja, CMake, a C++17 compiler, Qt 6, XCB/RandR/SHM, PulseAudio, LZ4,
+PipeWire, and sd-bus development packages:
 
 ```sh
 sudo apt install build-essential cmake ninja-build qt6-base-dev \
-  libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev
+  libxcb1-dev libxcb-composite0-dev libxcb-randr0-dev libxcb-shm0-dev libpulse-dev liblz4-dev \
+  libpipewire-0.3-dev libsystemd-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -19,16 +26,30 @@ ctest --test-dir build --output-on-failure
 Tests use GoogleTest. CMake fetches a pinned release unless `GTest` is installed.
 Set `-DMISTERCAST_USE_SYSTEM_GTEST=ON` to require the installed package and avoid
 network access. Suites that need an X server use `xvfb-run` when available. The
-X11 and PulseAudio suites skip when no display or `pulseaudio` binary is present.
-Run `ctest -L unit` for suites that need neither. See `AGENTS.md` for `gcovr`
-branch coverage and the remaining test conventions.
+X11 and PulseAudio suites skip when no display or sound server is present. Run
+`ctest -L unit` for suites that need neither.
 
-Qt is optional at configure time so headless/build-server installations can still build the CLI and core. Without Qt, invoking `mistercast` with no command reports how to enable the GUI.
+The `wayland` suite needs a Wayland session with a desktop portal, which no
+ordinary build machine has, so it skips too. To run it, use the headless rig —
+a container with a compositor, PipeWire, and a portal in it:
+
+```sh
+./packaging/docker/wayland-test.sh            # every suite, Ubuntu 26.04
+./packaging/docker/wayland-test.sh 24.04      # a different base
+```
+
+See `AGENTS.md` for `gcovr` branch coverage and the remaining test conventions.
+
+Qt is optional at configure time so headless/build-server installations can still
+build the CLI and core. Without Qt, invoking `mistercast` with no command reports
+how to enable the GUI. `libpipewire-0.3-dev` and `libsystemd-dev` are optional in
+the same way, and are needed together: without them Wayland capture is compiled
+out and selecting it reports the missing packages.
 
 ## Run with Docker
 
-Run MiSTerCast without the build dependencies. Docker and an X11/Xorg
-session are all that is required:
+Run MiSTerCast without the build dependencies. Docker and a graphical session,
+X11 or Wayland, are all that is required:
 
 ```sh
 ./packaging/docker/mistercast-docker.sh                         # GUI
@@ -55,6 +76,21 @@ invoking user. Settings persist in the same `mistercast/config.json` under
 `$XDG_CONFIG_HOME` or `~/.config` as a native install. Enter the MiSTer's
 IPv4 address because `.local` mDNS names do not resolve inside the container.
 
+On a Wayland session it also shares the session D-Bus socket and the PipeWire
+socket, which is what the ScreenCast portal needs, and the screen-sharing dialog
+is drawn by the host desktop as usual. The window itself is drawn through
+XWayland, so `DISPLAY` must be set even there: the image carries only Qt's `xcb`
+platform plugin, and no part of it speaks the Wayland protocol.
+
+That path also runs the container with `--security-opt apparmor=unconfined`, and
+only that path. Ubuntu's `dbus-daemon` enforces AppArmor D-Bus mediation and
+Docker's `docker-default` profile grants none of it, so without the flag the
+container's first D-Bus message is refused with `An AppArmor policy prevents
+this sender from sending this message` and every later call merely reports the
+connection as not connected. It is real confinement given up to reach the
+portal. A native install needs none of it, and is the better choice on a machine
+where that matters.
+
 ## Usage
 
 Start the GUI with `mistercast`, or inspect and stream from a terminal:
@@ -78,7 +114,45 @@ Use `mistercast stream --help` for all overrides. Overrides last for that run un
 
 `mistercast pattern` tests the protocol without capture. It does not load or change saved capture settings or initialize X11 or PulseAudio. `--content bars` (the default) shows color bars, a flashing latency square, and a frame/field marker. `--content noise` generates deterministic, changing, low-compressibility pixels to exercise UDP pacing. `--tone` adds a continuous 440 Hz stereo S16LE tone paced by elapsed monotonic time. Pattern mode accepts `--target`, `--modeline`, both interlace-buffer switches, and `--frame-delay 0..10`. SIGINT and SIGTERM close it cleanly.
 
+### Wayland capture
+
+On a Wayland session an application cannot read the screen for itself. MiSTerCast
+asks `xdg-desktop-portal` instead, and the desktop answers with its own
+screen-sharing dialog; the pixels then arrive over PipeWire. This is the only
+capture path GNOME offers from Ubuntu 26.04 on, whose session has no Xorg option
+left.
+
+Three things follow from the portal owning the choice of what to share:
+
+- **The dialog picks the source, not MiSTerCast.** `--monitor`, `list-monitors`,
+  and the GUI's monitor and window choosers have nothing to name, because there
+  is no way to enumerate or address a Wayland output. `mistercast check` says so
+  rather than reporting an X11 failure.
+- **The first stream asks; later ones do not.** MiSTerCast keeps the portal's
+  restore token in `portal-token` beside `config.json`, readable only by you, and
+  reuses it so the dialog appears once. Delete that file to be asked again — for
+  instance to share a different screen.
+- **Sharing can be revoked from the desktop.** Stopping the share from the
+  system indicator ends the stream with `desktop screen sharing was stopped`.
+
+Choose the backend explicitly with `--backend x11|portal|auto`, or in the GUI's
+**Backend** control, when the automatic choice is not what you want. Capturing
+through XWayland with `--backend x11` on a Wayland session generally yields a
+black or empty image; the portal is the working path.
+
+The picker is also the reason a Wayland stream starts a little differently: the
+handshake waits for a person, so the GUI blocks while the dialog is up, and the
+CLI prints a line telling you to answer it.
+
+The GUI itself is not a Wayland client. Qt draws it through XWayland while
+capture goes through the portal, which is why `DISPLAY` must be set even on a
+Wayland session. Nothing in MiSTerCast speaks the Wayland protocol.
+
 ### Window capture
+
+Under the portal, window capture is requested the same way but chosen in the
+desktop's dialog, and some desktops offer monitors only. The rest of this section
+describes X11 window capture.
 
 To capture a window in the GUI, set **Source** to **Single window**, click
 **Choose Window…**, and select a visible X11 application window. The selection
@@ -97,7 +171,8 @@ The GUI exposes every routine streaming setting except `syncRefresh`. The CLI ac
 | Setting | Values and default | Behavior |
 | --- | --- | --- |
 | `target` | IPv4 address or hostname; empty by default | Groovy_MiSTer destination on UDP port 32100. Do not append a port. CLI: `--target HOST`. |
-| `monitor` | RandR monitor name; primary monitor by default | X11 capture source on the current `$DISPLAY`. CLI: `--monitor NAME`. |
+| `captureBackend` | `auto` by default | `auto` picks `portal` on a Wayland session and `x11` otherwise; `x11` and `portal` force one. CLI: `--backend auto\|x11\|portal` (`wayland` is accepted for `portal`). GUI: `Backend`. |
+| `monitor` | RandR monitor name; primary monitor by default | X11 capture source on the current `$DISPLAY`. Ignored by the portal backend, which has no way to name an output. CLI: `--monitor NAME`. |
 | `modeline` | Bundled 320×240 NTSC preset by default | MiSTer output timings and transformed frame dimensions. Select/edit it in the GUI, or use `--modeline 'CLOCK HACTIVE HBEGIN HEND HTOTAL VACTIVE VBEGIN VEND VTOTAL INTERLACE'`. Clock is MHz and interlace is `0` or `1`. |
 | `audio` | `true` by default | Captures stereo S16LE system playback. CLI: `--audio` or `--no-audio`. Disabled sessions explicitly negotiate audio rate/channel code `0/0` and send no audio commands. |
 | `audioSink` | Default output by default | GUI audio source. Choose `MiSTerCast silent output (CRT only)` to temporarily route current and new playback away from PC speakers and into the stream, or choose a named output sink to capture its monitor without changing playback routing. |
@@ -134,7 +209,18 @@ applications to the system/default output.
 
 ### Why does MiSTerCast say `DISPLAY is not set`?
 
-Log into an Xorg session and run MiSTerCast from that session.
+The X11 backend was selected without an X server to talk to. On a Wayland session
+leave `captureBackend` on `auto`, or pass `--backend portal`, so capture goes
+through the desktop portal instead. On an Xorg session, run MiSTerCast from
+inside it.
+
+### Why does no screen-sharing dialog appear, or why does capture fail immediately?
+
+Check that `xdg-desktop-portal` and the backend for your desktop are installed —
+`xdg-desktop-portal-gnome`, `-kde`, or `-wlr`. `mistercast check` reports which
+backend is selected and whether a saved permission exists. If a stale permission
+is being reused for the wrong screen, delete `portal-token` beside
+`config.json` and start the stream again.
 
 ### Why does the target not acknowledge `CMD_INIT`?
 
@@ -221,6 +307,25 @@ The optional `progressiveInterlaceBuffer` mode uses the receiver's documented `i
 
 This mode roughly doubles the uncompressed video pixels transformed and transmitted per update. Compression can reduce the network increase, but transform time, compression time, and the automatic raster margin can grow. Framebuffer fallback can also add latency. The mode cannot synchronize X11 capture to the source monitor, repair an already torn source frame, or change flicker from the display's deinterlacer. It has no effect on progressive modelines. Leave it off for minimum work and latency. Enable it when stable interlaced line identity matters more.
 
+#### Wayland portal capture timing
+
+Portal capture inverts where frames come from. XCB is asked for pixels when the
+raster cycle wants them; PipeWire delivers them when the compositor produces
+them, and a compositor produces one only when something changed. So:
+
+- A still desktop yields no new buffers. `next()` hands the last frame back
+  again, keeping the MiSTer refreshed at the modeline rate, which is what X11
+  capture does when it re-reads unchanged pixels.
+- A frame can be up to one compositor refresh old before the raster cycle asks
+  for it. The PC and MiSTer clocks are still independent, as under X11.
+- The crop cannot be pushed to the source: the portal always sends whole frames,
+  so the crop happens during the one copy out of the shared buffer. A crop change
+  therefore applies to the next frame the compositor produces, not to the frame
+  already in hand.
+- Only mappable memory buffers are negotiated, never DMA-BUF. The EnumFormat
+  advertises no modifier, which is what keeps a producer from offering GPU
+  planes that would need an EGL import path.
+
 #### X11 source-display synchronization
 
 MiSTer raster feedback controls when MiSTerCast requests its next capture. XCB image capture is not synchronized to the source monitor's vblank, so the PC display and MiSTer remain separate physical clocks. Their phases can drift until an XCB read overlaps a source presentation. This can produce an occasional torn source frame even when ACK timing and Ethernet delivery are healthy.
@@ -243,11 +348,11 @@ MiSTerCast for Linux replaces the former WPF/DXGI application. It is Linux-only.
 
 | Area | Linux implementation | Legacy Windows implementation in repository history |
 | --- | --- | --- |
-| Desktop/window capture | X11/Xorg through XCB and XComposite, preferring MIT-SHM with `xcb_get_image` fallback | DXGI Desktop Duplication/D3D11 |
+| Desktop/window capture | X11/Xorg through XCB and XComposite, preferring MIT-SHM with `xcb_get_image` fallback; Wayland through the `xdg-desktop-portal` ScreenCast portal and PipeWire | DXGI Desktop Duplication/D3D11 |
 | User interface | Optional Qt 6 GUI plus a headless CLI | WPF frontend calling a native DLL |
 | Audio | PulseAudio or `pipewire-pulse` default-sink monitor | WASAPI shared-mode loopback of the default render endpoint |
-| Source selection | RandR monitor name or visible X11 application window within the selected `$DISPLAY`/screen | Numeric DXGI output index |
-| Platform support | Ubuntu 22.04 x86-64 under Xorg; no native Wayland path | Windows only |
+| Source selection | RandR monitor name or visible X11 application window within the selected `$DISPLAY`/screen; under Wayland, whatever the portal's own dialog grants | Numeric DXGI output index |
+| Platform support | Ubuntu 22.04-26.04 x86-64, under Xorg and Wayland | Windows only |
 | `syncRefresh` | Defaults to `true`, is persisted, and controls ACK/raster deadline correction; currently editable only in JSON | Hard-coded `true` and not exposed by the WPF/native interop API; it mainly guarded first-frame timing initialization |
 | `frameDelay` | Defaults to automatic `0`; GUI, CLI, and JSON configurable | Initialized to automatic `0` and not exposed by the legacy frontend interop |
 | Interlaced framebuffer | Field buffers by default, with an opt-in full-height progressive framebuffer exposed in GUI, CLI, and JSON | Groovy_MiSTer's protocol supports both field-buffer `interlace=1` and progressive-framebuffer `interlace=2`; RetroArch exposes the corresponding `mister_interlaced_fb` choice |
@@ -327,5 +432,11 @@ preview, 48 and 44.1 kHz audio, resolution changes, and recovery from an
 unreachable target. Run continuously for at least 30 minutes. Then confirm that
 stopping, restarting, and exiting the application leave the core ready for
 another connection.
+
+Validate both capture backends, because they fail differently. Compare `capture`
+against `video` in the counters: on the portal backend they should track each
+other, and a `capture` rate well below `video` means frames are reaching the
+MiSTer stale. Also confirm that the first stream shows the desktop's dialog, the
+second does not, and that deleting `portal-token` brings the dialog back.
 
 The Groovy_MiSTer wire protocol portions retain their original BSD-3-Clause lineage from GroovyMAME/Groovy_MiSTer.

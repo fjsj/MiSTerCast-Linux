@@ -41,6 +41,11 @@ class MainWindow final : public QMainWindow {
   void append(const QString& message);
   void append(const std::string& message);
   void clearWindowSelection();
+  // Whether the backend the controls currently select captures through the
+  // ScreenCast portal. The portal owns source selection, so this decides
+  // whether the monitor and window choosers mean anything.
+  bool portalSelected() const;
+  void refreshMonitorChoices();
   void refreshStartEnabled();
   void refreshConfigurationEnabled(SessionState state);
   void chooseWindow();
@@ -70,8 +75,8 @@ class MainWindow final : public QMainWindow {
   QPushButton *streamButton_{}, *saveButton_{}, *loadButton_{},
       *managePresetsButton_{}, *chooseWindowButton_{};
   QLineEdit* target_{};
-  QComboBox *captureMode_{}, *monitor_{}, *audioSink_{}, *preset_{}, *crop_{},
-      *alignment_{}, *rotation_{}, *sampling_{};
+  QComboBox *backend_{}, *captureMode_{}, *monitor_{}, *audioSink_{}, *preset_{},
+      *crop_{}, *alignment_{}, *rotation_{}, *sampling_{};
   QLabel* monitorLabel_{};
   // One shared capture-source row: each stack shows the monitor or the window
   // page depending on the capture mode. A stack per grid cell keeps the row

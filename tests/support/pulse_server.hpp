@@ -92,4 +92,82 @@ class PrivatePulseServer {
   bool ready_{false};
 };
 
+// The same private sound server, provided by PipeWire's PulseAudio replacement
+// instead of PulseAudio itself.
+//
+// This is what Ubuntu 24.04 and 26.04 actually run, and the parts of the capture
+// code most likely to differ are the ones the pipewire-pulse implementation has
+// to emulate rather than merely serve: loading module-null-sink, changing the
+// default sink, and moving live playback streams. Running the same suite against
+// both servers is the only way to know they behave the same.
+//
+// wireplumber is not optional here even though nothing in the suite talks to it:
+// pipewire-pulse keeps the default-sink choice in metadata that the session
+// manager owns, and without one, set-default-sink answers "Not supported" and
+// every silent-output test fails for a reason that has nothing to do with
+// MiSTerCast.
+class PrivatePipeWirePulseServer {
+ public:
+  explicit PrivatePipeWirePulseServer(const std::filesystem::path& directory,
+                                      bool withNullSink = true)
+      : directory_(directory) {
+    // pipewire-pulse puts its native socket under the runtime directory.
+    socket_ = directory_ / "pulse" / "native";
+    std::filesystem::create_directories(directory_);
+    std::filesystem::permissions(directory_,
+                                 std::filesystem::perms::owner_all);
+    const auto environment = [this] {
+      ::setenv("XDG_RUNTIME_DIR", directory_.c_str(), 1);
+      ::setenv("HOME", directory_.c_str(), 1);
+      ::unsetenv("PULSE_SERVER");
+      // Left to find the session bus if there is one: PipeWire only logs a
+      // warning without it, unlike PulseAudio's name claim.
+    };
+    daemon_ = std::make_unique<BackgroundProcess>(
+        std::vector<std::string>{"pipewire"}, environment);
+    if (!daemon_->started()) return;
+    if (!waitFor([this] { return std::filesystem::exists(
+                              directory_ / "pipewire-0"); }))
+      return;
+    sessionManager_ = std::make_unique<BackgroundProcess>(
+        std::vector<std::string>{"wireplumber"}, environment);
+    pulse_ = std::make_unique<BackgroundProcess>(
+        std::vector<std::string>{"pipewire-pulse"}, environment);
+    if (!sessionManager_->started() || !pulse_->started()) return;
+    if (!waitFor([this] { return std::filesystem::exists(socket_); })) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ready_ = !withNullSink || loadNullSink();
+  }
+
+  PrivatePipeWirePulseServer(const PrivatePipeWirePulseServer&) = delete;
+  PrivatePipeWirePulseServer& operator=(const PrivatePipeWirePulseServer&) =
+      delete;
+
+  bool ready() const noexcept { return ready_; }
+  std::string address() const { return "unix:" + socket_.string(); }
+
+ private:
+  // PulseAudio takes its startup modules on the command line; pipewire-pulse has
+  // no equivalent, so the sink is loaded over the protocol once the server is up.
+  // pactl rather than libpulse so this header stays usable by suites that do not
+  // link it.
+  bool loadNullSink() {
+    const auto command =
+        "PULSE_SERVER=" + address() +
+        " pactl load-module module-null-sink sink_name=mistercast_test_output"
+        " rate=48000 channels=2"
+        " sink_properties=device.description=MiSTerCast_Test_Output"
+        " >/dev/null 2>&1";
+    if (std::system(command.c_str()) != 0) return false;
+    const auto setDefault = "PULSE_SERVER=" + address() +
+                            " pactl set-default-sink mistercast_test_output"
+                            " >/dev/null 2>&1";
+    return std::system(setDefault.c_str()) == 0;
+  }
+
+  std::filesystem::path directory_, socket_;
+  std::unique_ptr<BackgroundProcess> daemon_, sessionManager_, pulse_;
+  bool ready_{false};
+};
+
 }  // namespace mistercast::test

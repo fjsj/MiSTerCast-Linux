@@ -24,9 +24,16 @@ class StreamSession {
   using StateCallback =
       std::function<void(SessionState, const std::optional<SessionError>&)>;
   explicit StreamSession(
-      std::unique_ptr<IVideoCapture> video = makeX11Capture(),
+      std::unique_ptr<IVideoCapture> video = makeVideoCapture(),
       std::unique_ptr<IAudioCapture> audio = makePulseAudioCapture());
   ~StreamSession();
+  // Replaces the capture backend between streams. The backend a session should
+  // use depends on settings the GUI only has after the window exists, and on a
+  // portal token that changes as grants are made, so the long-lived session
+  // cannot be handed the right capture once at construction. Refuses while a
+  // stream is running, where swapping it would pull the buffer out from under
+  // the capture thread.
+  bool setVideoCapture(std::unique_ptr<IVideoCapture>);
   bool start(const AppConfig&, const CaptureSource&,
              StateCallback callback = {},
              std::string* error = nullptr);

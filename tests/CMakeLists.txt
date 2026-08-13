@@ -80,6 +80,8 @@ mistercast_add_test_suite(core GTEST_MAIN LABEL unit SOURCES
   core/adaptive_timing_tests.cpp
   core/transform_tests.cpp
   core/udp_pacing_tests.cpp
+  core/capture_backend_tests.cpp
+  core/frame_slot_tests.cpp
   support/capture_gate_tests.cpp)
 
 mistercast_add_test_suite(transport GTEST_MAIN LABEL unit TIMEOUT 300 SOURCES
@@ -105,6 +107,12 @@ add_dependencies(mistercast-cli-tests mistercast)
 mistercast_add_test_suite(x11 LABEL integration TIMEOUT 900 XVFB SKIP_77
   SOURCE_TREE SOURCES linux/x11_tests.cpp)
 
+# Needs a Wayland session with a desktop portal, which no CI runner and no build
+# machine has by default. packaging/docker/wayland-test.sh brings one up; without
+# it the suite exits 77 and CTest records a skip.
+mistercast_add_test_suite(wayland LABEL integration TIMEOUT 900 SKIP_77
+  SOURCE_TREE SOURCES linux/portal_capture_tests.cpp)
+
 mistercast_add_test_suite(pulse-audio LABEL integration TIMEOUT 900 SKIP_77
   SOURCES linux/pulse_audio_tests.cpp)
 if(PULSE_FOUND)
@@ -119,4 +127,11 @@ endif()
 if(Qt6_FOUND)
   mistercast_add_test_suite(gui LABEL integration TIMEOUT 900 XVFB PORT_LOCK
     SOURCE_TREE SOURCES gui/gui_tests.cpp LIBRARIES mistercast-gui)
+
+  # The window driving a real portal, which only the Wayland rig can host. Kept
+  # out of the `gui` suite because reaching a real portal captures the screen of
+  # whoever runs it; that is acceptable in the rig and nowhere else.
+  mistercast_add_test_suite(gui-wayland LABEL integration TIMEOUT 900 SKIP_77
+    PORT_LOCK SOURCE_TREE SOURCES gui/gui_portal_tests.cpp
+    LIBRARIES mistercast-gui)
 endif()

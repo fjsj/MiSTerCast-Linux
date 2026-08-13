@@ -1,12 +1,15 @@
 # MiSTerCast Linux Development Notes
 
-These instructions apply to the entire repository. MiSTerCast is Linux-only and targets Ubuntu 22.04 x86-64 under X11/Xorg. Do not reintroduce the removed Windows, WPF, DXGI, COM, or unfinished Wayland/portal paths.
+These instructions apply to the entire repository. MiSTerCast is Linux-only and targets Ubuntu 22.04, 24.04, and 26.04 on x86-64, under X11/Xorg and Wayland. Do not reintroduce the removed Windows, WPF, DXGI, or COM paths.
+
+Wayland capture goes through the `xdg-desktop-portal` ScreenCast portal and PipeWire, in `src/linux/portal_screencast.*` and `src/linux/portal_capture.cpp`. It exists because 24.04 defaults to Wayland and 26.04's GNOME has no Xorg session at all, so X11 capture alone reaches neither desktop. Both halves are optional at configure time and needed together; without them the backend compiles to a stub that names the missing packages.
 
 Some Windows behaviour is absent on purpose because it was unreachable, inert, or wrong — congestion control, the first-blit skip, the pre-`CMD_CLOSE` flush wait, delta/duplicate-frame compression, and the joystick/PS2 back-channel among them. "Windows behaviour not carried over" in `README.md` records each one with its reasoning and `b7493f9` line references. Check it before restoring something that looks like a porting regression.
 
 ## Build and verification
 
 - Use CMake/Ninja and C++17. Keep platform-neutral code in `src/core`, Linux integrations in `src/linux`, and frontend code in `src/cli` or `src/gui`.
+- Build on more than the development machine before believing a change compiles. Each release moves the compiler and the PipeWire/SPA headers, and all three have already broken this tree: gcc 13 stopped including `<array>` transitively, and `SPA_DATA_FLAG_MAPPABLE` does not exist in 22.04's PipeWire. `packaging/docker/wayland-test.sh RELEASE` builds and tests inside any of them.
 - Build and run the test suite after changes:
 
   ```sh
@@ -22,7 +25,8 @@ Some Windows behaviour is absent on purpose because it was unreachable, inert, o
   ```
 
 - Run ASan/UBSan for changes affecting buffers, pixel conversion, queues, audio, or lifecycle. LeakSanitizer may need `ASAN_OPTIONS=detect_leaks=0` in ptrace-based sandboxes.
-- `packaging/docker/` holds the container distribution (`Dockerfile`, `mistercast-docker.sh`, `smoke-test.sh`; usage in `README.md`), published as `ghcr.io/fjsj/mistercast-linux` by `.github/workflows/docker.yml`. When the build or runtime dependencies in `CMakeLists.txt` change, update the Dockerfile's apt lists to match.
+- `packaging/docker/` holds the container distribution (`Dockerfile`, `mistercast-docker.sh`, `smoke-test.sh`; usage in `README.md`), published as `ghcr.io/fjsj/mistercast-linux` by `.github/workflows/docker.yml`, plus the Wayland test rig (`Dockerfile.wayland-test`, `wayland-test-session.sh`, `wayland-test.sh`). When the build or runtime dependencies in `CMakeLists.txt` change, update both Dockerfiles' apt lists and the CPack `DEPENDS` list to match.
+- The coverage job deliberately builds *without* the Wayland backend. Its code can only be exercised where there is a compositor and a portal, and no coverage runner has either, so compiling it in would drag the branch floor down for code the job cannot reach. The `wayland` CI job covers it instead.
 - Keep `git diff --check` clean. Preserve unrelated user changes and do not commit generated build/package artifacts.
 
 ## Tests
@@ -40,8 +44,10 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
 | `pattern` | pattern parsing, generation, tone, and streaming | UDP 32100 |
 | `cli` | the built `mistercast` binary, one case per argument path | X11, UDP 32100 |
 | `gui` | `MainWindow` driven through its real widgets, offscreen | X11, UDP 32100 |
+| `gui-wayland` | the window starting, restarting and previewing a real portal stream | a Wayland session with a desktop portal, UDP 32100 |
 | `x11` | capture, display connection, and window catalog against a real X server | X11 |
-| `pulse-audio` | capture and silent-output routing against a private PulseAudio server | `pulseaudio` |
+| `wayland` | the portal handshake, PipeWire negotiation, and delivered frames against a real portal | a Wayland session with a desktop portal |
+| `pulse-audio` | capture and silent-output routing against a private sound server | `pulseaudio` or `pipewire-pulse` |
 
 - `ctest -L unit` runs only the suites that need no display, no daemon and no
   fixed port: `core` needs nothing at all and `transport` needs only loopback
@@ -56,8 +62,16 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
   anything that replies while `ctest -R session` runs. Fixing it properly means
   guarding all 47 `bindReceiver` call sites — with `if (IsSkipped()) return;`, or
   by moving the bind into a `SetUp()` where `GTEST_SKIP()` does stop the test.
-- `x11` and `pulse-audio` exit 77 (a ctest skip) when no X server or no
-  `pulseaudio` binary is available; everything else must pass everywhere.
+- `x11`, `wayland`, `gui-wayland`, and `pulse-audio` exit 77 (a ctest skip) when
+  there is no X server, no Wayland session with a portal, or no sound server;
+  everything else must pass everywhere.
+- The `pulse-audio` suite runs against whichever sound server the machine has,
+  because both implement the protocol the capture code speaks:
+  `MISTERCAST_TEST_SOUND_SERVER=pulseaudio|pipewire` forces one. The
+  pipewire-pulse flavour must start `wireplumber` too — pipewire-pulse keeps the
+  default-sink choice in session-manager metadata, and without one
+  `set-default-sink` answers "Not supported" and every silent-output test fails
+  for a reason unrelated to MiSTerCast.
 - Widgets carry an `objectName` matching the member name without its trailing
   underscore, so tests reach them with `findChild<QPushButton*>("streamButton")`
   instead of production accessors that exist only for testing. Keep new widgets
@@ -66,6 +80,17 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
   point a test at the developer's sound server: the silent-output feature moves
   the default sink and live playback streams, which would reroute whatever the
   machine is playing.
+- The same rule covers the screen, and it is enforced two ways rather than left
+  to each case. `MISTERCAST_PORTAL_TESTS=1` is required before any suite will
+  reach a real portal, and only the rig sets it; and the `cli` suite's `run()`
+  helper pins every case to an X11 session unless the case itself describes a
+  Wayland one. Both exist because a plain `ctest` on a Wayland desktop otherwise
+  captures the screen of whoever ran it, or stops to ask them for it -- with a
+  grant already stored, `start()` simply succeeds. This is not hypothetical; it
+  happened, twice.
+- The cases that exercise portal option wiring without a portal point
+  `DBUS_SESSION_BUS_ADDRESS` at a path with nothing on it, which also makes them
+  deterministic everywhere.
 - Anything this suite forks (Xvfb, pulseaudio) must redirect its stdio to
   `/dev/null` and call `setsid()`. A forked daemon holding the test binary's
   stdout keeps ctest waiting for EOF long after the tests have finished.
@@ -128,8 +153,79 @@ cmake --build build-coverage --target coverage   # summary + HTML + Cobertura
 - Always start from a clean build directory, or delete stale `*.gcda` first;
   mismatched profile data is discarded with a warning rather than merged.
 
+## The Wayland test rig
+
+`packaging/docker/` carries a container with a whole miniature Wayland desktop in
+it — sway headless on software GL, PipeWire, wireplumber, and
+xdg-desktop-portal-wlr with its picker disabled — because the portal path cannot
+be usefully faked: what breaks is the handshake a real portal answers, the format
+a real compositor negotiates, and the buffers PipeWire really delivers. Run it
+with `packaging/docker/wayland-test.sh [release] [ctest-regex]`.
+
+- It needs xdg-desktop-portal-wlr **0.8 or newer**, so it defaults to Ubuntu
+  26.04. Up to 0.7 the portal captures through `wlr-screencopy`, which offers it
+  no acceptable format on a GPU-less headless output and refuses every `Start`;
+  0.8 switched to `ext-image-copy-capture`, which works. Passing a DRM node
+  through instead is not a way out — sway 1.9 segfaults on one here. On an older
+  base the rig reports itself incapable and the `wayland` suite skips.
+- sway needs `--unsupported-gpu`: it refuses to start when it sees the host's
+  proprietary Nvidia modules through `/proc`, and nothing here touches a GPU.
+- Do not repaint the desktop while the portal is streaming. It kills
+  xdg-desktop-portal-wlr 0.8.1, and every session after it fails to start. The
+  rig paints a known background *before* starting the portal instead, and names
+  the colour in `MISTERCAST_RIG_BACKGROUND` so a test can check real pixels.
+- Suites that assume a backend must pin it rather than inherit the session: this
+  rig runs the whole suite, so `cli` passes `--backend x11` or clears the Wayland
+  variables, and `gui` pins the session in its `main`.
+
+## Wayland capture gotchas
+
+- Do not use `PW_STREAM_FLAG_MAP_BUFFERS`. PipeWire derives the mapping's
+  protection from the producer's `SPA_DATA_FLAG_READABLE`/`WRITABLE`, and
+  xdg-desktop-portal-wlr publishes capture buffers with neither — only
+  `SPA_DATA_FLAG_MAPPABLE`. The mapping then succeeds and faults with
+  `SEGV_ACCERR` on the first read, from inside the copy, on a pointer that looks
+  valid; `gdb` reads it happily because ptrace bypasses page protection. The
+  buffers are mapped in `add_buffer` with `PROT_READ` for that reason.
+- Do not answer a negotiated format with `SPA_PARAM_Buffers`. The reply
+  renegotiates, which reallocates buffers, which fires `param_changed` again, and
+  the churn reaches the copy with metadata that no longer describes the mapping.
+  Nothing is needed from it: omitting `SPA_FORMAT_VIDEO_modifier` from the
+  EnumFormat is what keeps the producer on memory buffers.
+- Never trust `chunk->size` alone. Bound every copy by `maxsize - offset` too, and
+  let `cropToBgra`'s own bounds check drop a buffer whose metadata disagrees with
+  the negotiated format.
+- The portal owns source selection. There is no way to enumerate or name a
+  Wayland output, so `--monitor`, `list-monitors`, and the GUI's choosers have
+  nothing to say; do not add code that pretends otherwise.
+- A restore token must be a UUID or `SelectSources` fails with an error instead
+  of showing a picker. `loadPortalRestoreToken` treats a file that cannot hold one
+  as absent, and a rejected grant is retried once without it, so a stale
+  permission costs a dialog rather than the stream.
+- The token is cached permission state, not a setting: it lives in its own
+  user-only file beside `config.json` so that "settings are saved only on
+  request" still holds, and so a capability handle is not left group-readable.
+- Capture is compositor-paced, unlike X11's pull. A still desktop produces no
+  buffers, so `next()` re-delivers the last frame; and a crop change applies to
+  the next frame produced, so the held frame is dropped rather than handed back at
+  a geometry the caller has stopped expecting.
+- The push-to-pull rules live in `FrameSlot` (`include/mistercast/frame_slot.hpp`),
+  not in the PipeWire code, so they are tested in the `core` suite without a
+  compositor. Only the first frame is worth waiting for: waiting for a *newer* one
+  spends the caller's whole timeout before handing back a frame that was already
+  there, and on real hardware that showed as `capture 24 fps` against a 60 Hz
+  `video`. Watch `capture` against `video` in the counters; they should track each
+  other.
+- `sd_bus_open_user()` can return before the connection has authenticated, and
+  until it has there is no unique name. One round trip (a `Peer.Ping`) forces it.
+  Without that, `sd_bus_get_unique_name` fails, every Request path is built as
+  `.../request//token` -- an invalid object path -- and the first
+  `sd_bus_match_signal` fails naming nothing. Check the return value of anything
+  that yields the sender token; an empty one is not a usable path component.
+
 ## X11 capture gotchas
 
+- These apply to the X11 backend. Backend selection is a pure function of the session environment in `resolveCaptureBackend`; a Wayland session wins over a set `DISPLAY`, because that `DISPLAY` is XWayland's and it serves no desktop content.
 - `$DISPLAY` selects the X server/screen at process startup; values such as `:1` and `:1.1` are valid. RandR names such as `DP-0` are monitors within that server, not substitutes for `$DISPLAY`.
 - Monitor enumeration is limited to the selected X server/screen. Diagnose missing outputs with `DISPLAY=:1 xrandr --listmonitors` before changing capture code.
 - A 4K source exposed a severe performance trap: generic per-channel normalization ran at about 6 FPS. Preserve the native 32-bit little-endian BGRX row-copy fast path in `normalizeToBgra`; the transform and preview intentionally ignore the X padding/alpha byte. Keep the generic mask-based path for other visuals.
@@ -175,6 +271,7 @@ cmake --build build-coverage --target coverage   # summary + HTML + Cobertura
 
 - Retain the compact hierarchy: top stream/save/load/target controls, a one-row preset chooser, capture controls beside a large preview, and status/logs at the bottom.
 - Selecting a modeline preset applies it immediately (there is no apply button), including live while streaming via the debounced switch. The modeline timing fields live inside the preset editor dialog, not the main window — but the widgets exist for the whole session (hidden between openings, reparented into each dialog), so values set on them keep driving validation and live switching. Custom presets are managed in the same dialog and persisted to the user configuration the moment they change, without writing the other, possibly unsaved, settings.
+- The backend chooser sits above the source row and its indexes match `CaptureBackend`, so the two convert by cast. Selecting the portal refills the monitor list with a placeholder naming who does own the choice, disables both source choosers, and lets window mode start without a pre-selected window — there is nothing to select until the portal asks.
 - The monitor chooser and the window chooser share one capture-source row; the capture mode decides which pair is visible. Size is enabled only for the Custom crop mode, but offset stays editable in every mode because `calculateCrop` applies it after alignment unconditionally.
 - Settings are saved only on explicit request: the Save Settings button, or the save/discard/cancel prompt shown when closing with unsaved changes. Starting a stream does not persist anything, and a SIGINT/SIGTERM close never prompts.
 - The stream button must visibly transition through `Starting…`, `Stop Stream`, and `Stopping…`; do not let preview traffic starve these state updates.

@@ -154,12 +154,12 @@ TEST(X11Display, RefusesToConnectWithoutADisplayVariable) {
   EXPECT_THAT(error, HasSubstr("DISPLAY is not set"));
 }
 
-TEST(X11Display, ExplainsThatNativeWaylandIsNotSupported) {
+TEST(X11Display, PointsAWaylandSessionAtThePortalBackend) {
   const ScopedEnvironment display("DISPLAY", ":99999");
   X11DisplayConnection connection;
   std::string error;
   EXPECT_FALSE(connection.connect(error));
-  EXPECT_THAT(error, HasSubstr("native Wayland capture is not supported"));
+  EXPECT_THAT(error, HasSubstr("portal capture backend"));
   EXPECT_EQ(connection.screen(), nullptr);
 }
 
