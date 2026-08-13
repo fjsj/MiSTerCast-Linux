@@ -62,6 +62,24 @@ elif ! docker pull "$IMAGE"; then
   fi
 fi
 
+# Which backend the user asked for, read here while $@ is still only their own
+# arguments. The last --backend wins, matching how the CLI parses them. Someone
+# who asked for X11 capture needs none of the portal plumbing below, and must not
+# pay its confinement cost for a portal that will never be used.
+requested_backend=''
+previous=''
+for argument in "$@"; do
+  case $argument in
+    --backend=*) requested_backend=${argument#--backend=} ;;
+    *)
+      if [ "$previous" = --backend ]; then
+        requested_backend=$argument
+      fi
+      ;;
+  esac
+  previous=$argument
+done
+
 # Assemble "docker run" arguments in $@, prepending option by option, so paths
 # with spaces survive without needing bash arrays. $@ starts as the user's
 # mistercast arguments and ends as the full docker argument list.
@@ -84,7 +102,12 @@ fi
 # what makes the capture backend inside the container resolve to the portal, the
 # same way it would natively. Neither the Wayland socket nor a Wayland Qt plugin
 # is involved.
-if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = wayland ]; then
+# Asked for outright, or resolved to on a Wayland session. An explicit request
+# counts even under Xorg, where GNOME's mutter also serves ScreenCast.
+if [ "$requested_backend" = portal ] || [ "$requested_backend" = wayland ] ||
+   { [ "$requested_backend" != x11 ] &&
+     { [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = wayland ]; }; }
+then
   # Ubuntu's dbus-daemon enforces AppArmor D-Bus mediation, and Docker's
   # docker-default profile grants none: without this the container's very first
   # Hello is refused with "An AppArmor policy prevents this sender from sending
@@ -94,7 +117,8 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = wayland ]; then
   # because there is no narrower option -- a profile that is docker-default plus
   # dbus rules would need installing as root before the first run. The container
   # already shares this session's bus, X11 socket, network, and IPC namespace; a
-  # native install is the way to avoid all of that.
+  # native install is the way to avoid all of that, and `--backend x11` skips
+  # this whole block.
   set -- --security-opt apparmor=unconfined "$@"
   bus_path=${DBUS_SESSION_BUS_ADDRESS#unix:path=}
   bus_path=${bus_path%%,*}
