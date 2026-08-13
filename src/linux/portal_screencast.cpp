@@ -18,9 +18,14 @@ constexpr const char* kSession = "org.freedesktop.portal.Session";
 // older portal for them is a protocol error, not a silently ignored option.
 constexpr uint32_t kRestoreTokenVersion = 4;
 constexpr uint32_t kSourceTypeMonitor = 1, kSourceTypeWindow = 2;
-constexpr uint32_t kCursorHidden = 1, kCursorEmbedded = 2;
+// The cursor is always hidden, matching X11 capture, which never includes one.
+constexpr uint32_t kCursorHidden = 1;
 constexpr uint32_t kPersistPersistent = 2;
 constexpr uint32_t kResponseSuccess = 0, kResponseCancelled = 1;
+// Only Start can show a dialog, so it is the only step allowed to wait for a
+// person. The rest must answer promptly or something is wrong.
+constexpr auto kPickerTimeout = std::chrono::minutes(2);
+constexpr auto kCallTimeout = std::chrono::seconds(15);
 
 // The bus name with the leading ':' dropped and every '.' turned into '_', which
 // is how the portal spells the caller inside a Request object path.
@@ -51,31 +56,49 @@ SessionError busError(const char* step, int result, const sd_bus_error* error) {
           "Check that xdg-desktop-portal is running in this session."};
 }
 
-int appendStringOption(sd_bus_message* message, const char* key,
-                       const std::string& value) {
-  int r = sd_bus_message_open_container(message, SD_BUS_TYPE_DICT_ENTRY, "sv");
-  if (r < 0) return r;
-  if ((r = sd_bus_message_append(message, "s", key)) < 0) return r;
-  if ((r = sd_bus_message_append(message, "v", "s", value.c_str())) < 0) return r;
-  return sd_bus_message_close_container(message);
-}
+// Writes an a{sv} options dictionary. Every portal call sends one, and each
+// append can fail, so the first error is kept here rather than checked at a dozen
+// call sites.
+class OptionDict {
+ public:
+  explicit OptionDict(sd_bus_message* message) : message_(message) {
+    result_ = sd_bus_message_open_container(message, SD_BUS_TYPE_ARRAY, "{sv}");
+  }
+  // One overload per value type the portal takes, so a caller cannot pair a
+  // signature with the wrong argument: the variadic forward to
+  // sd_bus_message_append accepts add(key, "s", std::string) and
+  // add(key, "b", false) and both are undefined behaviour.
+  OptionDict& add(const char* key, const std::string& value) {
+    return append(key, "s", value.c_str());
+  }
+  OptionDict& add(const char* key, uint32_t value) {
+    return append(key, "u", value);
+  }
+  OptionDict& add(const char* key, bool value) {
+    return append(key, "b", int(value));
+  }
+  int close() {
+    if (result_ < 0) return result_;
+    return sd_bus_message_close_container(message_);
+  }
 
-int appendUnsignedOption(sd_bus_message* message, const char* key,
-                         uint32_t value) {
-  int r = sd_bus_message_open_container(message, SD_BUS_TYPE_DICT_ENTRY, "sv");
-  if (r < 0) return r;
-  if ((r = sd_bus_message_append(message, "s", key)) < 0) return r;
-  if ((r = sd_bus_message_append(message, "v", "u", value)) < 0) return r;
-  return sd_bus_message_close_container(message);
-}
+ private:
+  template <class... Value>
+  OptionDict& append(const char* key, const char* type, Value... value) {
+    if (result_ < 0) return *this;
+    if ((result_ = sd_bus_message_open_container(
+             message_, SD_BUS_TYPE_DICT_ENTRY, "sv")) < 0)
+      return *this;
+    if ((result_ = sd_bus_message_append(message_, "s", key)) < 0) return *this;
+    if ((result_ = sd_bus_message_append(message_, "v", type, value...)) < 0)
+      return *this;
+    result_ = sd_bus_message_close_container(message_);
+    return *this;
+  }
 
-int appendBoolOption(sd_bus_message* message, const char* key, bool value) {
-  int r = sd_bus_message_open_container(message, SD_BUS_TYPE_DICT_ENTRY, "sv");
-  if (r < 0) return r;
-  if ((r = sd_bus_message_append(message, "s", key)) < 0) return r;
-  if ((r = sd_bus_message_append(message, "v", "b", int(value))) < 0) return r;
-  return sd_bus_message_close_container(message);
-}
+  sd_bus_message* message_;
+  int result_{};
+};
 
 // Reads one uint32 portal property, reporting absence rather than failing: both
 // callers have a defined behaviour for a portal that does not answer.
@@ -117,6 +140,21 @@ std::string entryKey(sd_bus_message* message) {
   return key;
 }
 
+// Walks an a{sv} dictionary, offering each key to the reader. A reader that does
+// not consume the value returns false and the value is skipped: leaving one
+// half-read desynchronizes every field after it.
+template <class Reader>
+void forEachOption(sd_bus_message* message, Reader reader) {
+  if (sd_bus_message_enter_container(message, SD_BUS_TYPE_ARRAY, "{sv}") < 0)
+    return;
+  while (sd_bus_message_enter_container(message, SD_BUS_TYPE_DICT_ENTRY, "sv") >
+         0) {
+    if (!reader(entryKey(message))) sd_bus_message_skip(message, "v");
+    sd_bus_message_exit_container(message);
+  }
+  sd_bus_message_exit_container(message);
+}
+
 struct GrantedStream {
   bool present{};
   uint32_t nodeId{};
@@ -127,12 +165,10 @@ struct GrantedStream {
 // PipeWire node id and its properties. multiple:false was requested, so only the
 // first entry is kept -- but the rest are still walked, because leaving a
 // container half-read desynchronizes every field after it.
-void readStreamVariant(sd_bus_message* message, GrantedStream& out) {
+bool readStreamVariant(sd_bus_message* message, GrantedStream& out) {
   if (sd_bus_message_enter_container(message, SD_BUS_TYPE_VARIANT,
-                                     "a(ua{sv})") <= 0) {
-    sd_bus_message_skip(message, "v");
-    return;
-  }
+                                     "a(ua{sv})") <= 0)
+    return false;
   if (sd_bus_message_enter_container(message, SD_BUS_TYPE_ARRAY, "(ua{sv})") >
       0) {
     while (sd_bus_message_enter_container(message, SD_BUS_TYPE_STRUCT,
@@ -143,28 +179,21 @@ void readStreamVariant(sd_bus_message* message, GrantedStream& out) {
         out.nodeId = node;
         out.present = true;
       }
-      if (sd_bus_message_enter_container(message, SD_BUS_TYPE_ARRAY, "{sv}") >
-          0) {
-        while (sd_bus_message_enter_container(message, SD_BUS_TYPE_DICT_ENTRY,
-                                              "sv") > 0) {
-          int32_t x = 0, y = 0;
-          if (entryKey(message) == "size" && readPointVariant(message, x, y)) {
-            if (first) {
-              out.width = uint32_t(std::max(x, 0));
-              out.height = uint32_t(std::max(y, 0));
-            }
-          } else {
-            sd_bus_message_skip(message, "v");
-          }
-          sd_bus_message_exit_container(message);
+      forEachOption(message, [&](const std::string& property) {
+        int32_t x = 0, y = 0;
+        if (property != "size" || !readPointVariant(message, x, y)) return false;
+        if (first) {
+          out.width = uint32_t(std::max(x, 0));
+          out.height = uint32_t(std::max(y, 0));
         }
-        sd_bus_message_exit_container(message);
-      }
+        return true;
+      });
       sd_bus_message_exit_container(message);
     }
     sd_bus_message_exit_container(message);
   }
   sd_bus_message_exit_container(message);
+  return true;
 }
 }  // namespace
 
@@ -180,12 +209,10 @@ bool PortalScreenCast::ensureBus(SessionError& error) {
              "DBUS_SESSION_BUS_ADDRESS points at it."};
     return false;
   }
-  // sd_bus_open_user() may return before the connection has finished
-  // authenticating, and until it has, there is no unique name to ask for. One
-  // round trip forces it: without this, the name comes back empty on some
-  // bus/libsystemd combinations, every Request path is built as
-  // ".../request//token" -- an invalid object path -- and the first
-  // sd_bus_match_signal fails for a reason that names nothing.
+  // sd_bus_open_user() can return before the connection has authenticated, and
+  // until it has there is no unique name. One round trip forces it; without it
+  // the name is empty, every Request path becomes ".../request//token", and that
+  // invalid path fails the first sd_bus_match_signal.
   sd_bus_error pingFailure = SD_BUS_ERROR_NULL;
   sd_bus_call_method(bus_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
                      "org.freedesktop.DBus.Peer", "Ping", &pingFailure, nullptr,
@@ -348,32 +375,19 @@ bool PortalScreenCast::open(const Request& request, PortalStream& out,
 
   std::string sessionPath;
   auto readSession = [&sessionPath](sd_bus_message* message) {
-    // results is a{sv}; only session_handle matters here.
-    if (sd_bus_message_enter_container(message, SD_BUS_TYPE_ARRAY, "{sv}") < 0)
-      return;
-    while (sd_bus_message_enter_container(message, SD_BUS_TYPE_DICT_ENTRY,
-                                          "sv") > 0) {
-      if (entryKey(message) != "session_handle" ||
-          !readStringVariant(message, sessionPath))
-        sd_bus_message_skip(message, "v");
-      sd_bus_message_exit_container(message);
-    }
-    sd_bus_message_exit_container(message);
+    forEachOption(message, [&](const std::string& key) {
+      return key == "session_handle" && readStringVariant(message, sessionPath);
+    });
   };
   const auto sessionToken =
       "mistercast" + std::to_string(::getpid()) + "_session";
   if (!call(
-          "CreateSession", request.callTimeout,
+          "CreateSession", kCallTimeout,
           [&](sd_bus_message* message, const std::string& token) {
-            int r = sd_bus_message_open_container(message, SD_BUS_TYPE_ARRAY,
-                                                 "{sv}");
-            if (r < 0) return r;
-            if ((r = appendStringOption(message, "handle_token", token)) < 0)
-              return r;
-            if ((r = appendStringOption(message, "session_handle_token",
-                                        sessionToken)) < 0)
-              return r;
-            return sd_bus_message_close_container(message);
+            return OptionDict(message)
+                .add("handle_token", token)
+                .add("session_handle_token", sessionToken)
+                .close();
           },
           readSession, error))
     return false;
@@ -383,46 +397,31 @@ bool PortalScreenCast::open(const Request& request, PortalStream& out,
     return false;
   }
   sessionPath_ = sessionPath;
-  sessionClosed_ = false;
   sd_bus_match_signal(bus_, &sessionSlot_, kService, sessionPath_.c_str(),
                       kSession, "Closed", PortalScreenCast::onClosedSignal, this);
 
   const bool restorable = haveVersion && version >= kRestoreTokenVersion;
   if (!call(
-          "SelectSources", request.callTimeout,
+          "SelectSources", kCallTimeout,
           [&](sd_bus_message* message, const std::string& token) {
             int r = sd_bus_message_append(message, "o", sessionPath_.c_str());
             if (r < 0) return r;
-            if ((r = sd_bus_message_open_container(message, SD_BUS_TYPE_ARRAY,
-                                                   "{sv}")) < 0)
-              return r;
-            if ((r = appendStringOption(message, "handle_token", token)) < 0)
-              return r;
-            if ((r = appendUnsignedOption(
-                     message, "types",
-                     request.preference == CapturePreference::Window
-                         ? kSourceTypeWindow
-                         : kSourceTypeMonitor)) < 0)
-              return r;
-            if ((r = appendBoolOption(message, "multiple", false)) < 0) return r;
-            if (haveCursorModes) {
-              const uint32_t wanted =
-                  request.embedCursor ? kCursorEmbedded : kCursorHidden;
-              if (cursorModes & wanted)
-                if ((r = appendUnsignedOption(message, "cursor_mode", wanted)) <
-                    0)
-                  return r;
-            }
+            OptionDict options(message);
+            options.add("handle_token", token)
+                .add("types", request.preference == CapturePreference::Window
+                                  ? kSourceTypeWindow
+                                  : kSourceTypeMonitor)
+                .add("multiple", false);
+            // cursor_mode and persist_mode are only accepted by portals that
+            // advertise them; an older one treats an unknown option as an error.
+            if (haveCursorModes && (cursorModes & kCursorHidden))
+              options.add("cursor_mode", kCursorHidden);
             if (restorable) {
-              if ((r = appendUnsignedOption(message, "persist_mode",
-                                            kPersistPersistent)) < 0)
-                return r;
-              if (!request.restoreToken.empty() &&
-                  (r = appendStringOption(message, "restore_token",
-                                          request.restoreToken)) < 0)
-                return r;
+              options.add("persist_mode", kPersistPersistent);
+              if (!request.restoreToken.empty())
+                options.add("restore_token", request.restoreToken);
             }
-            return sd_bus_message_close_container(message);
+            return options.close();
           },
           {}, error))
     return false;
@@ -430,37 +429,21 @@ bool PortalScreenCast::open(const Request& request, PortalStream& out,
   GrantedStream granted;
   std::string restoreToken;
   auto readStreams = [&](sd_bus_message* message) {
-    if (sd_bus_message_enter_container(message, SD_BUS_TYPE_ARRAY, "{sv}") < 0)
-      return;
-    while (sd_bus_message_enter_container(message, SD_BUS_TYPE_DICT_ENTRY,
-                                          "sv") > 0) {
-      const auto key = entryKey(message);
-      if (key == "restore_token") {
-        if (!readStringVariant(message, restoreToken))
-          sd_bus_message_skip(message, "v");
-      } else if (key == "streams") {
-        readStreamVariant(message, granted);
-      } else {
-        sd_bus_message_skip(message, "v");
-      }
-      sd_bus_message_exit_container(message);
-    }
-    sd_bus_message_exit_container(message);
+    forEachOption(message, [&](const std::string& key) {
+      if (key == "restore_token") return readStringVariant(message, restoreToken);
+      if (key == "streams") return readStreamVariant(message, granted);
+      return false;
+    });
   };
   if (!call(
-          "Start", request.pickerTimeout,
+          "Start", kPickerTimeout,
           [&](sd_bus_message* message, const std::string& token) {
             int r = sd_bus_message_append(message, "o", sessionPath_.c_str());
             if (r < 0) return r;
             // No parent window: MiSTerCast has no Wayland surface handle to
             // give, so the portal dialog is not modal to it.
             if ((r = sd_bus_message_append(message, "s", "")) < 0) return r;
-            if ((r = sd_bus_message_open_container(message, SD_BUS_TYPE_ARRAY,
-                                                   "{sv}")) < 0)
-              return r;
-            if ((r = appendStringOption(message, "handle_token", token)) < 0)
-              return r;
-            return sd_bus_message_close_container(message);
+            return OptionDict(message).add("handle_token", token).close();
           },
           readStreams, error))
     return false;

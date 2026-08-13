@@ -14,8 +14,18 @@ pkg_check_modules(PULSE IMPORTED_TARGET libpulse-simple)
 # Wayland capture needs both halves: sd-bus to talk to the ScreenCast portal and
 # PipeWire to read the pixels it grants. Neither alone is usable, so they are
 # checked as one optional feature.
-pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(SDBUS IMPORTED_TARGET libsystemd)
+#
+# OFF is what the coverage job passes. Its exclusion used to rest on the packages
+# merely being absent from the runner, which fails the branch floor the moment a
+# runner has them installed -- the portal path cannot be exercised without a
+# compositor, so instrumenting it only measures code the job cannot reach.
+option(MISTERCAST_ENABLE_WAYLAND
+  "Build Wayland capture through the ScreenCast portal, when its libraries exist"
+  ON)
+if(MISTERCAST_ENABLE_WAYLAND)
+  pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
+  pkg_check_modules(SDBUS IMPORTED_TARGET libsystemd)
+endif()
 find_library(LZ4_LIBRARY lz4)
 find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
 
@@ -38,7 +48,8 @@ endfunction()
 
 add_library(mistercast-core
   src/core/types.cpp src/core/groovy_protocol.cpp src/core/config.cpp src/core/transform.cpp
-  src/core/audio_ring.cpp src/core/audio_pacer.cpp src/linux/x11_display.cpp
+  src/core/audio_ring.cpp src/core/audio_pacer.cpp src/core/frame_slot.cpp
+  src/linux/x11_display.cpp
   src/linux/x11_capture.cpp
   src/linux/x11_source_catalog.cpp src/linux/pulse_audio.cpp
   src/linux/capture_backend.cpp src/linux/portal_capture.cpp
@@ -65,7 +76,7 @@ if(PIPEWIRE_FOUND AND SDBUS_FOUND)
   target_link_libraries(mistercast-core
     PRIVATE PkgConfig::PIPEWIRE PkgConfig::SDBUS)
   target_compile_definitions(mistercast-core PRIVATE MISTERCAST_HAVE_PORTAL=1)
-else()
+elseif(MISTERCAST_ENABLE_WAYLAND)
   message(WARNING
     "libpipewire-0.3 or libsystemd was not found: Wayland capture through the "
     "ScreenCast portal is disabled, leaving X11/Xorg as the only capture "

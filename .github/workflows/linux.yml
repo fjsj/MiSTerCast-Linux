@@ -76,11 +76,11 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y $MISTERCAST_APT
+      - run: sudo apt-get update && sudo apt-get install -y $MISTERCAST_APT $MISTERCAST_WAYLAND_APT
       - run: pipx install gcovr
       - run: |
           cmake -S . -B build-coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-            -DMISTERCAST_ENABLE_COVERAGE=ON
+            -DMISTERCAST_ENABLE_COVERAGE=ON -DMISTERCAST_ENABLE_WAYLAND=OFF
       - run: cmake --build build-coverage
       - run: ctest --test-dir build-coverage --output-on-failure
       # Prints the per-file branch summary and fails below the configured floor.

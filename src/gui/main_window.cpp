@@ -526,17 +526,18 @@ void MainWindow::toggleStream() {
     QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
   }
   if (!session_.setVideoCapture(makeVideoCapture(
-          CaptureBackend(backend_->currentIndex()), std::move(portalOptions)))) {
+          portal ? CaptureBackend::Portal : CaptureBackend::X11,
+          std::move(portalOptions)))) {
     showState(SessionState::Error);
     append(QStringLiteral("Cannot switch the capture backend while streaming."));
     return;
   }
-  // Under the portal a window is chosen in its dialog, so window mode carries no
-  // pre-selected window and only says which kind of source to ask for.
+  // A zero window id means "no window chosen": the portal asks in its own dialog,
+  // and X11 capture refuses it with a message naming what to do.
   const CaptureSource source =
       captureMode_->currentIndex() == 1
           ? CaptureSource{WindowCaptureSource{
-                portal ? 0 : selectedWindow_->id}}
+                selectedWindow_ ? selectedWindow_->id : 0}}
           : CaptureSource{MonitorCaptureSource{
                 monitor_->currentText().toStdString()}};
   const bool started = session_.start(

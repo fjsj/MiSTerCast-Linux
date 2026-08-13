@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 
+#include "mistercast/frame_slot.hpp"
 #include "mistercast/interfaces.hpp"
 #include "mistercast/transform.hpp"
 
@@ -115,16 +116,11 @@ const spa_pod* buildEnumFormat(spa_pod_builder& builder) {
   return static_cast<const spa_pod*>(spa_pod_builder_pop(&builder, &object));
 }
 
-// One buffer's pixels, mapped by this code rather than by PipeWire.
-//
-// PW_STREAM_FLAG_MAP_BUFFERS is the obvious way to get here and it is the wrong
-// one: PipeWire derives the mapping's protection from the producer's
-// SPA_DATA_FLAG_READABLE/WRITABLE, and xdg-desktop-portal-wlr publishes screen
-// capture buffers with neither -- only SPA_DATA_FLAG_MAPPABLE. The result maps
-// successfully and then faults with SEGV_ACCERR on the first read, from inside
-// the copy, on a pointer that looks perfectly valid. Mapping the descriptor here
-// with PROT_READ says what this side actually needs and does not depend on a
-// producer getting its flags right.
+// One buffer's pixels, mapped here rather than by PW_STREAM_FLAG_MAP_BUFFERS.
+// PipeWire takes the mapping's protection from the producer's
+// SPA_DATA_FLAG_READABLE/WRITABLE, and xdg-desktop-portal-wlr sets neither, so
+// that flag maps buffers this side cannot read. PROT_READ says what is needed
+// instead of depending on a producer's flags.
 struct MappedBuffer {
   void* base{};
   size_t length{};
@@ -175,21 +171,23 @@ class PortalCapture final : public IVideoCapture {
   // teardownPipeWire once it has stopped.
   std::map<const pw_buffer*, std::unique_ptr<MappedBuffer>> mappings_;
 
+  // Every rule about waiting for, re-delivering and dropping frames lives in the
+  // slot, which needs no PipeWire and is tested without a compositor.
+  FrameSlot slot_;
+  // Guards the negotiated format and the crop derived from it. Where both locks
+  // are held, this one is always taken first and the slot's second -- consume()
+  // and setRegion() do exactly that. The reverse cannot happen, because FrameSlot
+  // never calls back into this class.
   mutable std::mutex mutex_;
-  std::condition_variable cv_;
-  // The newest frame, already cropped. Held rather than handed over, so a still
-  // desktop can be re-delivered; see next().
-  Frame pending_;
-  uint64_t pendingCount_{}, deliveredCount_{}, sequence_{};
+  std::condition_variable formatReady_;
   CropRect region_{};
   uint32_t sourceWidth_{}, sourceHeight_{};
   PixelOrder order_{PixelOrder::Bgra};
   bool negotiated_{};
-  // Set by the PipeWire and portal callbacks, reported by next(). Failures are
-  // deliberately not delivered from those threads: X11 capture reports through
-  // the capture thread inside next(), and the session's error handling is
-  // written for that one caller.
-  std::optional<SessionError> failure_;
+  // Mirrors "the slot has a failure" under mutex_. The negotiation wait needs it
+  // in its predicate, and a predicate reading state guarded by another lock while
+  // waiting on this one loses wakeups: every notify below fires unlocked.
+  bool negotiationFailed_{};
   ErrorCallback error_;
   std::atomic<bool> running_{false};
 
@@ -197,14 +195,13 @@ class PortalCapture final : public IVideoCapture {
                              const char* error) {
     auto& self = *static_cast<PortalCapture*>(data);
     if (state != PW_STREAM_STATE_ERROR) return;
-    std::lock_guard<std::mutex> lock(self.mutex_);
-    if (!self.failure_)
-      self.failure_ = SessionError{
-          "video",
-          std::string("the PipeWire capture stream failed") +
-              (error ? std::string(": ") + error : std::string()),
-          "Check that PipeWire is running, then start the stream again."};
-    self.cv_.notify_all();
+    self.slot_.fail(
+        {"video",
+         std::string("the PipeWire capture stream failed") +
+             (error ? std::string(": ") + error : std::string()),
+         "Check that PipeWire is running, then start the stream again."});
+    // Also wakes a start() still waiting for the first format.
+    self.failNegotiation();
   }
 
   static void onParamChanged(void* data, uint32_t id, const spa_pod* param) {
@@ -218,16 +215,16 @@ class PortalCapture final : public IVideoCapture {
     spa_video_info_raw raw{};
     if (spa_format_video_raw_parse(param, &raw) < 0) return;
     PixelOrder order{PixelOrder::Bgra};
+    if (!pixelOrderFor(raw.format, order)) {
+      self.slot_.fail(
+          {"video", "the compositor offered an unsupported pixel format",
+           "Report the compositor and PipeWire versions; MiSTerCast needs a "
+           "32-bit BGRA or RGBA screen-capture format."});
+      self.failNegotiation();
+      return;
+    }
     {
       std::lock_guard<std::mutex> lock(self.mutex_);
-      if (!pixelOrderFor(raw.format, order)) {
-        self.failure_ = SessionError{
-            "video", "the compositor offered an unsupported pixel format",
-            "Report the compositor and PipeWire versions; MiSTerCast needs a "
-            "32-bit BGRA or RGBA screen-capture format."};
-        self.cv_.notify_all();
-        return;
-      }
       self.order_ = order;
       self.sourceWidth_ = raw.size.width;
       self.sourceHeight_ = raw.size.height;
@@ -236,34 +233,31 @@ class PortalCapture final : public IVideoCapture {
       // notices the new geometry and narrows the region again.
       self.region_ = {};
       self.negotiated_ = true;
-      self.cv_.notify_all();
     }
-    // Deliberately no pw_stream_update_params reply. A consumer may answer a
-    // format with its own SPA_PARAM_Buffers, and restricting dataType to
-    // MemFd/MemPtr there looked like the way to keep buffers mappable -- but the
-    // reply renegotiates, which reallocates buffers, which fires param_changed
-    // again, and the churn was reaching consume() with buffer metadata that did
-    // not describe the mapping any more. Nothing is needed from it either:
-    // omitting SPA_FORMAT_VIDEO_modifier from the EnumFormat already keeps the
-    // producer on memory buffers, and PW_STREAM_FLAG_MAP_BUFFERS maps them.
+    // The held frame was cropped from the old format, so it no longer describes
+    // what a caller asking for this one expects.
+    self.slot_.discard();
+    self.formatReady_.notify_all();
+    // No pw_stream_update_params reply on purpose: answering with
+    // SPA_PARAM_Buffers renegotiates, which reallocates buffers and fires
+    // param_changed again, and that churn reached consume() with metadata that
+    // no longer described the mapping. Nothing here needs it -- the EnumFormat
+    // omits SPA_FORMAT_VIDEO_modifier, which is what keeps buffers mappable.
   }
 
-  // Buffers are mapped once when PipeWire announces them, not once per frame:
-  // an mmap and munmap per frame at the modeline refresh would be pure overhead,
-  // and the announcement is also the only point where a mapping failure can be
-  // reported before pixels are expected.
+  // Mapped once per buffer rather than once per frame: an mmap and munmap every
+  // refresh would be pure overhead, and this is the only point where a mapping
+  // failure can be reported before pixels are expected.
   static void onAddBuffer(void* data, pw_buffer* buffer) {
     auto& self = *static_cast<PortalCapture*>(data);
     auto mapping = std::make_unique<MappedBuffer>();
     if (!buffer->buffer->n_datas ||
         !mapping->map(buffer->buffer->datas[0])) {
-      std::lock_guard<std::mutex> lock(self.mutex_);
-      if (!self.failure_)
-        self.failure_ = SessionError{
-            "video", "cannot read the compositor's capture buffers",
-            "Report the compositor and PipeWire versions; MiSTerCast needs "
-            "shared-memory screen capture buffers."};
-      self.cv_.notify_all();
+      self.slot_.fail(
+          {"video", "cannot read the compositor's capture buffers",
+           "Report the compositor and PipeWire versions; MiSTerCast needs "
+           "shared-memory screen capture buffers."});
+      self.failNegotiation();
       return;
     }
     // Owned here rather than by user_data alone, so teardown frees the mappings
@@ -308,6 +302,13 @@ class PortalCapture final : public IVideoCapture {
     // and is skipped rather than read past.
     const size_t available = data.maxsize - data.chunk->offset;
     const size_t size = std::min<size_t>(data.chunk->size, available);
+    // The crop happens under the lock, and publishing before releasing it is the
+    // point: setRegion runs on the capture thread and drops the held frame when
+    // the region changes, so a crop that read the old region outside the lock
+    // could publish afterwards and put that frame back -- exactly what setRegion
+    // exists to prevent, with a whole-frame copy as the window. Nothing waits on
+    // this lock that matters: next() takes only the slot's, so holding it here
+    // delays setRegion, selectedGeometry and onParamChanged and nothing else.
     std::lock_guard<std::mutex> lock(mutex_);
     if (!sourceHeight_) return;
     const uint32_t stride = data.chunk->stride > 0
@@ -315,10 +316,19 @@ class PortalCapture final : public IVideoCapture {
                                 : uint32_t(size / sourceHeight_);
     std::string error;
     if (cropToBgra(mapping->pixels + data.chunk->offset, size, sourceWidth_,
-                   sourceHeight_, stride, order_, region_, pending_, error)) {
-      ++pendingCount_;
-      cv_.notify_all();
+                   sourceHeight_, stride, order_, region_, slot_.staging(),
+                   error))
+      slot_.publish();
+  }
+
+  // Records a failure for the negotiation wait and wakes it. Set under mutex_ so
+  // the wait's predicate reads only state that mutex_ guards.
+  void failNegotiation() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      negotiationFailed_ = true;
     }
+    formatReady_.notify_all();
   }
 
   // Safe to touch mappings_ only after the loop has stopped, which is the point
@@ -417,15 +427,17 @@ class PortalCapture final : public IVideoCapture {
     std::unique_lock<std::mutex> lock(mutex_);
     // The session asks for the source geometry as soon as start() returns, so
     // the negotiated size has to be known by then rather than a frame later.
-    if (!cv_.wait_for(lock, kNegotiationTimeout,
-                      [this] { return negotiated_ || failure_.has_value(); })) {
-      error = {"video", "the compositor did not start the capture stream",
-               "Check that PipeWire and the desktop portal are running."};
+    const bool answered = formatReady_.wait_for(
+        lock, kNegotiationTimeout,
+        [this] { return negotiated_ || negotiationFailed_; });
+    lock.unlock();
+    if (auto failure = slot_.takeFailure()) {
+      error = *failure;
       return false;
     }
-    if (failure_) {
-      error = *failure_;
-      failure_.reset();
+    if (!answered) {
+      error = {"video", "the compositor did not start the capture stream",
+               "Check that PipeWire and the desktop portal are running."};
       return false;
     }
     return true;
@@ -450,7 +462,6 @@ class PortalCapture final : public IVideoCapture {
                              ? CapturePreference::Window
                              : CapturePreference::Monitor;
     request.restoreToken = options_.restoreToken;
-    request.embedCursor = options_.embedCursor;
     PortalStream granted;
     SessionError error;
     if (!portal_.open(request, granted, error)) {
@@ -470,11 +481,11 @@ class PortalCapture final : public IVideoCapture {
     }
     if (options_.onRestoreToken && !granted.restoreToken.empty())
       options_.onRestoreToken(granted.restoreToken);
+    slot_.reset();
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      pendingCount_ = deliveredCount_ = sequence_ = 0;
       negotiated_ = false;
-      failure_.reset();
+      negotiationFailed_ = false;
       region_ = {};
     }
     if (!startPipeWire(granted, error)) {
@@ -485,11 +496,8 @@ class PortalCapture final : public IVideoCapture {
     }
     error_ = std::move(callback);
     portal_.watch([this] {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!failure_)
-        failure_ = SessionError{"video", "desktop screen sharing was stopped",
-                                "Start the stream again and allow sharing."};
-      cv_.notify_all();
+      slot_.fail({"video", "desktop screen sharing was stopped",
+                  "Start the stream again and allow sharing."});
     });
     running_ = true;
     return true;
@@ -513,66 +521,38 @@ class PortalCapture final : public IVideoCapture {
         wanted.width == region_.width && wanted.height == region_.height)
       return;
     region_ = wanted;
-    // The held frame was cropped the old way, and the caller changed the region
-    // because it now expects the new geometry -- after a live modeline switch,
-    // its crop and this frame would disagree. Dropping it makes next() wait for
-    // a frame that matches instead of handing back one that does not. Only on a
-    // real change, so a session that re-asserts the same region every cycle is
-    // not starved.
-    pendingCount_ = deliveredCount_ = 0;
+    // Only on a real change, so a session re-asserting the same region every
+    // cycle is not starved of frames.
+    slot_.discard();
   }
 
   bool next(Frame& out, std::chrono::milliseconds timeout) override {
     if (!running_) return false;
-    std::unique_lock<std::mutex> lock(mutex_);
-    // Only the first frame is worth waiting for. Once one is held, waiting for a
-    // newer one spends the caller's whole timeout before handing back what was
-    // already available -- and on real hardware that showed up as capture
-    // running at 24 fps against a 60 Hz stream, every frame up to 100 ms stale,
-    // because a compositor emits nothing at all while the screen is still. The
-    // raster cycle is what paces these calls, so returning immediately cannot
-    // spin.
-    if (!pendingCount_)
-      cv_.wait_for(lock, timeout, [this] {
-        return failure_.has_value() || pendingCount_ > 0;
-      });
-    if (failure_) {
-      const auto reported = *failure_;
-      failure_.reset();
-      lock.unlock();
-      running_ = false;
-      if (error_) error_(reported);
-      return false;
+    switch (slot_.next(out, timeout)) {
+      case FrameDelivery::Delivered:
+        return true;
+      case FrameDelivery::Empty:
+        return false;
+      case FrameDelivery::Failed:
+        break;
     }
-    // Nothing has arrived at all yet: the compositor has not produced its first
-    // frame, and there is no previous one to stand in for it.
-    if (!pendingCount_) return false;
-    // A compositor produces a frame only when the screen changes, so a still
-    // desktop legitimately has nothing new. Handing back the last frame again
-    // keeps the MiSTer refreshing at the modeline rate, which is exactly what
-    // X11 capture does when it re-reads unchanged pixels. The copy is what pays
-    // for it: the frame stays here so it can be delivered more than once.
-    out.width = pending_.width;
-    out.height = pending_.height;
-    out.stride = pending_.stride;
-    out.bgra.resize(pending_.bgra.size());
-    std::memcpy(out.bgra.data(), pending_.bgra.data(), pending_.bgra.size());
-    deliveredCount_ = pendingCount_;
-    out.sequence = ++sequence_;
-    return true;
+    // Reported here rather than from the callback that recorded it: X11 capture
+    // reports through the capture thread inside next(), and the session's error
+    // handling is written for that one caller.
+    const auto failure = slot_.takeFailure();
+    running_ = false;
+    if (error_ && failure) error_(*failure);
+    return false;
   }
 
   void stop() noexcept override {
     running_ = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      cv_.notify_all();
-    }
+    slot_.stop();
+    formatReady_.notify_all();
     teardownPipeWire();
     portal_.close();
     std::lock_guard<std::mutex> lock(mutex_);
     negotiated_ = false;
-    failure_.reset();
     error_ = {};
   }
 };

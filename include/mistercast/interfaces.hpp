@@ -62,14 +62,12 @@ CaptureBackend resolveCaptureBackend(CaptureBackend requested,
 // start() fails with a message naming the missing build dependencies.
 bool portalCaptureAvailable() noexcept;
 struct PortalCaptureOptions {
-  CapturePreference preference{CapturePreference::Monitor};
   // A token from a previous grant. When the portal accepts it, capture starts
   // without a picker dialog; when it rejects it, the picker is shown instead.
   std::string restoreToken;
   // Called with the token the portal issued for this grant, from start(), so
   // the caller can persist it. Empty when the portal granted none.
   std::function<void(const std::string&)> onRestoreToken;
-  bool embedCursor{false};
 };
 std::unique_ptr<IVideoCapture> makePortalCapture(PortalCaptureOptions = {});
 // Portal options wired to a token file: the stored grant is offered to the

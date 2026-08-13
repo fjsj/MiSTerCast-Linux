@@ -81,6 +81,7 @@ mistercast_add_test_suite(core GTEST_MAIN LABEL unit SOURCES
   core/transform_tests.cpp
   core/udp_pacing_tests.cpp
   core/capture_backend_tests.cpp
+  core/frame_slot_tests.cpp
   support/capture_gate_tests.cpp)
 
 mistercast_add_test_suite(transport GTEST_MAIN LABEL unit TIMEOUT 300 SOURCES
@@ -100,12 +101,6 @@ target_compile_definitions(mistercast-cli-tests PRIVATE
   MISTERCAST_EXECUTABLE="$<TARGET_FILE:mistercast>")
 if(Qt6_FOUND)
   target_compile_definitions(mistercast-cli-tests PRIVATE MISTERCAST_HAVE_QT=1)
-endif()
-if(PIPEWIRE_FOUND AND SDBUS_FOUND)
-  # The monitor commands answer differently on a Wayland session depending on
-  # whether the portal backend was built, so the suite has to know which.
-  target_compile_definitions(mistercast-cli-tests PRIVATE
-    MISTERCAST_HAVE_PORTAL=1)
 endif()
 add_dependencies(mistercast-cli-tests mistercast)
 

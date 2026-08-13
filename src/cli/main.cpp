@@ -245,8 +245,9 @@ int main(int argc, char** argv) {
                  "at roughly 3-5x the bandwidth.\n";
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
+  const auto backend = activeBackend(c.source.captureBackend);
   PortalCaptureOptions portal;
-  if (activeBackend(c.source.captureBackend) == CaptureBackend::Portal) {
+  if (backend == CaptureBackend::Portal) {
     // The grant is remembered as soon as the portal issues one, so only the
     // first run has to be answered. It is cached permission state rather than a
     // setting, so --save has no say in it.
@@ -257,8 +258,7 @@ int main(int argc, char** argv) {
       std::cerr << "Waiting for the desktop screen-sharing dialog; choose a "
                    "screen and allow sharing.\n";
   }
-  StreamSession session(makeVideoCapture(c.source.captureBackend,
-                                         std::move(portal)));
+  StreamSession session(makeVideoCapture(backend, std::move(portal)));
   std::string e;
   if (!session.start(
           c, MonitorCaptureSource{c.source.monitor},

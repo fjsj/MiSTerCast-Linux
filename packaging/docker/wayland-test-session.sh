@@ -106,6 +106,11 @@ await 'the ScreenCast portal' \
              org.freedesktop.portal.ScreenCast' || exit 77
 log 'ScreenCast portal is answering'
 
+# The portal suites refuse to run without this, so that a plain ctest on a
+# developer's Wayland desktop can never capture their screen or stop to ask for
+# it. This rig is the one place where granting is expected.
+export MISTERCAST_PORTAL_TESTS=1
+
 status=0
 "$@" || status=$?
 # Printed on failure only, so a passing run stays readable but a failing one

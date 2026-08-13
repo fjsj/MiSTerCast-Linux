@@ -45,11 +45,6 @@ class PortalScreenCast {
     // When the portal accepts this token the grant is restored silently; when it
     // rejects it, the picker is shown as if there had been no token.
     std::string restoreToken;
-    bool embedCursor{false};
-    // Only Start can show a dialog, so it is the only step allowed to wait for
-    // a person. The rest must answer promptly or something is wrong.
-    std::chrono::milliseconds pickerTimeout{std::chrono::minutes(2)};
-    std::chrono::milliseconds callTimeout{std::chrono::seconds(15)};
   };
 
   bool open(const Request&, PortalStream&, SessionError&);

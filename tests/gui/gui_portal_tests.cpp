@@ -12,10 +12,11 @@
 
 #include "gui_test_support.hpp"
 #include "mistercast/interfaces.hpp"
+#include "support/portal_session.hpp"
 
 using namespace mistercast;
 using namespace mistercast::test;
-using testing::HasSubstr;
+using mistercast::test::portalSessionSkipCode;
 
 namespace {
 
@@ -132,26 +133,7 @@ TEST_F(GuiPortal, StoresAnyGrantThePortalIssuesUserOnly) {
 int main(int argc, char** argv) {
   ::setenv("QT_QPA_PLATFORM", "offscreen", 1);
   ::testing::InitGoogleTest(&argc, argv);
-  if (!portalCaptureAvailable()) {
-    std::fputs("GUI portal tests skipped: built without libpipewire/libsystemd\n",
-               stderr);
-    return 77;
-  }
-  if (resolveCaptureBackend(CaptureBackend::Auto,
-                            SessionEnvironment::current()) !=
-          CaptureBackend::Portal ||
-      !std::getenv("DBUS_SESSION_BUS_ADDRESS")) {
-    std::fputs("GUI portal tests skipped: not a Wayland session with a portal\n",
-               stderr);
-    return 77;
-  }
-  if (std::getenv("MISTERCAST_RIG_NO_SCREENCAPTURE") ||
-      std::getenv("MISTERCAST_RIG_NO_SCREENCOPY")) {
-    std::fputs("GUI portal tests skipped: this portal backend cannot capture "
-               "headlessly\n",
-               stderr);
-    return 77;
-  }
+  if (const int skip = portalSessionSkipCode("GUI portal tests")) return skip;
   QApplication application(argc, argv);
   return RUN_ALL_TESTS();
 }

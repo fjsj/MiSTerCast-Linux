@@ -30,6 +30,21 @@ namespace {
 ProcessResult run(std::vector<std::string> arguments,
                   ProcessOptions options = {}) {
   arguments.insert(arguments.begin(), MISTERCAST_EXECUTABLE);
+  // Every case runs in an X11 session unless it says otherwise. Backend
+  // selection reads the session, so on a Wayland desktop an unpinned case would
+  // reach the real ScreenCast portal and ask the person running the suite to
+  // share their screen. Cases that mean to describe a Wayland session set these
+  // themselves and keep their own values.
+  const bool describesSession = std::any_of(
+      options.environment.begin(), options.environment.end(),
+      [](const std::pair<std::string, std::string>& variable) {
+        return variable.first == "WAYLAND_DISPLAY" ||
+               variable.first == "XDG_SESSION_TYPE";
+      });
+  if (!describesSession)
+    options.environment.insert(
+        options.environment.begin(),
+        {{"WAYLAND_DISPLAY", ""}, {"XDG_SESSION_TYPE", "x11"}});
   return runProcess(arguments, std::move(options));
 }
 
@@ -42,18 +57,6 @@ ProcessOptions withEnvironment(
   options.environment = std::move(variables);
   options.timeout = timeout;
   return options;
-}
-
-// The monitor commands describe the X11 backend, and backend selection reads the
-// session environment, so the X11 cases pin that environment instead of
-// inheriting whatever session the suite runs in -- the Wayland test rig in
-// packaging/docker/ runs this suite too, and there the inherited answer is the
-// portal.
-ProcessOptions inX11Session(
-    std::vector<std::pair<std::string, std::string>> variables = {}) {
-  variables.insert(variables.begin(), {{"WAYLAND_DISPLAY", ""},
-                                       {"XDG_SESSION_TYPE", "x11"}});
-  return withEnvironment(std::move(variables));
 }
 
 bool displayAvailable() {
@@ -106,7 +109,7 @@ TEST(Cli, ListsTheBundledModelinesWithoutNeedingADisplay) {
 
 TEST(Cli, ListMonitorsAndCheckExplainAMissingDisplay) {
   for (const char* command : {"list-monitors", "check"}) {
-    const auto result = run({command}, inX11Session({{"DISPLAY", ""}}));
+    const auto result = run({command}, withEnvironment({{"DISPLAY", ""}}));
     EXPECT_TRUE(result.exitedWith(1)) << command;
     EXPECT_THAT(result.err, HasSubstr("DISPLAY"));
   }
@@ -114,7 +117,7 @@ TEST(Cli, ListMonitorsAndCheckExplainAMissingDisplay) {
 
 TEST(Cli, ListsMonitorsOnTheCurrentDisplay) {
   if (!displayAvailable()) GTEST_SKIP() << "no X11 display available";
-  const auto result = run({"list-monitors"}, inX11Session());
+  const auto result = run({"list-monitors"}, ProcessOptions{});
   ASSERT_TRUE(result.exitedWith(0)) << result.err;
   // name<TAB>WIDTHxHEIGHT+X+Y, one line per monitor. Whether any is flagged
   // primary depends on the server, so only the shape is asserted.
@@ -134,7 +137,7 @@ TEST(Cli, CheckReportsCaptureHealthAndTheConfigurationPath) {
   if (!displayAvailable()) GTEST_SKIP() << "no X11 display available";
   const TemporaryDirectory directory("cli-check");
   const auto result = run(
-      {"check"}, inX11Session({{"XDG_CONFIG_HOME", directory.path().string()}}));
+      {"check"}, withEnvironment({{"XDG_CONFIG_HOME", directory.path().string()}}));
   ASSERT_TRUE(result.exitedWith(0)) << result.err;
   EXPECT_THAT(result.out, HasSubstr("X11 capture: OK"));
   EXPECT_THAT(result.out,
@@ -161,19 +164,23 @@ TEST(Cli, StreamingThroughThePortalReportsWhyItCouldNotStart) {
   EXPECT_TRUE(result.exitedWith(1)) << result.out;
   EXPECT_THAT(result.err, HasSubstr("screen-sharing dialog"))
       << "the first run has to say that something is waiting to be answered";
-#ifdef MISTERCAST_HAVE_PORTAL
-  EXPECT_THAT(result.err, HasSubstr("session bus"));
-  EXPECT_THAT(result.err, HasSubstr("Hint:")) << "the hint is the actionable half";
-#else
-  EXPECT_THAT(result.err, HasSubstr("no Wayland screen capture"));
-  EXPECT_THAT(result.err, HasSubstr("libpipewire"));
-#endif
+  // Asked at runtime rather than at compile time: the binary under test answers
+  // for itself, and the suite needs no build-system plumbing to know which build
+  // it is looking at.
+  if (portalCaptureAvailable()) {
+    EXPECT_THAT(result.err, HasSubstr("session bus"));
+    EXPECT_THAT(result.err, HasSubstr("Hint:"))
+        << "the hint is the actionable half";
+  } else {
+    EXPECT_THAT(result.err, HasSubstr("no Wayland screen capture"));
+    EXPECT_THAT(result.err, HasSubstr("libpipewire"));
+  }
 }
 
 TEST(Cli, RejectsABackendItDoesNotHave) {
   const auto result = run({"stream", "--target", "127.0.0.1", "--backend",
                            "xorg"},
-                          inX11Session());
+                          ProcessOptions{});
   EXPECT_TRUE(result.exitedWith(2)) << result.out;
   EXPECT_THAT(result.err, HasSubstr("auto, x11, or portal"));
 }
@@ -232,15 +239,15 @@ TEST(Cli, MarksThePrimaryMonitorWhenTheServerReportsOne) {
   if (!nested.ready()) GTEST_SKIP() << "a nested Xvfb could not be started";
 
   const auto result =
-      run({"list-monitors"}, inX11Session({{"DISPLAY", nested.display()}}));
+      run({"list-monitors"}, withEnvironment({{"DISPLAY", nested.display()}}));
   ASSERT_TRUE(result.exitedWith(0)) << result.err;
   EXPECT_THAT(result.out, HasSubstr("X11-screen-0\t112x84+0+0 (primary)"));
 
   const TemporaryDirectory directory("cli-primary-check");
   const auto checked =
-      run({"check"}, inX11Session({{"DISPLAY", nested.display()},
-                                   {"XDG_CONFIG_HOME",
-                                    directory.path().string()}}));
+      run({"check"}, withEnvironment({{"DISPLAY", nested.display()},
+                                     {"XDG_CONFIG_HOME",
+                                      directory.path().string()}}));
   EXPECT_TRUE(checked.exitedWith(0)) << checked.err;
   EXPECT_THAT(checked.out, HasSubstr("X11 capture: OK"));
 }

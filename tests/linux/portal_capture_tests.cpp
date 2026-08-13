@@ -10,27 +10,20 @@
 
 #include "mistercast/interfaces.hpp"
 #include "mistercast/transform.hpp"
+#include "support/portal_session.hpp"
 
 using namespace mistercast;
+using mistercast::test::portalSessionSkipCode;
 
 namespace {
 
-// These tests drive the real ScreenCast portal on a real compositor, because
-// there is nothing worth testing in a fake one: the parts that break are the
-// handshake a portal actually answers, the format a compositor actually
-// negotiates, and the buffers PipeWire actually delivers -- a mapping that
-// faulted only because a real producer left SPA_DATA_FLAG_READABLE unset is the
-// example. The session is the headless rig in packaging/docker/: sway on
-// software GL, PipeWire, and xdg-desktop-portal-wlr with its picker disabled so
-// Start can be answered without a person. Outside that rig the whole binary
-// exits 77 and CTest records a skip, the same way the x11 and pulse-audio
-// suites do.
+// Drives the real ScreenCast portal on a real compositor. A fake one would prove
+// nothing: what breaks is the handshake a portal answers and the buffers PipeWire
+// delivers. The session is the rig in packaging/docker/, described in AGENTS.md.
 //
-// The rig's output size is not asserted anywhere here: it comes from the
-// compositor, so the tests check frames against what the portal reported rather
-// than against a constant that would break when the rig changes. Crop geometry
-// and BGRA byte order are covered exhaustively by the cropToBgra tests in the
-// core suite; what only this rig can show is that the whole path agrees.
+// No test asserts the rig's output size, because the compositor decides it; each
+// checks frames against what the portal reported. Crop geometry and BGRA byte
+// order are covered by the cropToBgra tests in the core suite.
 
 constexpr auto kFrameTimeout = std::chrono::milliseconds(2000);
 
@@ -252,35 +245,6 @@ TEST(PortalCapture, ReportsAnUnsupportedSourceKindInsteadOfHanging) {
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
-  if (!portalCaptureAvailable()) {
-    std::fputs("Wayland tests skipped: built without libpipewire/libsystemd\n",
-               stderr);
-    return 77;
-  }
-  // Selection is what decides whether a portal is worth trying at all, so the
-  // suite skips on exactly the condition that would make the backend unusable
-  // in production rather than on a probe of its own.
-  if (resolveCaptureBackend(CaptureBackend::Auto,
-                            SessionEnvironment::current()) !=
-      CaptureBackend::Portal) {
-    std::fputs("Wayland tests skipped: not running in a Wayland session\n",
-               stderr);
-    return 77;
-  }
-  if (!std::getenv("DBUS_SESSION_BUS_ADDRESS")) {
-    std::fputs("Wayland tests skipped: no session bus to reach a portal on\n",
-               stderr);
-    return 77;
-  }
-  // Set by the test rig when its own portal backend cannot stream in the
-  // environment it is running in; see packaging/docker/wayland-test-session.sh.
-  // Nothing a desktop portal does is being excused here -- the rig is saying it
-  // cannot host the test at all.
-  if (std::getenv("MISTERCAST_RIG_NO_SCREENCOPY")) {
-    std::fputs("Wayland tests skipped: this session's portal backend cannot "
-               "capture headlessly\n",
-               stderr);
-    return 77;
-  }
+  if (const int skip = portalSessionSkipCode("Wayland tests")) return skip;
   return RUN_ALL_TESTS();
 }

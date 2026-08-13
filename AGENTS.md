@@ -80,12 +80,17 @@ one and never reaches the network. Sources mirror `src/`, with shared fakes in
   point a test at the developer's sound server: the silent-output feature moves
   the default sink and live playback streams, which would reroute whatever the
   machine is playing.
-- The same rule covers the screen. A test outside the `wayland` suite must never
-  reach a real ScreenCast portal: on a developer's desktop, with a grant already
-  stored, `start()` *succeeds* and captures whoever is running the suite. The
-  cases that exercise the portal option wiring point
+- The same rule covers the screen, and it is enforced two ways rather than left
+  to each case. `MISTERCAST_PORTAL_TESTS=1` is required before any suite will
+  reach a real portal, and only the rig sets it; and the `cli` suite's `run()`
+  helper pins every case to an X11 session unless the case itself describes a
+  Wayland one. Both exist because a plain `ctest` on a Wayland desktop otherwise
+  captures the screen of whoever ran it, or stops to ask them for it -- with a
+  grant already stored, `start()` simply succeeds. This is not hypothetical; it
+  happened, twice.
+- The cases that exercise portal option wiring without a portal point
   `DBUS_SESSION_BUS_ADDRESS` at a path with nothing on it, which also makes them
-  deterministic everywhere. This was not hypothetical -- it happened.
+  deterministic everywhere.
 - Anything this suite forks (Xvfb, pulseaudio) must redirect its stdio to
   `/dev/null` and call `setsid()`. A forked daemon holding the test binary's
   stdout keeps ctest waiting for EOF long after the tests have finished.
@@ -204,12 +209,13 @@ with `packaging/docker/wayland-test.sh [release] [ctest-regex]`.
   buffers, so `next()` re-delivers the last frame; and a crop change applies to
   the next frame produced, so the held frame is dropped rather than handed back at
   a geometry the caller has stopped expecting.
-- Only the first frame is worth waiting for in `next()`. Waiting for a *newer* one
+- The push-to-pull rules live in `FrameSlot` (`include/mistercast/frame_slot.hpp`),
+  not in the PipeWire code, so they are tested in the `core` suite without a
+  compositor. Only the first frame is worth waiting for: waiting for a *newer* one
   spends the caller's whole timeout before handing back a frame that was already
   there, and on real hardware that showed as `capture 24 fps` against a 60 Hz
-  `video`, every frame up to 100 ms stale. The raster cycle paces these calls, so
-  returning immediately cannot spin. Watch `capture` against `video` in the
-  counters: they should track each other.
+  `video`. Watch `capture` against `video` in the counters; they should track each
+  other.
 - `sd_bus_open_user()` can return before the connection has authenticated, and
   until it has there is no unique name. One round trip (a `Peer.Ping`) forces it.
   Without that, `sd_bus_get_unique_name` fails, every Request path is built as
